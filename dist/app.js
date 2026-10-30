@@ -78,13 +78,25 @@ async function render({focus = true} = {}) {
   const path = currentPath();
   const parts = path.split('/').filter(Boolean);
   const head = parts[0] || 'camera';
-  const role = viewer().role;
+  let role = viewer().role;
 
-  // Server mode: the demonstration workspaces hold only browser-local sample data, so they must never
-  // stand in for server complaints. Officials go to the staff console, residents to their reports.
+  // Server mode: the workspaces must never show browser-local sample data in place of server complaints.
+  // The admin workspace needs a server staff session (kept in memory only) and then reads server
+  // complaints; residents go to their reports; a case opens in the staff console.
   if (['official', 'resident', 'issue'].includes(head) && await reportMode() === 'backend') {
     if (seq !== renderSeq) return;
-    const target = serverModeRoute(parts);
+    const staff = staffSession.get();
+    if (head === 'official') {
+      if (!staff) {
+        if (role === 'official') setSession(null);  // a demo or expired identity must not open the workspace
+        return navigate('login/official');
+      }
+      if (role !== 'official' || !state.session?.server) {
+        setSession({role: 'official', name: staff.staff.displayName, email: staff.staff.username, server: true});
+        role = 'official';
+      }
+    }
+    const target = serverModeRoute(parts, {staff: !!staff});
     if (target) return navigate(target);
   }
 

@@ -51,11 +51,15 @@ let renderer = null;
 export function setRenderer(fn) { renderer = fn; }
 export function rerender() { return renderer?.(); }
 
-/** Where a demonstration-workspace route leads in server mode, or null to keep it. */
-export function serverModeRoute(parts) {
+/**
+ * Where a workspace route leads in server mode, or null to keep it. The admin workspace stays (its screens
+ * read server complaints for signed-in staff); a case opens in the staff console, which streams the
+ * private evidence. Resident screens hold only browser-local sample data, so residents go to My reports.
+ */
+export function serverModeRoute(parts, {staff = false} = {}) {
   const [head, second] = parts;
-  if (head === 'official') return second === 'video-review' ? null : 'staff';  // video review never leaves this browser
+  if (head === 'official') return null;
   if (head === 'resident') return second === 'notifications' ? 'notifications' : 'my-reports';
-  if (head === 'issue') return second ? 'track/' + second : 'my-reports';
+  if (head === 'issue') return second ? (staff ? 'staff/' : 'track/') + second : (staff ? 'staff' : 'my-reports');
   return null;
 }

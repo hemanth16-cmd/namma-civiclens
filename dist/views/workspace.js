@@ -5,11 +5,25 @@ import {state, viewer, setSession, readPrefs, writePrefs, readLastRead, writeLas
 import {navigate} from '../router.js';
 import {filterRecords, sortRecords, readFilters} from '../filters.js';
 import {mountCityMap} from './map.js';
+import {workspaceRecords, usesServerRecords, dailyActivity} from '../server-records.js';
+import {staffSession} from '../staff-session.js';
+import {endStaffSession} from './staff.js';
+import {ApiError} from '../api-client.js';
 
 const isAdmin = () => viewer().role === 'official';
 
 export async function loadRecords() {
-  state.records = await api.list(viewer());
+  try {
+    state.records = await workspaceRecords(viewer());
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {  // server mode: the staff session ended
+      staffSession.clear();
+      setSession(null);
+      navigate('login/official');
+      throw new Error('Your staff session has ended. Sign in again.');
+    }
+    throw err;
+  }
   return state.records;
 }
 
@@ -19,9 +33,11 @@ function mount(root, title, body) {
 }
 
 export function wireWorkspace(root) {
-  root.querySelector('[data-action="logout"]').onclick = () => {
+  root.querySelector('[data-action="logout"]').onclick = async () => {
+    const server = state.session?.server === true;
+    if (server) await endStaffSession();  // revokes the server session and staff push on this device
     setSession(null);
-    toast('You have signed out of this demonstration workspace.');
+    toast(server ? 'Signed out of CivicLens staff.' : 'You have signed out of this demonstration workspace.');
     navigate('home');
   };
 }
@@ -61,6 +77,7 @@ export async function renderOverview(root) {
   const v = viewer();
   const admin = isAdmin();
   const records = await loadRecords();
+  const server = admin && await usesServerRecords();
   if (admin) {
     const open = records.filter(r => r.status !== 'Marked Resolved');
     const needsReview = records.filter(r => ['Submitted', 'Under Review'].includes(r.status));
@@ -69,7 +86,9 @@ export async function renderOverview(root) {
     const ranked = sortRecords(records.map(r => ({...r, priority: r.priority ?? assessPriority(r)})), 'priority').slice(0, 6);
     mount(root, 'Overview', `
       ${heading({eyebrow: 'City operations', title: 'Operational overview', lead: 'Cases needing review, disputed repairs and the next actions for your teams.', actions: link(icon('pin') + '<span>Open city map</span>', '#/official/map', 'secondary')})}
-      ${notice('Sample incidents and the activity series are illustrative. Browser-local reports appear alongside them. No municipal system is connected.', 'info', 'alert')}
+      ${server
+        ? notice(`Showing <strong>${records.length}</strong> ${records.length === 1 ? 'complaint' : 'complaints'} stored on the CivicLens server. Status changes, assignment and work orders arrive with server-side complaint management; until then cases are read-only here. Open a case to view its evidence.`, 'info', 'alert')
+        : notice('Sample incidents and the activity series are illustrative. Browser-local reports appear alongside them. No municipal system is connected.', 'info', 'alert')}
       <div class="stats" role="list">
         ${stat('Total cases', records.length, 'Across the workspace')}
         ${stat('Awaiting first review', needsReview.length, 'Submitted or under review', 'stat-navy')}
@@ -82,7 +101,7 @@ export async function renderOverview(root) {
           <p class="micro">Scores are illustrative baselines from documented inputs. They support, not replace, emergency procedures.</p>`, 'panel-main')}
         <div class="stack">
           ${panel(`${panelHead('City map', link('Open map', '#/official/map', 'ghost'))}<div class="map-compact" id="overview-map"></div>`)}
-          ${panel(`${panelHead('Reporting activity', badgeSample())}${sampleChart()}`)}
+          ${panel(server ? `${panelHead('Reporting activity', '<span class="pill">Server data</span>')}${activityChart(records)}` : `${panelHead('Reporting activity', badgeSample())}${sampleChart()}`)}
         </div>
       </div>`);
   } else {
@@ -117,6 +136,14 @@ export async function renderOverview(root) {
 function badgeSample() {
   return '<span class="pill">Illustrative sample</span>';
 }
+/** Complaints received per day over the last 12 days, from server records (measured, not illustrative). */
+function activityChart(records) {
+  const days = dailyActivity(records);
+  const peak = Math.max(1, ...days.map(d => d.count));
+  const total = days.reduce((a, d) => a + d.count, 0);
+  return `<figure class="chart" aria-label="Complaints received per day over the last 12 days: ${total} in total"><div class="chart-bars">${days.map(d => `<div class="chart-bar" style="height:${Math.max(4, Math.round(d.count / peak * 100))}%" title="${esc(d.day)}: ${d.count}"><span>${esc(d.day.slice(8))}</span></div>`).join('')}</div><figcaption class="micro">${total} ${total === 1 ? 'complaint' : 'complaints'} received in the last 12 days (UTC dates), from the CivicLens server.</figcaption></figure>`;
+}
+
 function sampleChart() {
   const bars = [40, 65, 51, 84, 70, 92, 64, 78, 58, 86, 100, 73];
   const labels = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'];
@@ -273,6 +300,7 @@ export function renderSettings(root) {
 // ---------- Work orders (admin) ----------
 export async function renderWorkOrders(root) {
   const records = await loadRecords();
+  if (await usesServerRecords()) return renderServerWorkOrders(root, records);
   const cases = await Promise.all(records.map(r => api.detail(r.id, viewer())));
   const orders = cases.flatMap(c => (c?.workOrders || []).map(w => ({...w, caseId: c.id, title: c.title, status_: c.status})));
   const today = new Date().toISOString().slice(0, 10);
@@ -315,6 +343,20 @@ export async function renderWorkOrders(root) {
       document.getElementById('work-error').innerHTML = notice(esc(err.message), 'error', 'alert');
     }
   };
+}
+
+// Server mode: work orders do not exist on the server yet (they arrive with complaint management), so
+// nothing is created in the browser for a server complaint. The queue of cases awaiting assignment is real.
+function renderServerWorkOrders(root, records) {
+  const awaiting = records.filter(r => ['Submitted', 'Under Review'].includes(r.status));
+  mount(root, 'Work orders', `
+    ${heading({eyebrow: 'From insight to action', title: 'Work orders', lead: 'Assign a responsible team and a target date, and follow each order to completion.'})}
+    ${notice('<strong>Not available on the server yet.</strong> Work orders, assignment and status changes are part of server-side complaint management, which is still being built. Nothing is created in this browser for a server complaint, so no change here could be lost or contradict the server.', 'info', 'alert')}
+    <div class="split mt">
+      ${panel(`${panelHead('Awaiting assignment', '', 'Submitted or under review on the server')}
+        ${awaiting.length ? `<ul class="issue-list">${awaiting.slice(0, 12).map(issueRow).join('')}</ul>` : '<p class="micro">Nothing is waiting for assignment.</p>'}`, 'panel-main')}
+      ${panel(`${panelHead('Open and closed work orders')}${empty('No server work orders yet', 'They will appear here once complaint management is deployed on the server.')}`)}
+    </div>`);
 }
 
 export {isAdmin, fmtDate, btn, link, panel, panelHead, notice, empty, icon, statusPill, verificationPill, priorityPill};

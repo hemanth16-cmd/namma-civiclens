@@ -1,6 +1,7 @@
 // Intelligence studio (admin only). Every technique carries one of four honest status labels.
 // Priority is an implemented, tested baseline formula fed by illustrative inputs.
 import {api, esc, categories, PRIORITY_WEIGHTS} from '../services.js';
+import {workspaceRecords} from '../server-records.js';
 import {icon, workspaceShell, heading, notice, panel, panelHead, pill, priorityPill, toast, fmtDate} from '../ui.js';
 import {viewer} from '../state.js';
 import {state} from '../state.js';
@@ -18,7 +19,7 @@ const STATUS = {
 const statusPillFor = key => pill(STATUS[key][0], STATUS[key][2], STATUS[key][1]);
 
 export async function renderIntelligence(root) {
-  const records = await api.list(viewer());
+  const records = await workspaceRecords(viewer());
   const tabs = `<div class="tablist" role="tablist" aria-label="Intelligence views">${TABS.map(([id, label]) => `<button type="button" role="tab" id="tab-${id}" aria-controls="intel-panel" aria-selected="${activeTab === id}" tabindex="${activeTab === id ? 0 : -1}" data-tab="${id}">${label}</button>`).join('')}</div>`;
   root.innerHTML = workspaceShell({title: 'Intelligence studio', body: `
     ${heading({eyebrow: 'Decision support · illustrative', title: 'Intelligence studio', lead: 'Each technique has one defined job, a required evidence base and an honest status. Nothing here is a validated city forecast or an automated detection.'})}

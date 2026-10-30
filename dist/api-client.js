@@ -161,7 +161,8 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
         items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
           id: i.id, category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
           verification: String(i.verification ?? ''), created: i.created ?? null, updated: i.updated ?? null,
-          mediaType: i.mediaType === 'video' ? 'video' : 'photo', hasEvidence: i.hasEvidence === true
+          mediaType: i.mediaType === 'video' ? 'video' : 'photo', hasEvidence: i.hasEvidence === true,
+          title: String(i.title ?? ''), department: String(i.department ?? ''), gps: toListGps(i.gps)
         }))
       };
     },
@@ -287,6 +288,13 @@ function toDevice(d) {
 }
 
 const EVIDENCE_TYPES = ['image/jpeg', 'video/webm', 'video/mp4'];
+
+/** Staff-list location for the admin map; null unless both coordinates are valid. */
+function toListGps(g) {
+  if (!g || !Number.isFinite(g.lat) || !Number.isFinite(g.lng) || Math.abs(g.lat) > 90 || Math.abs(g.lng) > 180) return null;
+  return {lat: g.lat, lng: g.lng, accuracy: Number.isFinite(g.accuracy) && g.accuracy >= 0 ? g.accuracy : null,
+    sourceType: SOURCE_TYPES.includes(g.sourceType) ? g.sourceType : null};
+}
 const staffAuth = token => ({Authorization: 'Bearer ' + token});
 
 /** Operational projection for staff. Only known fields are copied; no claim, token or storage data exists to copy. */

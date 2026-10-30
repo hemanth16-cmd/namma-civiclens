@@ -5,7 +5,7 @@
 
 import {esc} from '../services.js';
 import {icon, btn, heading, notice, publicTopbar, statusPill, verificationPill, fmtDate, fmtDateTime, coords, toast} from '../ui.js';
-import {addCleanup} from '../state.js';
+import {addCleanup, state, setSession} from '../state.js';
 import {navigate} from '../router.js';
 import {loadApiConfig} from '../api-config.js';
 import {ApiError, createApiClient} from '../api-client.js';
@@ -110,7 +110,8 @@ async function renderStaffNotifications(root, http) {
 }
 
 async function renderList(root, http) {
-  page(root, `${heading({eyebrow: 'CivicLens staff · server', title: 'Server complaints', lead: 'Complaints stored on the CivicLens server, newest first. Reports kept in local mode on residents’ devices are not here.'})}
+  page(root, `${heading({eyebrow: 'CivicLens staff · server', title: 'Server complaints', lead: 'Complaints stored on the CivicLens server, newest first. Reports kept in local mode on residents’ devices are not here.',
+    actions: `<a class="btn btn-secondary" href="#/official" id="staff-open-dashboard">${icon('dashboard')}<span>Dashboard</span></a> <a class="btn btn-secondary" href="#/official/map">${icon('pin')}<span>City map</span></a>`})}
     <div id="staff-list" role="status" aria-live="polite"><p class="micro">Loading complaints…</p></div>`, {signedIn: true});
   const slot = $('staff-list');
   try {
@@ -141,7 +142,7 @@ async function renderList(root, http) {
 
 async function renderDetail(root, http, publicId) {
   if (!SAMPLE.test(publicId)) return navigate('staff');
-  page(root, `<p><a class="inline-link" href="#/staff">${icon('back', 'mini-icon')}<span>All server complaints</span></a></p>
+  page(root, `<p><a class="inline-link" href="#/staff">${icon('back', 'mini-icon')}<span>All server complaints</span></a> · <a class="inline-link" href="#/official">${icon('dashboard', 'mini-icon')}<span>Dashboard</span></a> · <a class="inline-link" href="#/official/map">${icon('pin', 'mini-icon')}<span>City map</span></a></p>
     <div id="staff-detail" role="status" aria-live="polite"><p class="micro">Loading ${esc(publicId)}…</p></div>`, {signedIn: true});
   const slot = $('staff-detail');
   let r;
@@ -220,9 +221,11 @@ async function loadAccessLog(root, http, id) {
   }
 }
 
-async function signOut(root) {
+/** Ends the staff session everywhere it is used (console and admin workspace). Never throws. */
+export async function endStaffSession() {
   const session = staffSession.get();
   staffSession.clear();
+  if (state.session?.server) setSession(null);  // the workspace identity came from this staff session
   const http = await client();
   if (session && http) {
     // A signed-out browser (for example a shared computer) must stop receiving staff notifications.
@@ -231,6 +234,11 @@ async function signOut(root) {
     }
     try { await http.staffSignOut(session.token); } catch { /* the in-memory session is gone either way */ }
   }
+  return http;
+}
+
+async function signOut(root) {
+  const http = await endStaffSession();
   toast('Signed out of the staff console.', 'success');
   if (http) renderSignIn(root, http);
 }

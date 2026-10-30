@@ -76,14 +76,64 @@ test('unavailable browser storage never breaks a submission', async () => {
   assert.equal(saved.id, 'NCL-2026-NOSTOR');
 });
 
-test('in server mode, demonstration workspaces never stand in for server data', () => {
-  assert.equal(serverModeRoute(['official']), 'staff');
-  for (const page of ['complaints', 'map', 'workorders', 'intelligence', 'settings']) assert.equal(serverModeRoute(['official', page]), 'staff');
-  assert.equal(serverModeRoute(['official', 'video-review']), null, 'video review keeps footage in this browser only');
+test('in server mode, the admin workspace stays (fed by server data) and residents go to My reports', () => {
+  for (const page of [undefined, 'complaints', 'map', 'workorders', 'intelligence', 'video-review']) {
+    assert.equal(serverModeRoute(page ? ['official', page] : ['official'], {staff: true}), null);
+  }
   assert.equal(serverModeRoute(['resident']), 'my-reports');
   for (const page of ['complaints', 'community', 'map', 'claim', 'settings']) assert.equal(serverModeRoute(['resident', page]), 'my-reports');
   assert.equal(serverModeRoute(['resident', 'notifications']), 'notifications');
-  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123']), 'track/NCL-2026-ABC123');
+  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123'], {staff: true}), 'staff/NCL-2026-ABC123', 'staff open the case with its evidence');
+  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123']), 'track/NCL-2026-ABC123', 'everyone else gets public tracking');
+  assert.equal(serverModeRoute(['issue'], {staff: true}), 'staff');
   assert.equal(serverModeRoute(['issue']), 'my-reports');
   for (const head of ['camera', 'track', 'staff', 'receipt', 'home', 'my-reports']) assert.equal(serverModeRoute([head, 'x']), null);
+});
+
+const {toWorkspaceRecord, loadServerRecords, dailyActivity} = await import('../dist/server-records.js');
+const {createApiClient} = await import('../dist/api-client.js');
+
+const listItem = (n, extra = {}) => ({
+  id: `NCL-2026-${String(n).padStart(6, '0')}`, title: 'Potholes reported by a citizen', category: 'Potholes', area: 'Hebbal',
+  status: 'Submitted', verification: 'Pending Verification', department: 'Awaiting civic review', created: '2026-10-30T04:00:00.000Z',
+  updated: '2026-10-30T04:00:00.000Z', mediaType: 'photo', hasEvidence: true, gps: {lat: 13.03, lng: 77.59, accuracy: 12, sourceType: 'gps'}, ...extra
+});
+
+test('server complaints become workspace rows the dashboard and map can use', () => {
+  const row = toWorkspaceRecord(listItem(1));
+  assert.equal(row.server, true);
+  assert.equal(row.sample, false);
+  assert.deepEqual(row.gps, {lat: 13.03, lng: 77.59, accuracy: 12, sourceType: 'gps'});
+  assert.ok(row.priority && Number.isFinite(row.priority.score), 'the existing baseline priority is shown');
+  assert.equal(toWorkspaceRecord(listItem(2, {title: '', gps: null})).title, 'Potholes reported by a citizen');
+  assert.equal(toWorkspaceRecord(listItem(3, {gps: null})).gps, null);
+});
+
+test('the staff list client keeps valid locations only', async () => {
+  const items = [listItem(1), listItem(2, {gps: {lat: 200, lng: 77}}), listItem(3, {gps: {lat: 'x', lng: 77}}), listItem(4, {gps: null})];
+  const http = createApiClient({baseUrl: 'http://api.test/api/v1', fetchImpl: async () => json(200, {items, total: 4, limit: 100, offset: 0})});
+  const {items: mapped} = await http.listStaffComplaints('t'.repeat(30));
+  assert.deepEqual(mapped.map(i => i.gps && i.gps.lat), [13.03, null, null, null]);
+  assert.equal(mapped[0].title, 'Potholes reported by a citizen');
+  assert.equal(mapped[0].department, 'Awaiting civic review');
+});
+
+test('every server page is loaded, and failures are not hidden', async () => {
+  const all = Array.from({length: 230}, (_, i) => listItem(i));
+  const seen = [];
+  const http = {listStaffComplaints: async (token, {limit, offset}) => { seen.push(offset); return {items: all.slice(offset, offset + limit), total: all.length}; }};
+  const rows = await loadServerRecords(http, 'token');
+  assert.equal(rows.length, 230);
+  assert.deepEqual(seen, [0, 100, 200]);
+  await assert.rejects(loadServerRecords({listStaffComplaints: async () => { throw new Error('timeout'); }}, 'token'), /timeout/);
+});
+
+test('reporting activity counts complaints per day', () => {
+  const now = Date.parse('2026-10-30T12:00:00Z');
+  const rows = [{created: '2026-10-30T01:00:00Z'}, {created: '2026-10-30T09:00:00Z'}, {created: '2026-10-28T09:00:00Z'}, {created: '2026-09-01T00:00:00Z'}];
+  const days = dailyActivity(rows, 12, now);
+  assert.equal(days.length, 12);
+  assert.deepEqual(days.at(-1), {day: '2026-10-30', count: 2});
+  assert.equal(days.find(d => d.day === '2026-10-28').count, 1);
+  assert.equal(days.reduce((a, d) => a + d.count, 0), 3, 'older complaints are outside the window');
 });

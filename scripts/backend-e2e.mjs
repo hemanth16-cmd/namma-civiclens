@@ -305,7 +305,8 @@ if (!STAFF_USERNAME || !STAFF_PASSWORD) {
   const {ctx, page} = await newPage({backend: true});
   check('Staff: anonymous API requests for evidence are refused', (await fetch(`${API}/staff/complaints/${publicId}/evidence`)).status === 401);
   await page.goto(BASE + '/#/login/official');
-  check('Staff: the demo admin sign-in points to the staff console in server mode', await page.waitForFunction(() => /staff console/.test(document.querySelector('.auth-panel')?.textContent || ''), null, {timeout: 5000}).then(() => true, () => false));
+  check('Staff: in server mode the admin sign-in is the server staff sign-in, not the demo login', await page.waitForSelector('[data-server-login]', {timeout: 5000}).then(() => true, () => false)
+    && !(await page.content()).includes('CivicDemo2026'));
   await page.goto(BASE + '/#/staff');
   await page.waitForSelector('#staff-sign-in', {timeout: 8000}).catch(() => {});
   check('Staff: the console asks for a server sign-in', await page.locator('#staff-sign-in').count() === 1);

@@ -145,7 +145,7 @@ export function workspaceShell({title, body}) {
         <a class="nav-item" href="#/home">${icon('home')}<span>Public entry</span></a>
       </div>
       <div class="sidebar-foot">
-        <p class="sidebar-note">Local prototype. Records stay in this browser. Access rules are demonstration guards.</p>
+        <p class="sidebar-note">${state.session?.server ? 'Server workspace. Complaints come from the CivicLens server, which checks every request against your staff session.' : 'Local prototype. Records stay in this browser. Access rules are demonstration guards.'}</p>
         <button type="button" class="btn btn-ghost btn-block" data-action="logout">${icon('logout')}<span>Sign out</span></button>
       </div>
     </aside>
