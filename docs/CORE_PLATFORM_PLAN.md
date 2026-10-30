@@ -1,7 +1,7 @@
 # Namma CivicLens — Core platform development: audit and plan
 
 Branch `feature/core-platform-development`, created from `origin/integration/v52-fullstack` at `dca458e`
-(2026-10-30). Status: **audit and plan only; nothing implemented.** Awaiting approval before Workstream 1.
+(2026-10-30). Status: **plan approved; Workstream 1 implemented and awaiting review** (see §12). Workstreams 2–4 not started.
 
 Scope: our four workstreams only — (1) server-side complaint management, (2) duplicate detection,
 (3) geospatial intelligence, (4) security and product hardening. Out of scope and not touched:
@@ -357,3 +357,19 @@ public Swagger is already producing junk data in production.
 6. Decide how the failing `api-config` test should be resolved.
 7. Supply official ward boundaries (or accept neighbourhood-only summaries for now).
 8. Fix `main`'s deleted `dist/` (repository owner).
+
+---
+
+## 12. Workstream 1 — implementation record (2026-10-30)
+
+Approved decisions as implemented: two state machines (§5.1); roles official/supervisor/admin with department scoping; **Option A** for after-repair evidence (`evidence.role` widened to `repair`, partial unique index on the original); explicit action endpoints (`api-contract.md` §3.2); migration 7 on both engines.
+
+Differences from the plan, and why:
+- The work-order status change is `POST /staff/work-orders/{id}/transitions`, not `PATCH`, because the CORS allowlist has no `PATCH`.
+- History is append-only by design: assignments are rows with no `ended_at`, and the current assignment lives on `complaints`.
+- No notification events are emitted. The notifications table restricts `kind` with a CHECK list owned by the notification work, so new kinds need that owner's agreement (§9).
+- `GET /staff/complaints/{id}` now returns `StaffCase` (a superset of the old response). Officials are scoped to their departments on the list, detail, evidence and access-log routes. Existing accounts are unaffected until departments are created, because unassigned complaints remain visible to every official.
+
+Files: `backend/app/lifecycle.py`, `cases_api.py` (new); `store.py`, `db.py`, `models.py`, `staff_api.py`, `complaints.py`, `errors.py`, `ratelimit.py`, `staff.py`, `main.py`; tests `test_lifecycle.py`, `test_migration_v7.py`, `test_cases_api.py` (new) plus version and fixture updates in `test_evidence.py` and `test_postgres.py`; `dist/api-client.js`, `report-gateway.js`, `views/staff.js`, `views/public.js`; `tests/case-management.test.js`.
+
+Before production: back up Supabase, then deploy. The API applies migration 7 at startup, and a failure rolls the whole migration back. After that, create departments and roles with the CLI.
