@@ -683,6 +683,25 @@ All errors use the shape from `docs/api-contract.md`:
 
 A failed create rolls back completely: no half-written complaint is left behind.
 
+## Deploying on Render
+
+The API runs on Render as one long-lived web service; the static frontend (`dist/`) stays on Vercel. It cannot run as Vercel functions: those reject request bodies over 4.5 MB (evidence is up to 25 MB / 50 MB), and the rate limits and storage quota live in process memory. `../render.yaml` is a Render Blueprint for this setup.
+
+1. **Create the service:** Render → New → Blueprint → this repository. Render reads `render.yaml` (root directory `backend`, `pip install -r requirements.txt`, `python -m app --host 0.0.0.0 --port $PORT`, health check `/api/v1/health`, region Singapore, one instance).
+2. **Fill in the secrets** Render asks for (copy from your local `backend/.env`; never commit them):
+   - `DATABASE_URL`: the Supabase **session pooler** string (`postgres.<ref>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require`). Do not use the direct `db.<ref>.supabase.co` host: it is IPv6-only and Render connects over IPv4.
+   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET` (the private bucket).
+   - `CIVICLENS_CORS_ORIGINS`: the Vercel origin(s), comma-separated, for example `https://<project>.vercel.app`. Each Vercel preview URL is a different origin.
+   - `VAPID_*`: optional; leave empty to keep notifications in history only.
+3. **Check it:** `https://<service>.onrender.com/api/v1/health` returns `{"status":"ok",...}`. Startup stops with an error in the Render log if the bucket is public, the key is wrong, or the bucket's file size limit is below 50 MB.
+4. **Point the frontend at it:** set `../dist/api-config.json` to `{"mode":"backend","baseUrl":"https://<service>.onrender.com/api/v1"}`, commit, and let Vercel redeploy.
+5. **Create a staff account.** Render's free plan has no shell, but the accounts live in Supabase, so run this locally with the same `DATABASE_BACKEND=postgres` and `DATABASE_URL` in your environment: `python -m app.staff create --username <name> --display-name "<Name>"`.
+
+Notes:
+- **Free plan:** the service sleeps after 15 minutes idle and takes up to a minute to wake, which is longer than the frontend's 10 s timeout, so the first report after a pause can fail with "did not answer in time". Use the starter plan for real use.
+- **Client IPs:** `CIVICLENS_TRUSTED_PROXIES=10.0.0.0/8` trusts Render's internal proxy network so per-IP rate limits apply to each visitor rather than to Render's proxy. After deploying, confirm that one client hitting a limit (`429`) does not block another.
+- **One instance only** until rate limiting and the quota move to a shared store.
+
 ## Not included yet
 
 Authentication and sessions, shared (multi-process) rate limiting, claiming complaints, staff operations, repairs, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), staff case updates and work orders on the server, more staff roles, MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (staff case updates do not exist yet), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.

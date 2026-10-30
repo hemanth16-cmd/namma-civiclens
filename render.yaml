@@ -1,0 +1,59 @@
+# Render Blueprint for the Namma CivicLens API (backend/). The frontend (dist/) stays on Vercel.
+# Render -> New -> Blueprint -> pick this repository. Values marked `sync: false` are secrets: Render
+# asks for them when the Blueprint is created and they never live in Git. See backend/README.md,
+# "Deploying on Render".
+services:
+  - type: web
+    name: namma-civiclens-api
+    runtime: python
+    rootDir: backend
+    # Singapore is the closest Render region to both the users (Bengaluru) and the Supabase project.
+    region: singapore
+    # Free instances sleep after 15 minutes idle and take up to a minute to wake, longer than the
+    # frontend's 10 s request timeout, so the first report after a pause can fail. Use starter or
+    # above for anything beyond testing.
+    plan: free
+    # One instance only: rate limits and the storage quota are kept in process memory.
+    numInstances: 1
+    buildCommand: pip install -r requirements.txt
+    # The safe launcher keeps uvicorn's proxy-header handling off; client IPs come from
+    # CIVICLENS_TRUSTED_PROXIES below instead.
+    startCommand: python -m app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.14.3
+      # ---- Database: Supabase PostgreSQL through the IPv4 session pooler (port 5432) ----
+      - key: DATABASE_BACKEND
+        value: postgres
+      - key: DATABASE_URL
+        sync: false
+      # ---- Evidence: private Supabase Storage bucket ----
+      - key: EVIDENCE_STORAGE_BACKEND
+        value: supabase
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        sync: false
+      # ---- Upload limits (25 MB photos, 50 MB videos), matching dist/services.js ----
+      - key: CIVICLENS_MAX_PHOTO_BYTES
+        value: "26214400"
+      - key: CIVICLENS_MAX_VIDEO_BYTES
+        value: "52428800"
+      # ---- Browser access: the Vercel frontend origin(s), comma-separated, no trailing slash ----
+      - key: CIVICLENS_CORS_ORIGINS
+        sync: false
+      # ---- Client IPs: Render's proxy reaches the app from its private 10.0.0.0/8 network and appends
+      # the real client address to X-Forwarded-For. Without this every visitor shares one rate limit.
+      - key: CIVICLENS_TRUSTED_PROXIES
+        value: 10.0.0.0/8
+      # ---- Web Push (optional; leave empty to keep notifications in history only) ----
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
