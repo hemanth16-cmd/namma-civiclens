@@ -59,7 +59,27 @@ export function rerender() { return renderer?.(); }
 export function serverModeRoute(parts, {staff = false} = {}) {
   const [head, second] = parts;
   if (head === 'official') return null;
-  if (head === 'resident') return second === 'notifications' ? 'notifications' : null;  // the shell shows this device's reports
+  if (head === 'resident') return second === 'notifications' ? 'notifications' : null;  // app.js admits only a signed-in server resident
   if (head === 'issue') return staff ? (second ? null : 'official/complaints') : (second ? 'track/' + second : 'resident');
   return null;
+}
+
+/**
+ * Who may open a server-mode workspace route. Pure, so it can be tested: `staff` and `resident` are the
+ * in-memory server sessions (or null) and `session` the display identity from state.js. Returns
+ * {redirect, clear, identity}: `clear` drops the display identity, `identity` replaces it. A URL alone
+ * never grants a role: only a session the server issued does.
+ */
+export function serverWorkspaceAccess(head, {staff = null, resident = null, session = null} = {}) {
+  const role = session?.role ?? 'public';
+  if (head === 'issue' && !staff && session?.server && role === 'official') return {redirect: 'login/official', clear: true};
+  if (head === 'official' || (head === 'issue' && staff)) {
+    if (!staff) return {redirect: 'login/official', clear: role === 'official'};
+    if (role !== 'official' || !session?.server) return {identity: {role: 'official', name: staff.staff.displayName, email: staff.staff.username, server: true}};
+  }
+  if (head === 'resident') {
+    if (!resident) return {redirect: 'login/resident', clear: role === 'resident'};
+    if (role !== 'resident' || !session?.server) return {identity: {role: 'resident', name: resident.resident.displayName, email: resident.resident.email, server: true}};
+  }
+  return {};
 }

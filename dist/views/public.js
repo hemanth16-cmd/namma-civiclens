@@ -15,9 +15,9 @@ export async function renderEntry(root) {
   // Server mode: the two cards lead to the real screens, not the demonstration workspaces.
   const server = await reportMode() === 'backend';
   const residentCard = server
-    ? `<a class="entry-card entry-link" href="#/resident" data-entry="my-reports">
+    ? `<a class="entry-card entry-link" href="#/login/resident" data-entry="resident">
           <span class="entry-icon">${icon('user')}</span>
-          <div><p class="eyebrow">Residents · this device</p><h2>My reports</h2><p>Complaints you submitted from this browser and their current status on the CivicLens server.</p></div>
+          <div><p class="eyebrow">Resident · account sign-in</p><h2>Login as resident</h2><p>Your complaints, claimed reports, neighbourhood issues, notifications and preferences, from your resident account on the CivicLens server.</p></div>
           <span class="entry-go">${icon('forward')}</span>
         </a>`
     : `<a class="entry-card entry-link" href="#/login/resident">
@@ -47,7 +47,7 @@ export async function renderEntry(root) {
       <div class="entry-grid">
         <section class="entry-card entry-track" aria-labelledby="track-title">
           <span class="entry-icon">${icon('search')}</span>
-          <p class="eyebrow">Public · no sign-in</p>
+          <p class="eyebrow">${server ? 'Passerby · public · no sign-in' : 'Public · no sign-in'}</p>
           <h2 id="track-title">Track by problem ID</h2>
           <p>See the public status, responsible department and timeline. Claim codes, reporter details and private evidence never appear here.</p>
           <form class="inline-form" id="entry-track-form" role="search">
@@ -55,6 +55,7 @@ export async function renderEntry(root) {
             <input id="entry-track-id" name="id" autocomplete="off" spellcheck="false" placeholder="${server ? 'NCL-2026-XXXXXX' : 'NCL-2026-DEMO01'}" required>
             <button class="btn btn-primary" type="submit">Track issue</button>
           </form>
+          ${server ? `<p class="row-actions entry-passerby"><a class="inline-link" href="#/camera" data-entry="report">${icon('camera')}<span>Report an issue, no account needed</span></a> <a class="inline-link" href="#/my-reports" data-entry="device-reports">${icon('list')}<span>Reports on This Device</span></a></p>` : ''}
         </section>
         ${residentCard}
         ${adminCard}
@@ -199,7 +200,7 @@ function trackResult(r, signedIn) {
 }
 
 export async function renderLogin(root, role = 'resident', register = false) {
-  if (role === 'official' && await reportMode() === 'backend') return renderServerAdminLogin(root);
+  if (await reportMode() === 'backend') return role === 'official' ? renderServerAdminLogin(root) : renderServerResidentLogin(root, register);
   const official = role === 'official';
   root.innerHTML = `<div class="page">
     ${publicTopbar({fallback: 'home'})}
@@ -223,10 +224,6 @@ export async function renderLogin(root, role = 'resident', register = false) {
       </section>
     </main>
   </div>`;
-  reportMode().then(mode => {
-    if (mode !== 'backend') return;
-    root.querySelector('.auth-panel')?.insertAdjacentHTML('afterbegin', notice('<strong>Server mode:</strong> reports you sent to the CivicLens server are in <a class="inline-link" href="#/resident">your reports</a>. No sign-in is needed.', 'info', 'user'));
-  });
   root.querySelector('#login-form').onsubmit = async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -263,7 +260,7 @@ function renderServerAdminLogin(root) {
           <button class="btn btn-primary btn-block btn-lg" type="submit">Sign in ${icon('forward')}</button>
         </form>
         ${notice('Your session is kept only in this tab’s memory: reloading or closing the page signs you out. Staff accounts are created by an administrator with <code>python -m app.staff create</code>.', 'info', 'lock', 'mt')}
-        <div class="auth-foot"><a class="inline-link" href="#/my-reports">Looking for your own reports? Open My reports</a></div>
+        <div class="auth-foot"><a class="inline-link" href="#/my-reports">Reported without an account? Open Reports on This Device</a></div>
       </section>
     </main>
   </div>`;
@@ -284,6 +281,22 @@ function renderServerAdminLogin(root) {
       document.getElementById('login-error').innerHTML = notice(esc(err?.name === 'ApiError' ? err.message : 'Sign-in failed.'), 'error', 'alert');
     }
   };
+}
+
+// Server mode: residents sign in with a resident account on the CivicLens server. The demonstration
+// profiles in services.js are never used in server mode, so they cannot stand in for an account.
+function renderServerResidentLogin(root) {
+  root.innerHTML = `<div class="page">
+    ${publicTopbar({fallback: 'home'})}
+    <main id="main" class="narrow" tabindex="-1">
+      <section class="panel auth-panel" aria-labelledby="login-title">
+        <p class="pill pill-coral">${icon('user', 'pill-icon')}<span>Resident · server account</span></p>
+        <h1 id="login-title" tabindex="-1">Resident sign-in</h1>
+        ${notice('Resident accounts are not available on this server yet. You can still report and track without an account.', 'info', 'user')}
+        <div class="auth-foot"><a class="inline-link" href="#/camera">Report an issue without an account</a> <a class="inline-link" href="#/my-reports">Reports on This Device</a></div>
+      </section>
+    </main>
+  </div>`;
 }
 
 export {logo, panel, btn};
