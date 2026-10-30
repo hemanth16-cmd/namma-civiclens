@@ -9,6 +9,8 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
+from tests import dbutil
+
 from app.evidence import UploadSettings, detect_kind
 from app.evidence_storage import LocalEvidenceStorage
 from app.main import DEFAULT_EVIDENCE_DIR, PUBLIC_DIR, create_app
@@ -71,7 +73,7 @@ def temp_files(evidence_dir):
 
 
 def evidence_rows(db_path):
-    with closing(sqlite3.connect(db_path)) as conn:
+    with closing(dbutil.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         return [dict(r) for r in conn.execute("SELECT * FROM evidence")]
 
@@ -297,7 +299,7 @@ def test_expired_token_can_be_replaced_with_the_claim_code(make_client, isolated
 
 def test_only_token_hashes_are_stored(api, isolated_db_path):
     receipt = create(api)
-    with closing(sqlite3.connect(isolated_db_path)) as conn:
+    with closing(dbutil.connect(isolated_db_path)) as conn:
         (stored,) = conn.execute("SELECT upload_token_hash FROM complaints").fetchone()
     assert stored == hashlib.sha256(receipt["uploadToken"].encode()).hexdigest()
     for f in isolated_db_path.parent.glob(isolated_db_path.name + "*"):
@@ -453,9 +455,10 @@ def test_signature_detection():
 
 # ---------- Schema migration ----------
 
+@pytest.mark.sqlite_only
 def test_version_1_database_is_migrated_in_place(tmp_path):
     db = tmp_path / "old.sqlite3"
-    with closing(sqlite3.connect(db)) as conn:
+    with closing(dbutil.connect(db)) as conn:
         conn.executescript(SCHEMA)
         conn.execute("PRAGMA user_version = 1")
         conn.execute("INSERT INTO complaints (public_id, claim_hash, title, category, area, media_type, share_evidence, gps_lat, gps_lng, "
@@ -465,12 +468,15 @@ def test_version_1_database_is_migrated_in_place(tmp_path):
     store = ComplaintStore(db)
     store.initialize()
     store.initialize()  # idempotent
-    with closing(sqlite3.connect(db)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    with closing(dbutil.connect(db)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
         columns = {r[1] for r in conn.execute("PRAGMA table_info(complaints)")}
         assert {"upload_token_hash", "upload_token_expires_at", "credentials_used_at"} <= columns
         assert conn.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == 0
-        for table in ("staff_accounts", "staff_sessions", "evidence_access_log"):
+        evidence_columns = {r[1]: r for r in conn.execute("PRAGMA table_info(evidence)")}
+        assert evidence_columns["storage_backend"][4] == "'local'", "existing evidence defaults to local storage"
+        for table in ("staff_accounts", "staff_sessions", "evidence_access_log", "notification_recipients", "notification_follows",
+                      "push_subscriptions", "notifications"):
             assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
     assert store.get("NCL-2026-OLD001")["category"] == "Potholes"

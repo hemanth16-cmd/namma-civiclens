@@ -15,7 +15,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Request, Response
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
 from starlette.concurrency import run_in_threadpool
@@ -177,6 +177,7 @@ class _UploadReader:
             raise ApiProblem(415, "unsupported_media_type", "Only JPEG photos and WebM or MP4 videos are accepted.")
         self._check_declared()
         self.pending = self.storage.begin()
+        self.pending.content_type = self.kind.content_type  # detected from the signature, not the client
         self._write(head)
 
     def _check_declared(self):
@@ -275,7 +276,7 @@ def _receipt(row: dict, status: str) -> dict:
 
 
 @router.post("/{public_id}/evidence", status_code=201, response_model=EvidenceReceipt)
-async def upload_evidence(public_id: str, request: Request, response: Response) -> dict:
+async def upload_evidence(public_id: str, request: Request, response: Response, background: BackgroundTasks) -> dict:
     store: ComplaintStore = request.app.state.store
     storage: EvidenceStorage = request.app.state.evidence_storage
     settings: UploadSettings = request.app.state.upload_settings
@@ -319,7 +320,7 @@ async def upload_evidence(public_id: str, request: Request, response: Response) 
         meta = {
             "evidenceId": "ev_" + secrets.token_urlsafe(16), "storageKey": key, "mediaType": kind.media_type,
             "contentType": kind.content_type, "byteSize": pending.size, "sha256": pending.sha256,
-            "capturedAt": captured_at, "uploadedAt": utc_now(),
+            "capturedAt": captured_at, "uploadedAt": utc_now(), "storageBackend": storage.name,
         }
         try:
             outcome, row = await run_in_threadpool(store.add_evidence, auth["pk"], meta)
@@ -330,6 +331,7 @@ async def upload_evidence(public_id: str, request: Request, response: Response) 
             await run_in_threadpool(storage.delete, key)
             return _same_or_conflict(row, meta["sha256"], response)
         reservation.commit(pending.size)
+        background.add_task(request.app.state.notifier.evidence_uploaded, public_id, kind.media_type)
         return _receipt(row, "uploaded")
 
 

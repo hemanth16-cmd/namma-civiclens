@@ -11,6 +11,8 @@ import {savePhoto, autoSavePhoto, preferredMethod, saveLabel, readPhotoPrefs, wr
 import {LOGO_SRC, loadLogoImage} from '../brand.js';
 import {camera} from '../camera-service.js';
 import {locator, fixQuality, fixAgeMs, GEO} from '../location-service.js';
+import {submitReport as saveReport, takeServerReceipt, reportMode, serverEvidenceKey, uploadEvidence, uploadState, forgetUpload, notifyAboutReport} from '../report-gateway.js';
+import {ApiError, newIdempotencyKey} from '../api-client.js';
 
 const cam = state.camera; // recorder, timer, seconds, mode, holdRecording
 const $ = id => document.getElementById(id);
@@ -214,7 +216,7 @@ export function renderCapture(root) {
             </ol>
           </section>
           <section class="card card-quiet">
-            <p class="micro">No account is needed to report. Reports are saved on this device in this prototype and are not sent to any authority.</p>
+            <p class="micro" id="storage-note">No account is needed to report. Reports are saved on this device in this prototype and are not sent to any authority.</p>
             <a class="inline-link" href="#/home">Browse public options ${icon('forward')}</a>
           </section>
         </aside>
@@ -254,6 +256,13 @@ export function renderCapture(root) {
   };
   document.addEventListener('visibilitychange', onVisibility);
   const stopPermissionWatch = watchPermissions();
+  reportMode().then(mode => {
+    const note = $('storage-note');
+    if (!note || mode === 'local') return;
+    note.textContent = mode === 'backend'
+      ? 'No account is needed to report. Server mode: the report details and then the photo or video are sent to the CivicLens development server. Evidence is stored privately and never shown in public tracking.'
+      : 'Reporting is unavailable: the CivicLens API configuration (api-config.json) is invalid.';
+  });
 
   addCleanup(() => {
     clearInterval(ticker);
@@ -827,7 +836,7 @@ export function renderReview(root) {
           </div>
           <div id="submit-error" role="alert"></div>
           <button type="submit" class="btn btn-primary btn-block btn-lg" id="submit-btn" ${gps ? '' : 'disabled'}>${icon('upload')}<span>${gps ? 'Submit report' : 'Location needed to submit'}</span></button>
-          <p class="micro">Submission creates a local demonstration record. No government authority is contacted.</p>
+          <p class="micro" id="submit-note">Submission creates a local demonstration record. No government authority is contacted.</p>
         </form>
       </div>
     </main>
@@ -839,6 +848,10 @@ export function renderReview(root) {
     document.getElementById('category-error').hidden = true;
   });
   root.querySelector('#review-form').onsubmit = e => submitReport(e, () => chosen);
+  reportMode().then(mode => {
+    const note = $('submit-note');
+    if (note && mode === 'backend') note.textContent = 'Submission sends the report details, then the original photo or video, to the CivicLens development server. No government authority is contacted.';
+  });
 
   // Stamp preview: re-rendered (at preview size) when the address arrives or a toggle changes.
   let previewSeq = 0, previewUrl = null, previewTimer = null;
@@ -923,56 +936,99 @@ async function submitReport(e, getCategory) {
   if (btn.disabled) return undefined; // already submitting
   const label = btn.querySelector('span');
   btn.disabled = true;
-  label.textContent = 'Saving evidence…';
+  const mode = await reportMode();
+  label.textContent = mode === 'backend' ? 'Sending to the CivicLens server…' : 'Saving evidence…';
   document.getElementById('submit-error').innerHTML = '';
   const isPhoto = c.type === 'photo';
   const includeLocation = !!document.getElementById('stamp-location')?.checked;
   const autoSave = c.captureSource === 'Live camera' && !!document.getElementById('auto-save')?.checked;
   try {
-    // A lookup still running for this spot gets a short, bounded chance to finish.
-    if (!c.gps.address) {
-      const a = await addressResolver.whenSettled(c.gps, 3000);
-      if (a) Object.assign(c.gps, {address: a.address, neighbourhood: a.neighbourhood || c.gps.neighbourhood, short: a.short || null});
+    if (!c.idempotencyKey) {
+      // A lookup still running for this spot gets a short, bounded chance to finish.
+      if (!c.gps.address) {
+        const a = await addressResolver.whenSettled(c.gps, 3000);
+        if (a) Object.assign(c.gps, {address: a.address, neighbourhood: a.neighbourhood || c.gps.neighbourhood, short: a.short || null});
+      }
+      // One idempotency key per captured report, kept (in memory, with the evidence) across retries, so
+      // a retry after an interrupted connection can never create a second complaint. The location sent
+      // with the first attempt is frozen with the key: an address that resolves later must not change
+      // the retried request, or the server would reject it as a different report.
+      c.idempotencyKey = newIdempotencyKey();
+      c.sentGps = {...c.gps};
     }
     if (isPhoto) c.evidenceRef ??= await evidenceRef(c.blob);
-    const record = await api.create({
+    const saved = await saveReport({
       category,
       description: document.getElementById('description').value,
-      gps: c.gps,
-      neighbourhood: c.gps?.neighbourhood,
+      gps: c.sentGps,
+      neighbourhood: c.sentGps?.neighbourhood,
       created: c.capturedAt || null,
       uploadedAt: c.uploadedAt,
       owner: viewer().role === 'resident' ? viewer().email : null,
       mediaType: c.type,
       shareEvidence: document.getElementById('share-evidence').checked,
       captureSource: c.captureSource,
-      evidenceRef: c.evidenceRef || null
-    }, c.blob);
-    const created = JSON.parse(sessionStorage.getItem('ncl-created') || '[]');
-    created.push(record.id);
-    try { sessionStorage.setItem('ncl-created', JSON.stringify(created.slice(-50))); } catch { /* receipt gating is best-effort */ }
+      evidenceRef: c.evidenceRef || null  // local records only; the API payload is allowlisted and never carries it
+    }, c.blob, {idempotencyKey: c.idempotencyKey});
+    const id = saved.id;
+    let uploadedAt = c.uploadedAt;
+    if (saved.mode === 'local') {
+      const created = JSON.parse(sessionStorage.getItem('ncl-created') || '[]');
+      created.push(id);
+      try { sessionStorage.setItem('ncl-created', JSON.stringify(created.slice(-50))); } catch { /* receipt gating is best-effort */ }
+      uploadedAt = (await api.receipt(id))?.uploadedAt ?? uploadedAt;
+    }
     if (isPhoto) {
-      // The stamp uses the ID of the record that now exists, never a provisional one.
+      // The stamp uses the ID the store (local or server) has just issued, never a provisional one.
+      // The complaint already exists, so a stamping failure only affects the convenience copy.
       label.textContent = 'Stamping your photo…';
       try {
-        const stamped = await makeStamped(c.blob, stampMeta(c, record.id, includeLocation));
-        const name = stampFileName(record.id, c.capturedAt || record.uploadedAt);
-        stampedPhotos.set(record.id, {blob: stamped, name});
-        await mediaDB.put(stampedKey(record.id), stamped).catch(() => {}); // the original is the evidence; the copy is a convenience
-        if (autoSave) saveJobs.set(record.id, autoSavePhoto(stamped, name, record.id));
+        const stamped = await makeStamped(c.blob, stampMeta({...c, gps: c.sentGps}, id, includeLocation));
+        const name = stampFileName(id, c.capturedAt || uploadedAt);
+        stampedPhotos.set(id, {blob: stamped, name, evidenceRef: c.evidenceRef || null});
+        // The original is the evidence (and is what server mode uploads); the copy is a convenience.
+        await mediaDB.put(stampedKey(saved.mode === 'local' ? id : serverEvidenceKey(id)), stamped).catch(() => {});
+        if (autoSave) saveJobs.set(id, autoSavePhoto(stamped, name, id));
       } catch {
-        stampedPhotos.delete(record.id);
+        stampedPhotos.delete(id);
       }
     }
     state.capture = null;
-    navigate('receipt/' + record.id);
+    navigate('receipt/' + id);
   } catch (err) {
     btn.disabled = false;
     label.textContent = 'Try submitting again';
-    const message = err instanceof StorageError ? err.message : (err.message || 'The report could not be saved.');
-    document.getElementById('submit-error').innerHTML = notice(`<strong>Not saved.</strong> ${esc(message)} Your evidence is still here, so you can retry.`, 'error', 'alert');
-    toast('Report not saved. Your evidence is still here.', 'error');
+    if (err instanceof ApiError && err.code === 'idempotency_key_conflict') {
+      // The report was edited after an attempt that may have reached the server. The next attempt
+      // is a separate submission, and the message says so.
+      c.idempotencyKey = null;
+      c.sentGps = null;
+    }
+    document.getElementById('submit-error').innerHTML = submitErrorNotice(err);
+    toast(err instanceof ApiError && err.code === 'idempotency_key_used' ? 'This report was already received.' : 'Report not saved. Your evidence is still here.', 'error');
   }
+}
+
+function submitErrorNotice(err) {
+  if (err instanceof ApiError) {
+    if (err.ambiguous) {
+      return notice(`<strong>Not confirmed.</strong> ${esc(err.message)} The server may or may not have saved this report. Submitting again is safe: it reuses this report’s submission key, so the server will not create a duplicate. Your evidence is still here.`, 'error', 'alert');
+    }
+    if (err.code === 'idempotency_key_used') {
+      const id = err.complaintId;
+      return notice(`<strong>Already received.</strong> This report was already saved${id ? ` as <a class="inline-link" href="#/track/${esc(id)}">${esc(id)}</a>` : ''}. For security, its private claim code cannot be shown again because it has already been used.`, 'warn', 'alert');
+    }
+    if (err.code === 'idempotency_key_conflict') {
+      return notice('<strong>Not sent.</strong> The report details changed after a submission that may already have reached the server. If you submit again, it will be sent as a separate report, which may duplicate the earlier one.', 'warn', 'alert');
+    }
+    if (err.code === 'rate_limited') {
+      return notice(`<strong>Not sent yet.</strong> ${esc(err.message)} Your evidence is still here; submitting again later will not create a duplicate.`, 'warn', 'clock');
+    }
+    const fields = err.details.slice(0, 4).map(d => `<li>${esc(d.field.replace(/^body\./, ''))}: ${esc(d.message)}</li>`).join('');
+    return notice(`<strong>Not sent.</strong> ${esc(err.message)}${fields ? `<ul class="micro">${fields}</ul>` : ''} Nothing was saved on this device either. Your evidence is still here, so you can retry.`, 'error', 'alert');
+  }
+  const message = err instanceof StorageError ? err.message : (err.message || 'The report could not be saved.');
+  return notice(`<strong>Not saved.</strong> ${esc(message)} Your evidence is still here, so you can retry.`, 'error', 'alert');
 }
 
 // ---------- Receipt ----------
@@ -994,6 +1050,8 @@ function showSaveResult(result) {
 }
 
 export async function renderReceipt(root, id) {
+  const held = takeServerReceipt(id);
+  if (held) return renderServerReceipt(root, held);
   const created = JSON.parse(sessionStorage.getItem('ncl-created') || '[]');
   if (!created.includes(id)) return navigate('track/' + id);
   const r = await api.receipt(id);
@@ -1088,7 +1146,166 @@ export async function renderReceipt(root, id) {
   }
 }
 
-function downloadReceipt(r) {
+// Server-mode receipt. The claim code arrives in memory from report-gateway.js and is shown on this
+// render only: it is not stored anywhere in the browser, so reloading this page cannot show it again.
+async function renderServerReceipt(root, {receipt: r, evidenceKept, following = false}) {
+  const blob = evidenceKept ? await mediaDB.get(serverEvidenceKey(r.id)).catch(() => null) : null;
+  const isPhoto = r.mediaType !== 'video';
+  const what = isPhoto ? 'photo' : 'video';
+  // The stamped copy (made at submission with the server-issued ID) is a local convenience only:
+  // the evidence uploaded to the server is always the untouched original.
+  let stamped = stampedPhotos.get(r.id) || null;
+  const ref = stamped?.evidenceRef || (isPhoto && blob ? await evidenceRef(blob) : null);
+  const rec = {...r, evidenceRef: ref};
+  if (isPhoto && !stamped && blob) {
+    const name = stampFileName(r.id, r.capturedAt || r.uploadedAt);
+    const saved = await mediaDB.get(stampedKey(serverEvidenceKey(r.id))).catch(() => null);
+    try {
+      stamped = {name, blob: saved || await buildEvidenceCopy(blob, rec), evidenceRef: ref};
+      stampedPhotos.set(r.id, stamped);
+    } catch { stamped = null; }
+  }
+  const shown = isPhoto && stamped ? stamped.blob : blob;
+  const url = shown ? URL.createObjectURL(shown) : null;
+  if (url) addCleanup(() => URL.revokeObjectURL(url));
+  const method = preferredMethod();
+  root.innerHTML = `<div class="page">
+    ${publicTopbar({fallback: 'home'})}
+    <main id="main" class="receipt-main" tabindex="-1" data-receipt-source="server">
+      <div class="receipt-hero">
+        <span class="success-mark">${icon('check')}</span>
+        <div>
+          <p class="eyebrow">Step 3 of 3 · Receipt</p>
+          <h1 id="page-title" tabindex="-1">Report received by the CivicLens server</h1>
+          <p class="lead">The server stored the report details and issued the public ID below. Save the private claim code now: it is shown only once.</p>
+        </div>
+      </div>
+      ${r.replayed ? notice('<strong>Recovered after an interrupted connection.</strong> This is the same complaint the server saved on the first attempt; no duplicate was created. A new claim code was issued for it, and any earlier code for this complaint no longer works.', 'info', 'refresh') : ''}
+      <section class="card" aria-labelledby="status-title" id="submission-status">
+        <h2 id="status-title">Submission status</h2>
+        <dl class="meta-list">
+          <div><dt>Complaint details</dt><dd data-step="metadata">Saved on the CivicLens server</dd></div>
+          <div><dt>${what === 'video' ? 'Video' : 'Photo'}</dt><dd id="evidence-upload-status" role="status" aria-live="polite"></dd></div>
+        </dl>
+        <div id="evidence-upload-actions" class="row-actions"></div>
+      </section>
+      <section class="card" aria-labelledby="notify-title" id="receipt-notifications">
+        <h2 id="notify-title">Updates about this report</h2>
+        <div id="notify-status" role="status" aria-live="polite">${following
+          ? `<p>${icon('bell', 'mini-icon')} You will get a notification on this device when something happens to this report. <a class="inline-link" href="#/notifications">Notification history</a></p>`
+          : `<p>Get a system notification on this phone or computer when the evidence is stored and when staff review it, even after you close CivicLens.</p>
+             <div class="row-actions">${btn(icon('bell') + '<span>Notify me about this report</span>', 'id="notify-me"', 'secondary')}</div>
+             <div id="notify-feedback"></div>`}</div>
+      </section>
+      <div class="receipt-grid">
+        <section class="card reference-card" aria-labelledby="ref-title">
+          <p class="eyebrow">Public reference · share freely</p>
+          <h2 id="ref-title">Complaint ID</h2>
+          <p class="code-value">${esc(r.id)}</p>
+          <div class="row-actions">${btn(icon('copy') + '<span>Copy ID</span>', `data-copy="${esc(r.id)}"`, 'secondary')}<a class="btn btn-primary" href="#/track/${esc(r.id)}">${icon('search')}<span>Track this issue</span></a></div>
+        </section>
+        <section class="card private-card" aria-labelledby="claim-title">
+          <p class="eyebrow">Private claim code · keep secret</p>
+          <h2 id="claim-title">Claim code</h2>
+          <p class="code-value code-private">${esc(r.claim)}</p>
+          <p class="micro"><strong>Save this code now. It will not be shown again.</strong> The server keeps only a scrambled (hashed) form and cannot recover it, and leaving or reloading this page removes it. Never post it or include it in shared photos.</p>
+          <div class="row-actions">${btn(icon('copy') + '<span>Copy claim code</span>', `data-copy="${esc(r.claim)}"`, 'ghost')}${btn(icon('file') + '<span>Download private receipt</span>', `data-receipt="${esc(r.id)}"`, 'secondary')}</div>
+        </section>
+      </div>
+      <div class="receipt-body">
+        <section class="card" aria-labelledby="summary-title">
+          <h2 id="summary-title">Summary</h2>
+          <dl class="meta-list">
+            <div><dt>Category</dt><dd>${esc(r.category)}</dd></div>
+            <div><dt>Neighbourhood</dt><dd>${esc(r.area)}</dd></div>
+            <div><dt>Captured</dt><dd>${r.capturedAt ? fmtDateTime(r.capturedAt) : 'Not recorded in the file'}${r.captureSource ? ` · ${esc(r.captureSource)}` : ''}</dd></div>
+            <div><dt>Received by the server</dt><dd>${r.uploadedAt ? fmtDateTime(r.uploadedAt) : 'Not reported'}</dd></div>
+            <div><dt>Evidence location</dt><dd>${coords(r.gps)}${r.gps.accuracy ? ` · ±${Math.round(r.gps.accuracy)} m` : ''}<br><span class="micro">${esc(locationSourceLabel(r.gps))}${r.gps.timestamp ? ` · fix ${fmtDateTime(new Date(r.gps.timestamp).toISOString())}` : ''}${r.gps.address ? ` · ${esc(r.gps.address)}` : ''}</span></dd></div>
+            ${ref ? `<div><dt>Evidence ref</dt><dd><span class="code-inline">${esc(ref)}</span> <span class="micro">fingerprint of the original photo</span></dd></div>` : ''}
+            <div><dt>Server status</dt><dd>${esc(r.status)} · ${esc(r.verification)}</dd></div>
+            <div><dt>Sharing preference</dt><dd>${r.shareEvidence ? 'Share with signed-in community members' : 'Private'} <span class="micro">(recorded; uploaded evidence stays private until sharing is built)</span></dd></div>
+          </dl>
+        </section>
+        <section class="card" aria-labelledby="evidence-preview-title">
+          <h2 id="evidence-preview-title">${isPhoto && stamped ? 'Your stamped photo · copy in this browser' : 'Your evidence · copy in this browser'}</h2>
+          ${url
+            ? (r.mediaType === 'video' ? `<video class="receipt-media" controls playsinline src="${url}" aria-label="Captured video, kept on this device"></video>` : `<img class="receipt-media" src="${url}" alt="${stamped ? `Evidence photo for ${esc(r.id)} with the Namma CivicLens stamp` : `Captured evidence for ${esc(r.id)}, kept on this device`}">`)
+            : notice('The original file is not available in this browser. The server receipt and public ID remain valid.', 'info', 'alert')}
+          <div class="row-actions">
+            ${url ? btn(icon('download') + `<span>${r.mediaType === 'video' ? 'Download video and metadata' : saveLabel(method)}</span>`, `data-evidence="${esc(r.id)}"`, 'primary') : ''}
+          </div>
+          ${isPhoto && url ? `<p class="save-status" id="save-status" role="status" aria-live="polite"></p>` : ''}
+          <p class="micro">This preview comes from this browser’s copy, which is kept even after the upload. ${isPhoto ? 'The server receives the original photo, not the stamped copy. The stamp shows the logo, complaint ID, evidence reference, capture time and, if you chose it, the address and coordinates; never the claim code. ' : ''}Uploaded evidence is private: it is not shown in public tracking, and it cannot yet be viewed from the server.</p>
+        </section>
+      </div>
+      <p class="receipt-foot"><a class="inline-link" href="#/camera">${icon('camera')}<span>Report another issue</span></a></p>
+    </main>
+  </div>`;
+  root.querySelector('[data-evidence]')?.addEventListener('click', async () => {
+    if (!isPhoto || !stamped?.blob) return downloadEvidence(rec, blob);
+    showSaveResult({outcome: 'opened', message: method === 'share' ? 'Opening the save sheet…' : 'Preparing the download…'});
+    return showSaveResult(await savePhoto(stamped.blob, stamped.name, {key: r.id}));
+  });
+  if (isPhoto && !stamped && blob) showSaveResult({outcome: 'failed', message: 'The stamped copy could not be created on this device. The original was kept and is what the server receives.'});
+  const job = saveJobs.get(r.id);
+  if (job) {
+    saveJobs.delete(r.id); // show the automatic outcome once
+    showSaveResult({outcome: 'opened', message: method === 'share' ? 'Opening the save sheet…' : 'Saving your stamped photo…'});
+    job.then(result => { if (result && currentPath() === 'receipt/' + r.id) showSaveResult(result); });
+  }
+  root.querySelector('[data-receipt]')?.addEventListener('click', () => downloadReceipt(r, uploadState(r.id) === 'uploaded'
+    ? `The complaint details and the ${what} were stored privately by the CivicLens server. A copy of the ${what} also remains in the browser that captured it.`
+    : `The complaint details were stored by the CivicLens server. The ${what} was NOT confirmed as uploaded; a copy is kept in the browser that captured it.`));
+  $('notify-me')?.addEventListener('click', async e => {
+    const button = e.currentTarget;
+    button.disabled = true;
+    const result = await notifyAboutReport(r.id);  // asks for notification permission (this click)
+    const slot = $('notify-status');
+    if (!slot) return;
+    if (!result.following) {
+      button.disabled = false;
+      $('notify-feedback').innerHTML = notice(esc(result.message || 'Notifications could not be turned on.'), 'warn', 'alert');
+      return;
+    }
+    slot.innerHTML = `${result.push === 'enabled'
+        ? `<p>${icon('bell', 'mini-icon')} Done. This device will show a notification when something happens to this report.</p>`
+        : notice(`<strong>Following, but this device will not show system notifications.</strong> ${esc(result.message || '')} Updates are kept in your notification history.`, 'warn', 'alert')}
+      <p><a class="inline-link" href="#/notifications">Notification history</a></p>`;
+  });
+  addCleanup(() => forgetUpload(r.id));
+  runEvidenceUpload(r.id, what);
+}
+
+// Evidence upload is a separate step after the complaint exists. Retrying never re-creates the
+// complaint: it sends the same file to the same complaint ID.
+async function runEvidenceUpload(id, what) {
+  const status = $('evidence-upload-status');
+  const actions = $('evidence-upload-actions');
+  if (!status) return;
+  if (uploadState(id) === 'unavailable') {
+    status.dataset.state = 'unavailable';
+    status.textContent = `Not uploaded. There is no ${what} file to send for this report.`;
+    return;
+  }
+  status.dataset.state = 'uploading';
+  status.textContent = `Uploading the ${what} to the CivicLens server…`;
+  actions.innerHTML = '';
+  const result = await uploadEvidence(id);
+  if (!status.isConnected) return; // the user left the page; the upload result is not shown anywhere else
+  status.dataset.state = result.state;
+  if (result.state === 'uploaded') {
+    const e = result.evidence;
+    status.innerHTML = `<strong>Uploaded privately</strong> to the CivicLens server (${Math.max(1, Math.round(e.byteSize / 1024))} KB, checksum <span class="code-inline">${esc(e.sha256.slice(0, 12))}…</span>). It is not shown in public tracking.`;
+    return;
+  }
+  status.innerHTML = `<strong>Upload ${result.state === 'unavailable' ? 'unavailable' : 'failed'}.</strong> ${esc(result.message)} Your complaint <span class="code-inline">${esc(id)}</span> is saved; only the ${what} upload is affected. A copy of the ${what} stays in this browser.`;
+  if (result.retryable) {
+    actions.innerHTML = `${btn(icon('upload') + `<span>Retry ${what} upload</span>`, 'id="retry-upload"', 'primary')}<p class="micro">Retrying sends the same ${what} to this complaint again. It does not create a new complaint.</p>`;
+    $('retry-upload').addEventListener('click', () => runEvidenceUpload(id, what));
+  }
+}
+
+function downloadReceipt(r, storageNote = 'This receipt is stored on this device only. It is not sent to any authority.') {
   const text = [
     'NAMMA CIVICLENS — PRIVATE RECEIPT (KEEP SECRET)',
     '',
@@ -1100,7 +1317,7 @@ function downloadReceipt(r) {
     `Location: ${r.gps ? `${r.gps.lat}, ${r.gps.lng}` : 'not recorded'}`,
     `Visibility: ${r.shareEvidence ? 'shared with community' : 'private'}`,
     '',
-    'This receipt is stored on this device only. It is not sent to any authority.'
+    storageNote
   ].join('\n');
   download(new Blob([text], {type: 'text/plain'}), `${r.id}-private-receipt.txt`);
 }

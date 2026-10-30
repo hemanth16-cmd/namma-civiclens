@@ -1,8 +1,8 @@
-"""SQLite data-access layer for complaints.
+"""Data-access layer for complaints, for SQLite (default) and PostgreSQL (Supabase).
 
-This is the only module that knows about SQL. Routes call ComplaintStore methods
-and receive plain dicts, so a PostgreSQL/PostGIS implementation can replace this
-class later without changing the API layer.
+This is the only module that contains SQL. Routes call ComplaintStore methods and receive plain
+dicts. The SQL is written once, with `?` placeholders; db.py supplies the engine-specific parts
+(connections, placeholder translation, inserts returning keys, transactions, schema bootstrap).
 
 Rules kept here:
 - Every query is parameterised.
@@ -14,26 +14,26 @@ Rules kept here:
 - Upload tokens are stored as SHA-256 hashes with an expiry; evidence rows hold metadata and a
   storage key only, never file contents.
 
-Schema changes are applied as numbered migrations tracked in PRAGMA user_version, so an existing
-development database is upgraded in place.
+Schema changes are numbered migrations (SQLite: PRAGMA user_version; PostgreSQL: the
+civiclens_schema table), so an existing database is upgraded in place. PostgreSQL starts directly
+at the current version (POSTGRES_SCHEMA); later changes must be added to both MIGRATIONS and
+POSTGRES_MIGRATIONS.
 """
 
 import logging
 import os
-import sqlite3
+import secrets
 from collections.abc import Callable
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
+from .db import DB_ERRORS, DB_PATH_ENV, DEFAULT_DB_PATH, INTEGRITY_ERRORS, SQLiteDatabase, database_from_env, resolve_db_path  # noqa: F401
 from .claims import hash_claim_code, hash_upload_token, new_claim_code, new_public_id, new_upload_token, upload_token_matches
 
 logger = logging.getLogger("civiclens.store")
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "civiclens.sqlite3"
-DB_PATH_ENV = "CIVICLENS_DB_PATH"
 MAX_ID_ATTEMPTS = 5
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 DEFAULT_UPLOAD_TOKEN_TTL = timedelta(hours=1)
 
 INITIAL_STATUS = "Submitted"
@@ -174,7 +174,264 @@ CREATE TABLE evidence_access_log (
 );
 CREATE INDEX evidence_access_by_evidence ON evidence_access_log (evidence_pk, pk);
 """,
+    5: """
+-- Which storage backend holds each evidence file. Every existing row is local-disk evidence, so the
+-- default keeps it readable after Supabase Storage is enabled; new uploads record the backend that stored them.
+ALTER TABLE evidence ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'local' CHECK (storage_backend IN ('local', 'supabase'));
+""",
+    6: """
+-- Web Push notifications. A recipient is a staff account or a citizen inbox (a device-held bearer
+-- token; only its SHA-256 hash is stored). Citizens receive notifications for complaints they follow,
+-- proven with the claim code. Each recipient may register several devices (push subscriptions).
+CREATE TABLE notification_recipients (
+    pk          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL CHECK (kind IN ('citizen', 'staff')),
+    staff_pk    INTEGER UNIQUE REFERENCES staff_accounts(pk) ON DELETE CASCADE,
+    token_hash  TEXT UNIQUE CHECK (token_hash IS NULL OR length(token_hash) = 64),
+    created_at  TEXT NOT NULL,
+    CHECK ((kind = 'staff' AND staff_pk IS NOT NULL AND token_hash IS NULL)
+        OR (kind = 'citizen' AND staff_pk IS NULL AND token_hash IS NOT NULL))
+);
+
+CREATE TABLE notification_follows (
+    pk            INTEGER PRIMARY KEY,
+    recipient_pk  INTEGER NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    complaint_pk  INTEGER NOT NULL REFERENCES complaints(pk) ON DELETE CASCADE,
+    created_at    TEXT NOT NULL,
+    UNIQUE (recipient_pk, complaint_pk)
+);
+CREATE INDEX notification_follows_by_complaint ON notification_follows (complaint_pk);
+
+-- One row per device and recipient. The endpoint is a capability URL at the browser's push service;
+-- it and the keys are never returned by the API.
+CREATE TABLE push_subscriptions (
+    pk               INTEGER PRIMARY KEY,
+    subscription_id  TEXT NOT NULL UNIQUE,
+    recipient_pk     INTEGER NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    endpoint         TEXT NOT NULL,
+    p256dh           TEXT NOT NULL,
+    auth             TEXT NOT NULL,
+    label            TEXT NOT NULL DEFAULT '',
+    expires_at       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    last_success_at  TEXT,
+    last_failure_at  TEXT,
+    failure_count    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (recipient_pk, endpoint)
+);
+
+-- Persistent history. dedupe_key makes each event notify a recipient at most once.
+CREATE TABLE notifications (
+    pk               INTEGER PRIMARY KEY,
+    notification_id  TEXT NOT NULL UNIQUE,
+    recipient_pk     INTEGER NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    complaint_pk     INTEGER REFERENCES complaints(pk) ON DELETE CASCADE,
+    kind             TEXT NOT NULL CHECK (kind IN ('follow_confirmed', 'evidence_received', 'evidence_reviewed', 'new_complaint', 'new_evidence', 'test')),
+    title            TEXT NOT NULL,
+    body             TEXT NOT NULL,
+    url              TEXT NOT NULL,
+    dedupe_key       TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    read_at          TEXT,
+    push_status      TEXT NOT NULL DEFAULT 'pending' CHECK (push_status IN ('pending', 'sent', 'partial', 'failed', 'no_devices', 'disabled')),
+    UNIQUE (recipient_pk, dedupe_key)
+);
+CREATE INDEX notifications_by_recipient ON notifications (recipient_pk, pk);
+""",
 }
+
+# PostgreSQL schema at version 5 (later versions: POSTGRES_MIGRATIONS): the same tables, columns, constraints and indexes
+# as SQLite's SCHEMA plus MIGRATIONS 2–5, in PostgreSQL types:
+#   INTEGER PRIMARY KEY → BIGINT identity (BY DEFAULT, so the SQLite import can keep its keys)
+#   REAL                → DOUBLE PRECISION (PostgreSQL REAL is 4-byte and would lose GPS precision)
+#   foreign keys        → BIGINT, matching the identity keys
+# Timestamps stay ISO 8601 UTC text ("…Z"), exactly as in SQLite, so comparisons and API output are
+# identical on both engines. The storage_backend list must stay in step with MIGRATIONS[5].
+POSTGRES_SCHEMA = """
+CREATE TABLE complaints (
+    pk                      BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    public_id               TEXT NOT NULL UNIQUE,
+    claim_hash              TEXT NOT NULL,
+    title                   TEXT NOT NULL,
+    category                TEXT NOT NULL,
+    area                    TEXT NOT NULL,
+    description             TEXT NOT NULL DEFAULT '',
+    media_type              TEXT NOT NULL CHECK (media_type IN ('photo', 'video')),
+    share_evidence          INTEGER NOT NULL CHECK (share_evidence IN (0, 1)),
+    gps_lat                 DOUBLE PRECISION NOT NULL CHECK (gps_lat BETWEEN -90 AND 90),
+    gps_lng                 DOUBLE PRECISION NOT NULL CHECK (gps_lng BETWEEN -180 AND 180),
+    gps_accuracy            DOUBLE PRECISION CHECK (gps_accuracy IS NULL OR gps_accuracy >= 0),
+    gps_source              TEXT,
+    gps_source_type         TEXT NOT NULL CHECK (gps_source_type IN ('gps', 'exif', 'manual')),
+    gps_timestamp           TEXT,
+    gps_fix_age_seconds     INTEGER,
+    gps_address             TEXT,
+    captured_at             TEXT,
+    capture_source          TEXT,
+    created_at              TEXT NOT NULL,
+    uploaded_at             TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    status                  TEXT NOT NULL,
+    verification            TEXT NOT NULL,
+    department              TEXT NOT NULL,
+    upload_token_hash       TEXT,
+    upload_token_expires_at TEXT,
+    credentials_used_at     TEXT
+);
+
+CREATE TABLE complaint_timeline (
+    pk           BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    complaint_pk BIGINT NOT NULL REFERENCES complaints(pk) ON DELETE CASCADE,
+    status       TEXT NOT NULL,
+    text         TEXT NOT NULL,
+    date         TEXT NOT NULL
+);
+CREATE INDEX complaint_timeline_by_complaint ON complaint_timeline (complaint_pk, pk);
+
+CREATE TABLE verification_log (
+    pk           BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    complaint_pk BIGINT NOT NULL REFERENCES complaints(pk) ON DELETE CASCADE,
+    entry_id     TEXT NOT NULL,
+    date         TEXT NOT NULL,
+    type         TEXT NOT NULL,
+    from_state   TEXT,
+    to_state     TEXT,
+    response     TEXT,
+    by_role      TEXT NOT NULL,
+    actor        TEXT NOT NULL,
+    note         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX verification_log_by_complaint ON verification_log (complaint_pk, pk);
+
+CREATE TABLE evidence (
+    pk              BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    evidence_id     TEXT NOT NULL UNIQUE,
+    complaint_pk    BIGINT NOT NULL REFERENCES complaints(pk) ON DELETE CASCADE,
+    role            TEXT NOT NULL DEFAULT 'original' CHECK (role IN ('original')),
+    storage_key     TEXT NOT NULL UNIQUE,
+    media_type      TEXT NOT NULL CHECK (media_type IN ('photo', 'video')),
+    content_type    TEXT NOT NULL CHECK (content_type IN ('image/jpeg', 'video/webm', 'video/mp4')),
+    byte_size       BIGINT NOT NULL CHECK (byte_size > 0),
+    sha256          TEXT NOT NULL CHECK (length(sha256) = 64),
+    captured_at     TEXT,
+    uploaded_at     TEXT NOT NULL,
+    storage_backend TEXT NOT NULL DEFAULT 'local' CHECK (storage_backend IN ('local', 'supabase')),
+    UNIQUE (complaint_pk, role)
+);
+
+CREATE TABLE idempotency_keys (
+    pk               BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    scope            TEXT NOT NULL,
+    key_hash         TEXT NOT NULL CHECK (length(key_hash) = 64),
+    fingerprint      TEXT NOT NULL CHECK (length(fingerprint) = 64),
+    complaint_pk     BIGINT NOT NULL REFERENCES complaints(pk) ON DELETE CASCADE,
+    created_at       TEXT NOT NULL,
+    replay_count     INTEGER NOT NULL DEFAULT 0,
+    last_replayed_at TEXT,
+    UNIQUE (scope, key_hash)
+);
+
+CREATE TABLE staff_accounts (
+    pk            BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    display_name  TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'official' CHECK (role IN ('official')),
+    password_hash TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    disabled_at   TEXT
+);
+
+CREATE TABLE staff_sessions (
+    pk          BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    token_hash  TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+    staff_pk    BIGINT NOT NULL REFERENCES staff_accounts(pk) ON DELETE CASCADE,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    revoked_at  TEXT
+);
+
+CREATE TABLE evidence_access_log (
+    pk           BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    evidence_pk  BIGINT NOT NULL REFERENCES evidence(pk) ON DELETE CASCADE,
+    staff_pk     BIGINT NOT NULL REFERENCES staff_accounts(pk),
+    action       TEXT NOT NULL CHECK (action IN ('view')),
+    client_ip    TEXT,
+    accessed_at  TEXT NOT NULL
+);
+CREATE INDEX evidence_access_by_evidence ON evidence_access_log (evidence_pk, pk);
+"""
+
+# Later PostgreSQL migrations, keyed by the same version numbers as MIGRATIONS (same tables and
+# constraints in PostgreSQL types). POSTGRES_SCHEMA is version 5; these bring it to SCHEMA_VERSION.
+POSTGRES_BASE_VERSION = 5
+POSTGRES_MIGRATIONS: dict[int, str] = {
+    6: """
+-- Web Push notifications. A recipient is a staff account or a citizen inbox (a device-held bearer
+-- token; only its SHA-256 hash is stored). Citizens receive notifications for complaints they follow,
+-- proven with the claim code. Each recipient may register several devices (push subscriptions).
+CREATE TABLE notification_recipients (
+    pk          BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    kind        TEXT NOT NULL CHECK (kind IN ('citizen', 'staff')),
+    staff_pk    BIGINT UNIQUE REFERENCES staff_accounts(pk) ON DELETE CASCADE,
+    token_hash  TEXT UNIQUE CHECK (token_hash IS NULL OR length(token_hash) = 64),
+    created_at  TEXT NOT NULL,
+    CHECK ((kind = 'staff' AND staff_pk IS NOT NULL AND token_hash IS NULL)
+        OR (kind = 'citizen' AND staff_pk IS NULL AND token_hash IS NOT NULL))
+);
+
+CREATE TABLE notification_follows (
+    pk            BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    recipient_pk  BIGINT NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    complaint_pk  BIGINT NOT NULL REFERENCES complaints(pk) ON DELETE CASCADE,
+    created_at    TEXT NOT NULL,
+    UNIQUE (recipient_pk, complaint_pk)
+);
+CREATE INDEX notification_follows_by_complaint ON notification_follows (complaint_pk);
+
+-- One row per device and recipient. The endpoint is a capability URL at the browser's push service;
+-- it and the keys are never returned by the API.
+CREATE TABLE push_subscriptions (
+    pk               BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    subscription_id  TEXT NOT NULL UNIQUE,
+    recipient_pk     BIGINT NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    endpoint         TEXT NOT NULL,
+    p256dh           TEXT NOT NULL,
+    auth             TEXT NOT NULL,
+    label            TEXT NOT NULL DEFAULT '',
+    expires_at       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    last_success_at  TEXT,
+    last_failure_at  TEXT,
+    failure_count    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (recipient_pk, endpoint)
+);
+
+-- Persistent history. dedupe_key makes each event notify a recipient at most once.
+CREATE TABLE notifications (
+    pk               BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    notification_id  TEXT NOT NULL UNIQUE,
+    recipient_pk     BIGINT NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    complaint_pk     BIGINT REFERENCES complaints(pk) ON DELETE CASCADE,
+    kind             TEXT NOT NULL CHECK (kind IN ('follow_confirmed', 'evidence_received', 'evidence_reviewed', 'new_complaint', 'new_evidence', 'test')),
+    title            TEXT NOT NULL,
+    body             TEXT NOT NULL,
+    url              TEXT NOT NULL,
+    dedupe_key       TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    read_at          TEXT,
+    push_status      TEXT NOT NULL DEFAULT 'pending' CHECK (push_status IN ('pending', 'sent', 'partial', 'failed', 'no_devices', 'disabled')),
+    UNIQUE (recipient_pk, dedupe_key)
+);
+CREATE INDEX notifications_by_recipient ON notifications (recipient_pk, pk);
+""",
+}
+
+# Tables in foreign-key order (parents first): used by the SQLite → PostgreSQL migration tool.
+TABLES = ("complaints", "complaint_timeline", "verification_log", "evidence", "idempotency_keys",
+          "staff_accounts", "staff_sessions", "evidence_access_log",
+          "notification_recipients", "notification_follows", "push_subscriptions", "notifications")
 
 CREATE_SCOPE = "create_complaint"
 DEFAULT_REPLAY_WINDOW = timedelta(hours=24)
@@ -201,14 +458,32 @@ class StaffExists(Exception):
 
 
 STAFF_LIST_MAX = 100
+NOTIFICATION_PAGE_MAX = 100
+
+# Device fields the API may show: never the endpoint or keys.
+_DEVICE_COLUMNS = "subscription_id, label, created_at, updated_at, last_success_at, last_failure_at, failure_count"
+_NOTIFICATION_COLUMNS = ("n.notification_id, n.kind, n.title, n.body, n.url, n.created_at, n.read_at, n.push_status, "
+                         "c.public_id AS complaint_public_id")
 
 
-def _evidence_dict(row: sqlite3.Row) -> dict:
+def _device_dict(row) -> dict:
+    return {"subscriptionId": row["subscription_id"], "label": row["label"], "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"], "lastSuccessAt": row["last_success_at"], "lastFailureAt": row["last_failure_at"],
+            "failureCount": row["failure_count"]}
+
+
+def _notification_dict(row) -> dict:
+    return {"id": row["notification_id"], "kind": row["kind"], "title": row["title"], "body": row["body"], "url": row["url"],
+            "complaintId": row["complaint_public_id"], "createdAt": row["created_at"], "readAt": row["read_at"],
+            "read": row["read_at"] is not None, "pushStatus": row["push_status"]}
+
+
+def _evidence_dict(row) -> dict:
     return {
         "evidenceId": row["evidence_id"], "complaintPk": row["complaint_pk"], "role": row["role"],
         "storageKey": row["storage_key"], "mediaType": row["media_type"], "contentType": row["content_type"],
         "byteSize": row["byte_size"], "sha256": row["sha256"], "capturedAt": row["captured_at"],
-        "uploadedAt": row["uploaded_at"],
+        "uploadedAt": row["uploaded_at"], "storageBackend": row["storage_backend"],
     }
 
 
@@ -228,36 +503,36 @@ def utc_now() -> str:
     return iso(datetime.now(timezone.utc))
 
 
-def resolve_db_path(db_path: str | os.PathLike | None = None) -> Path:
-    return Path(db_path or os.environ.get(DB_PATH_ENV) or DEFAULT_DB_PATH)
-
-
 class ComplaintStore:
-    def __init__(self, db_path: str | os.PathLike, id_factory: Callable[[], str] = new_public_id,
-                 upload_token_ttl: timedelta = DEFAULT_UPLOAD_TOKEN_TTL):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: str | os.PathLike | None = None, id_factory: Callable[[], str] = new_public_id,
+                 upload_token_ttl: timedelta = DEFAULT_UPLOAD_TOKEN_TTL, database=None):
+        """`database` is a db.SQLiteDatabase or db.PostgresDatabase. Without it, the backend comes from
+        DATABASE_BACKEND (default sqlite); `db_path` is the SQLite file and is ignored for PostgreSQL."""
+        self.db = database if database is not None else database_from_env(db_path)
+        self.db_path = self.db.path if isinstance(self.db, SQLiteDatabase) else None
         self._new_id = id_factory
         self.upload_token_ttl = upload_token_ttl
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=5)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+    @property
+    def backend(self) -> str:
+        return self.db.backend
+
+    def _connect(self):
+        return self.db.connect()
 
     def initialize(self) -> None:
-        """Create the database file and schema if missing. Safe to call repeatedly."""
+        """Create the database (and schema) if missing and apply pending migrations. Safe to repeat."""
         try:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            with closing(self._connect()) as conn:
-                conn.execute("PRAGMA journal_mode = WAL")
-                conn.executescript(SCHEMA)
-                # A brand-new file reports 0; SCHEMA has just created the version-1 tables.
-                version = conn.execute("PRAGMA user_version").fetchone()[0] or 1
-                for target in sorted(v for v in MIGRATIONS if v > version):
-                    conn.executescript(f"BEGIN;\n{MIGRATIONS[target]}\nPRAGMA user_version = {target};\nCOMMIT;")
-        except (OSError, sqlite3.Error) as exc:
+            if self.db.backend == "postgres":
+                self.db.apply_schema(POSTGRES_SCHEMA, POSTGRES_MIGRATIONS, POSTGRES_BASE_VERSION)
+            else:
+                self.db.apply_schema(SCHEMA, MIGRATIONS)
+        except (OSError, *DB_ERRORS) as exc:
             raise StoreError("Could not initialise the complaint database") from exc
+
+    def close(self) -> None:
+        """Release pooled connections (PostgreSQL). Safe to call more than once."""
+        self.db.close()
 
     def _token_expiry(self) -> str:
         return iso(datetime.now(timezone.utc) + self.upload_token_ttl)
@@ -306,7 +581,7 @@ class ComplaintStore:
             "department": INITIAL_DEPARTMENT,
         }
         columns = ", ".join(["public_id", *row])
-        placeholders = ", ".join([":public_id", *(f":{k}" for k in row)])
+        placeholders = ", ".join(["?"] * (len(row) + 1))
         insert_sql = f"INSERT INTO complaints ({columns}) VALUES ({placeholders})"
 
         try:
@@ -314,18 +589,18 @@ class ComplaintStore:
                 for _ in range(MAX_ID_ATTEMPTS):
                     public_id = self._new_id()
                     try:
-                        with conn:  # one transaction: commit on success, roll back on any error
-                            cur = conn.execute(insert_sql, {"public_id": public_id, **row})
+                        with conn.transaction():  # one transaction: commit on success, roll back on any error
+                            complaint_pk = conn.insert(insert_sql, (public_id, *row.values()))
                             conn.execute(
                                 "INSERT INTO complaint_timeline (complaint_pk, status, text, date) VALUES (?, ?, ?, ?)",
-                                (cur.lastrowid, INITIAL_STATUS, "Report received by the Namma CivicLens API.", now),
+                                (complaint_pk, INITIAL_STATUS, "Report received by the Namma CivicLens API.", now),
                             )
                             if idempotency:
                                 conn.execute(
                                     "INSERT INTO idempotency_keys (scope, key_hash, fingerprint, complaint_pk, created_at) VALUES (?, ?, ?, ?, ?)",
-                                    (CREATE_SCOPE, idempotency["keyHash"], idempotency["fingerprint"], cur.lastrowid, now),
+                                    (CREATE_SCOPE, idempotency["keyHash"], idempotency["fingerprint"], complaint_pk, now),
                                 )
-                    except sqlite3.IntegrityError as exc:
+                    except INTEGRITY_ERRORS as exc:
                         if idempotency and self._find_key(conn, idempotency["keyHash"]) is not None:
                             raise _IdempotencyExists() from exc
                         if self._is_public_id_collision(conn, public_id):
@@ -336,21 +611,21 @@ class ComplaintStore:
                     return {**record, "uploadToken": upload_token, "uploadTokenExpiresAt": token_expires}, claim
         except (StoreError, _IdempotencyExists):
             raise
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Complaint could not be saved") from exc
         raise IdAllocationError(f"No unused public ID after {MAX_ID_ATTEMPTS} attempts")
 
     @staticmethod
-    def _is_public_id_collision(conn: sqlite3.Connection, public_id: str) -> bool:
+    def _is_public_id_collision(conn, public_id: str) -> bool:
         return conn.execute("SELECT 1 FROM complaints WHERE public_id = ?", (public_id,)).fetchone() is not None
 
     # ---------- Idempotent creation ----------
 
     @staticmethod
-    def _find_key(conn: sqlite3.Connection, key_hash: str):
+    def _find_key(conn, key_hash: str, lock: str = ""):
         return conn.execute(
             "SELECT k.fingerprint, k.created_at, k.complaint_pk, c.public_id, c.credentials_used_at "
-            "FROM idempotency_keys k JOIN complaints c ON c.pk = k.complaint_pk WHERE k.scope = ? AND k.key_hash = ?",
+            "FROM idempotency_keys k JOIN complaints c ON c.pk = k.complaint_pk WHERE k.scope = ? AND k.key_hash = ?" + lock,
             (CREATE_SCOPE, key_hash),
         ).fetchone()
 
@@ -375,47 +650,40 @@ class ComplaintStore:
                     pass
             record, claim = self._replay(key_hash, fingerprint, replay_window)
             return "replayed", record, claim
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Idempotent complaint creation failed") from exc
 
     def _replay(self, key_hash: str, fingerprint: str, replay_window: timedelta) -> tuple[dict, str]:
         claim, token, expires, now = new_claim_code(), new_upload_token(), self._token_expiry(), utc_now()
         claim_hash = hash_claim_code(claim)  # slow; computed before taking the write lock
-        conn = self._connect()
-        try:
-            conn.isolation_level = None
-            conn.execute("BEGIN IMMEDIATE")  # serialises concurrent replays of the same key
-            row = self._find_key(conn, key_hash)
-            if row is None:
-                raise StoreError("Idempotency key disappeared during replay")
-            if row["fingerprint"] != fingerprint:
-                raise IdempotencyConflict()
-            cutoff = iso(datetime.now(timezone.utc) - replay_window)
-            if row["credentials_used_at"] is not None or row["created_at"] < cutoff:
-                raise IdempotencyCompleted(row["public_id"])
-            conn.execute(
-                "UPDATE complaints SET claim_hash = ?, upload_token_hash = ?, upload_token_expires_at = ? WHERE pk = ?",
-                (claim_hash, hash_upload_token(token), expires, row["complaint_pk"]),
-            )
-            conn.execute(
-                "UPDATE idempotency_keys SET replay_count = replay_count + 1, last_replayed_at = ? WHERE scope = ? AND key_hash = ?",
-                (now, CREATE_SCOPE, key_hash),
-            )
-            conn.execute("COMMIT")
+        with closing(self._connect()) as conn:
+            # Serialises concurrent replays of the same key: SQLite takes the write lock up front
+            # (BEGIN IMMEDIATE); PostgreSQL locks the key and complaint rows (FOR UPDATE).
+            with conn.transaction(immediate=True):
+                row = self._find_key(conn, key_hash, self.db.for_update)
+                if row is None:
+                    raise StoreError("Idempotency key disappeared during replay")
+                if row["fingerprint"] != fingerprint:
+                    raise IdempotencyConflict()
+                cutoff = iso(datetime.now(timezone.utc) - replay_window)
+                if row["credentials_used_at"] is not None or row["created_at"] < cutoff:
+                    raise IdempotencyCompleted(row["public_id"])
+                conn.execute(
+                    "UPDATE complaints SET claim_hash = ?, upload_token_hash = ?, upload_token_expires_at = ? WHERE pk = ?",
+                    (claim_hash, hash_upload_token(token), expires, row["complaint_pk"]),
+                )
+                conn.execute(
+                    "UPDATE idempotency_keys SET replay_count = replay_count + 1, last_replayed_at = ? WHERE scope = ? AND key_hash = ?",
+                    (now, CREATE_SCOPE, key_hash),
+                )
             record = self._load(conn, row["public_id"])
-        except BaseException:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
         return {**record, "uploadToken": token, "uploadTokenExpiresAt": expires}, claim
 
     def total_evidence_bytes(self) -> int:
         try:
             with closing(self._connect()) as conn:
-                return conn.execute("SELECT COALESCE(SUM(byte_size), 0) FROM evidence").fetchone()[0]
-        except sqlite3.Error as exc:
+                return int(conn.execute("SELECT CAST(COALESCE(SUM(byte_size), 0) AS BIGINT) FROM evidence").fetchone()[0])
+        except DB_ERRORS as exc:
             raise StoreError("Evidence usage could not be read") from exc
 
     # ---------- Upload tokens ----------
@@ -425,14 +693,14 @@ class ComplaintStore:
         complaint. Call only after the caller proved ownership (claim code verified)."""
         token, expires = new_upload_token(), self._token_expiry()
         try:
-            with closing(self._connect()) as conn, conn:
+            with closing(self._connect()) as conn, conn.transaction():
                 cur = conn.execute(
                     "UPDATE complaints SET upload_token_hash = ?, upload_token_expires_at = ?, "
                     "credentials_used_at = COALESCE(credentials_used_at, ?) WHERE public_id = ?",
                     (hash_upload_token(token), expires, utc_now(), public_id),
                 )
                 return (token, expires) if cur.rowcount else None
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Upload token could not be issued") from exc
 
     def check_upload_token(self, public_id: str, token: str) -> dict | None:
@@ -444,7 +712,7 @@ class ComplaintStore:
                     "SELECT pk, media_type, upload_token_hash, upload_token_expires_at FROM complaints WHERE public_id = ?",
                     (public_id,),
                 ).fetchone()
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Upload token could not be checked") from exc
         if row is None:
             return None
@@ -461,7 +729,7 @@ class ComplaintStore:
         try:
             with closing(self._connect()) as conn:
                 row = conn.execute("SELECT * FROM evidence WHERE complaint_pk = ? AND role = ?", (complaint_pk, role)).fetchone()
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Evidence metadata could not be read") from exc
         return _evidence_dict(row) if row else None
 
@@ -471,49 +739,50 @@ class ComplaintStore:
         try:
             with closing(self._connect()) as conn:
                 try:
-                    with conn:
+                    with conn.transaction():
                         conn.execute(
                             "INSERT INTO evidence (evidence_id, complaint_pk, role, storage_key, media_type, content_type, "
-                            "byte_size, sha256, captured_at, uploaded_at) VALUES (?, ?, 'original', ?, ?, ?, ?, ?, ?, ?)",
+                            "byte_size, sha256, captured_at, uploaded_at, storage_backend) VALUES (?, ?, 'original', ?, ?, ?, ?, ?, ?, ?, ?)",
                             (meta["evidenceId"], complaint_pk, meta["storageKey"], meta["mediaType"], meta["contentType"],
-                             meta["byteSize"], meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"]),
+                             meta["byteSize"], meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"],
+                             meta.get("storageBackend", "local")),
                         )
                         conn.execute("UPDATE complaints SET credentials_used_at = COALESCE(credentials_used_at, ?) WHERE pk = ?",
                                      (meta["uploadedAt"], complaint_pk))
-                except sqlite3.IntegrityError:
+                except INTEGRITY_ERRORS:
                     existing = conn.execute("SELECT * FROM evidence WHERE complaint_pk = ? AND role = 'original'", (complaint_pk,)).fetchone()
                     if existing is None:
                         raise
                     return "exists", _evidence_dict(existing)
                 row = conn.execute("SELECT * FROM evidence WHERE evidence_id = ?", (meta["evidenceId"],)).fetchone()
                 return "created", _evidence_dict(row)
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Evidence metadata could not be saved") from exc
 
     # ---------- Staff accounts and sessions ----------
 
     def _write(self, sql: str, params: tuple, what: str) -> int:
         try:
-            with closing(self._connect()) as conn, conn:
+            with closing(self._connect()) as conn, conn.transaction():
                 return conn.execute(sql, params).rowcount
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError(f"{what} failed") from exc
 
     def create_staff(self, username: str, display_name: str, password_hash: str) -> None:
         try:
-            with closing(self._connect()) as conn, conn:
+            with closing(self._connect()) as conn, conn.transaction():
                 conn.execute("INSERT INTO staff_accounts (username, display_name, password_hash, created_at) VALUES (?, ?, ?, ?)",
                              (username, display_name, password_hash, utc_now()))
-        except sqlite3.IntegrityError as exc:
+        except INTEGRITY_ERRORS as exc:
             raise StaffExists(username) from exc
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Staff account could not be created") from exc
 
     def get_staff(self, username: str) -> dict | None:
         try:
             with closing(self._connect()) as conn:
                 row = conn.execute("SELECT * FROM staff_accounts WHERE username = ?", (username,)).fetchone()
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Staff account could not be read") from exc
         return dict(row) if row else None
 
@@ -522,32 +791,32 @@ class ComplaintStore:
             with closing(self._connect()) as conn:
                 return [dict(r) for r in conn.execute(
                     "SELECT username, display_name, role, created_at, disabled_at FROM staff_accounts ORDER BY username")]
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Staff accounts could not be read") from exc
 
     def set_staff_disabled(self, username: str, disabled: bool) -> bool:
         """Disabling also revokes every open session of the account."""
         now = utc_now()
         try:
-            with closing(self._connect()) as conn, conn:
+            with closing(self._connect()) as conn, conn.transaction():
                 cur = conn.execute("UPDATE staff_accounts SET disabled_at = ? WHERE username = ?", (now if disabled else None, username))
                 if disabled:
                     conn.execute("UPDATE staff_sessions SET revoked_at = ? WHERE revoked_at IS NULL AND staff_pk = "
                                  "(SELECT pk FROM staff_accounts WHERE username = ?)", (now, username))
                 return cur.rowcount == 1
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Staff account could not be updated") from exc
 
     def set_staff_password(self, username: str, password_hash: str) -> bool:
         """Changing a password revokes every open session of the account."""
         now = utc_now()
         try:
-            with closing(self._connect()) as conn, conn:
+            with closing(self._connect()) as conn, conn.transaction():
                 cur = conn.execute("UPDATE staff_accounts SET password_hash = ? WHERE username = ?", (password_hash, username))
                 conn.execute("UPDATE staff_sessions SET revoked_at = ? WHERE revoked_at IS NULL AND staff_pk = "
                              "(SELECT pk FROM staff_accounts WHERE username = ?)", (now, username))
                 return cur.rowcount == 1
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Staff password could not be updated") from exc
 
     def create_staff_session(self, staff_pk: int, token_hash: str, expires_at: str) -> None:
@@ -564,7 +833,7 @@ class ComplaintStore:
                     "WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND a.disabled_at IS NULL",
                     (token_hash, utc_now()),
                 ).fetchone()
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Staff session could not be read") from exc
         return dict(row) if row else None
 
@@ -582,17 +851,17 @@ class ComplaintStore:
                 total = conn.execute("SELECT COUNT(*) FROM complaints").fetchone()[0]
                 ids = [r[0] for r in conn.execute("SELECT public_id FROM complaints ORDER BY pk DESC LIMIT ? OFFSET ?", (limit, max(0, int(offset))))]
                 return [self._staff_record(conn, i) for i in ids], total
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Complaints could not be listed") from exc
 
     def get_staff_complaint(self, public_id: str) -> dict | None:
         try:
             with closing(self._connect()) as conn:
                 return self._staff_record(conn, public_id)
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Complaint could not be read") from exc
 
-    def _staff_record(self, conn: sqlite3.Connection, public_id: str) -> dict | None:
+    def _staff_record(self, conn, public_id: str) -> dict | None:
         record = self._load(conn, public_id)
         if record is None:
             return None
@@ -615,17 +884,239 @@ class ComplaintStore:
                     "SELECT a.username, a.display_name, l.action, l.accessed_at FROM evidence_access_log l "
                     "JOIN staff_accounts a ON a.pk = l.staff_pk WHERE l.evidence_pk = ? ORDER BY l.pk DESC LIMIT 200",
                     (evidence_pk,))]
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Evidence access log could not be read") from exc
+
+    # ---------- Notifications: recipients, follows, push subscriptions, history ----------
+
+    def complaint_ref(self, public_id: str) -> dict | None:
+        """{"pk", "claimHash"} for a complaint, or None."""
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute("SELECT pk, claim_hash FROM complaints WHERE public_id = ?", (public_id,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Complaint could not be read") from exc
+        return {"pk": row["pk"], "claimHash": row["claim_hash"]} if row else None
+
+    def staff_recipient(self, staff_pk: int) -> dict:
+        """The staff account's notification recipient, created on first use."""
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                conn.execute("INSERT INTO notification_recipients (kind, staff_pk, created_at) VALUES ('staff', ?, ?) "
+                             "ON CONFLICT (staff_pk) DO NOTHING", (staff_pk, utc_now()))
+                row = conn.execute("SELECT pk, kind FROM notification_recipients WHERE staff_pk = ?", (staff_pk,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Notification recipient could not be read") from exc
+        return dict(row)
+
+    def create_citizen_recipient(self, token_hash: str) -> dict:
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                pk = conn.insert("INSERT INTO notification_recipients (kind, token_hash, created_at) VALUES ('citizen', ?, ?)",
+                                 (token_hash, utc_now()))
+        except DB_ERRORS as exc:
+            raise StoreError("Notification inbox could not be created") from exc
+        return {"pk": pk, "kind": "citizen"}
+
+    def citizen_recipient(self, token_hash: str) -> dict | None:
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute("SELECT pk, kind FROM notification_recipients WHERE token_hash = ? AND kind = 'citizen'",
+                                   (token_hash,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Notification inbox could not be read") from exc
+        return dict(row) if row else None
+
+    def follow_complaint(self, recipient_pk: int, complaint_pk: int, max_follows: int) -> str:
+        """Returns "created", "exists" or "limit"."""
+        try:
+            with closing(self._connect()) as conn, conn.transaction(immediate=True):
+                if conn.execute("SELECT 1 FROM notification_follows WHERE recipient_pk = ? AND complaint_pk = ?",
+                                (recipient_pk, complaint_pk)).fetchone():
+                    return "exists"
+                # Lock the recipient so concurrent follows cannot pass the limit together.
+                conn.execute("SELECT pk FROM notification_recipients WHERE pk = ?" + self.db.for_update, (recipient_pk,)).fetchone()
+                if conn.execute("SELECT COUNT(*) FROM notification_follows WHERE recipient_pk = ?", (recipient_pk,)).fetchone()[0] >= max_follows:
+                    return "limit"
+                cur = conn.execute("INSERT INTO notification_follows (recipient_pk, complaint_pk, created_at) VALUES (?, ?, ?) "
+                                   "ON CONFLICT (recipient_pk, complaint_pk) DO NOTHING", (recipient_pk, complaint_pk, utc_now()))
+                return "created" if cur.rowcount == 1 else "exists"
+        except DB_ERRORS as exc:
+            raise StoreError("Follow could not be saved") from exc
+
+    def unfollow_complaint(self, recipient_pk: int, public_id: str) -> bool:
+        return self._write("DELETE FROM notification_follows WHERE recipient_pk = ? AND complaint_pk = "
+                           "(SELECT pk FROM complaints WHERE public_id = ?)", (recipient_pk, public_id), "Unfollow") == 1
+
+    def list_follows(self, recipient_pk: int) -> list[dict]:
+        try:
+            with closing(self._connect()) as conn:
+                return [{"complaintId": r["public_id"], "followedAt": r["created_at"]} for r in conn.execute(
+                    "SELECT c.public_id, f.created_at FROM notification_follows f JOIN complaints c ON c.pk = f.complaint_pk "
+                    "WHERE f.recipient_pk = ? ORDER BY f.pk DESC", (recipient_pk,))]
+        except DB_ERRORS as exc:
+            raise StoreError("Follows could not be read") from exc
+
+    def save_push_subscription(self, recipient_pk: int, sub: dict, max_devices: int) -> tuple[str, dict | None]:
+        """Register a device, or refresh its keys if this recipient already registered the endpoint.
+        Returns ("created" | "updated", row) or ("limit", None)."""
+        now = utc_now()
+        try:
+            with closing(self._connect()) as conn, conn.transaction(immediate=True):
+                conn.execute("SELECT pk FROM notification_recipients WHERE pk = ?" + self.db.for_update, (recipient_pk,)).fetchone()
+                existing = conn.execute("SELECT subscription_id FROM push_subscriptions WHERE recipient_pk = ? AND endpoint = ?",
+                                        (recipient_pk, sub["endpoint"])).fetchone()
+                if existing:
+                    conn.execute("UPDATE push_subscriptions SET p256dh = ?, auth = ?, label = ?, expires_at = ?, updated_at = ?, "
+                                 "failure_count = 0 WHERE recipient_pk = ? AND endpoint = ?",
+                                 (sub["p256dh"], sub["auth"], sub["label"], sub["expiresAt"], now, recipient_pk, sub["endpoint"]))
+                    outcome, subscription_id = "updated", existing["subscription_id"]
+                else:
+                    if conn.execute("SELECT COUNT(*) FROM push_subscriptions WHERE recipient_pk = ?", (recipient_pk,)).fetchone()[0] >= max_devices:
+                        return "limit", None
+                    subscription_id = "ps_" + secrets.token_urlsafe(16)
+                    conn.execute("INSERT INTO push_subscriptions (subscription_id, recipient_pk, endpoint, p256dh, auth, label, expires_at, "
+                                 "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                 (subscription_id, recipient_pk, sub["endpoint"], sub["p256dh"], sub["auth"], sub["label"], sub["expiresAt"], now, now))
+                    outcome = "created"
+                row = conn.execute(f"SELECT {_DEVICE_COLUMNS} FROM push_subscriptions WHERE subscription_id = ?", (subscription_id,)).fetchone()
+                return outcome, _device_dict(row)
+        except DB_ERRORS as exc:
+            raise StoreError("Push subscription could not be saved") from exc
+
+    def list_push_subscriptions(self, recipient_pk: int) -> list[dict]:
+        try:
+            with closing(self._connect()) as conn:
+                return [_device_dict(r) for r in conn.execute(
+                    f"SELECT {_DEVICE_COLUMNS} FROM push_subscriptions WHERE recipient_pk = ? ORDER BY pk", (recipient_pk,))]
+        except DB_ERRORS as exc:
+            raise StoreError("Push subscriptions could not be read") from exc
+
+    def delete_push_subscription(self, recipient_pk: int, subscription_id: str) -> bool:
+        """Only the owning recipient can delete a device."""
+        return self._write("DELETE FROM push_subscriptions WHERE recipient_pk = ? AND subscription_id = ?",
+                           (recipient_pk, subscription_id), "Push subscription removal") == 1
+
+    def prune_push_subscriptions(self, max_failures: int) -> int:
+        """Delete devices whose subscription has expired or that failed `max_failures` times in a row."""
+        return self._write("DELETE FROM push_subscriptions WHERE (expires_at IS NOT NULL AND expires_at <= ?) OR failure_count >= ?",
+                           (utc_now(), max_failures), "Push subscription cleanup")
+
+    def _staff_recipient_pks(self, conn) -> list[int]:
+        """Every active staff account's recipient (created here for accounts that have none yet)."""
+        now = utc_now()
+        for (staff_pk,) in conn.execute("SELECT a.pk FROM staff_accounts a LEFT JOIN notification_recipients r ON r.staff_pk = a.pk "
+                                        "WHERE a.disabled_at IS NULL AND r.pk IS NULL").fetchall():
+            conn.execute("INSERT INTO notification_recipients (kind, staff_pk, created_at) VALUES ('staff', ?, ?) "
+                         "ON CONFLICT (staff_pk) DO NOTHING", (staff_pk, now))
+        return [r[0] for r in conn.execute("SELECT r.pk FROM notification_recipients r JOIN staff_accounts a ON a.pk = r.staff_pk "
+                                          "WHERE a.disabled_at IS NULL ORDER BY r.pk")]
+
+    def add_notifications(self, audience: str, event: dict) -> list[dict]:
+        """Store one notification per recipient in `audience` ("followers" of event["complaintPk"],
+        "staff" = every active staff account, or "recipient" = event["recipientPk"]). A recipient that
+        already has event["dedupeKey"] is skipped. Returns the new rows, each with its devices."""
+        now = utc_now()
+        created = []
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                if audience == "followers":
+                    targets = [r[0] for r in conn.execute("SELECT recipient_pk FROM notification_follows WHERE complaint_pk = ? ORDER BY pk",
+                                                          (event["complaintPk"],))]
+                elif audience == "staff":
+                    targets = self._staff_recipient_pks(conn)
+                else:
+                    targets = [event["recipientPk"]]
+                for recipient_pk in targets:
+                    notification_id = "nt_" + secrets.token_urlsafe(16)
+                    cur = conn.execute(
+                        "INSERT INTO notifications (notification_id, recipient_pk, complaint_pk, kind, title, body, url, dedupe_key, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (recipient_pk, dedupe_key) DO NOTHING",
+                        (notification_id, recipient_pk, event.get("complaintPk"), event["kind"], event["title"], event["body"],
+                         event["url"], event["dedupeKey"], now))
+                    if cur.rowcount != 1:
+                        continue
+                    devices = [dict(d) for d in conn.execute(
+                        "SELECT pk, endpoint, p256dh, auth FROM push_subscriptions WHERE recipient_pk = ? ORDER BY pk", (recipient_pk,))]
+                    created.append({"id": notification_id, "recipientPk": recipient_pk, "kind": event["kind"], "title": event["title"],
+                                    "body": event["body"], "url": event["url"], "audience": event["audience"], "createdAt": now, "devices": devices})
+        except DB_ERRORS as exc:
+            raise StoreError("Notifications could not be saved") from exc
+        return created
+
+    def record_push_result(self, subscription_pk: int, outcome: str, max_failures: int) -> None:
+        """outcome: "sent" resets the failure count; "gone" deletes the device (expired or unsubscribed);
+        anything else counts a failure, and the device is deleted after `max_failures` in a row."""
+        now = utc_now()
+        if outcome == "sent":
+            self._write("UPDATE push_subscriptions SET last_success_at = ?, failure_count = 0 WHERE pk = ?", (now, subscription_pk), "Push result")
+        elif outcome == "gone":
+            self._write("DELETE FROM push_subscriptions WHERE pk = ?", (subscription_pk,), "Push subscription removal")
+        else:
+            self._write("UPDATE push_subscriptions SET last_failure_at = ?, failure_count = failure_count + 1 WHERE pk = ?",
+                        (now, subscription_pk), "Push result")
+            self._write("DELETE FROM push_subscriptions WHERE pk = ? AND failure_count >= ?", (subscription_pk, max_failures),
+                        "Push subscription removal")
+
+    def set_push_status(self, notification_id: str, status: str) -> None:
+        self._write("UPDATE notifications SET push_status = ? WHERE notification_id = ?", (status, notification_id), "Push status")
+
+    def list_notifications(self, recipient_pk: int, limit: int = 50, before: str | None = None, unread_only: bool = False) -> dict:
+        """Newest first. `before` is the id of the last notification already shown (cursor paging)."""
+        limit = max(1, min(int(limit), NOTIFICATION_PAGE_MAX))
+        try:
+            with closing(self._connect()) as conn:
+                where, params = ["n.recipient_pk = ?"], [recipient_pk]
+                if before:
+                    where.append("n.pk < (SELECT pk FROM notifications WHERE notification_id = ? AND recipient_pk = ?)")
+                    params += [before, recipient_pk]
+                if unread_only:
+                    where.append("n.read_at IS NULL")
+                rows = conn.execute(
+                    f"SELECT {_NOTIFICATION_COLUMNS} FROM notifications n LEFT JOIN complaints c ON c.pk = n.complaint_pk "
+                    f"WHERE {' AND '.join(where)} ORDER BY n.pk DESC LIMIT ?", (*params, limit + 1)).fetchall()
+                unread = conn.execute("SELECT COUNT(*) FROM notifications WHERE recipient_pk = ? AND read_at IS NULL", (recipient_pk,)).fetchone()[0]
+        except DB_ERRORS as exc:
+            raise StoreError("Notifications could not be read") from exc
+        items = [_notification_dict(r) for r in rows[:limit]]
+        return {"items": items, "unreadCount": int(unread), "nextBefore": items[-1]["id"] if len(rows) > limit else None}
+
+    def unread_count(self, recipient_pk: int) -> int:
+        try:
+            with closing(self._connect()) as conn:
+                return int(conn.execute("SELECT COUNT(*) FROM notifications WHERE recipient_pk = ? AND read_at IS NULL",
+                                        (recipient_pk,)).fetchone()[0])
+        except DB_ERRORS as exc:
+            raise StoreError("Notifications could not be read") from exc
+
+    def mark_notification(self, recipient_pk: int, notification_id: str, read: bool) -> dict | None:
+        """Mark one of the recipient's notifications read (keeping the first read time) or unread."""
+        try:
+            with closing(self._connect()) as conn:
+                with conn.transaction():
+                    sql = ("UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE recipient_pk = ? AND notification_id = ?" if read
+                           else "UPDATE notifications SET read_at = NULL WHERE recipient_pk = ? AND notification_id = ?")
+                    cur = conn.execute(sql, ((utc_now(),) if read else ()) + (recipient_pk, notification_id))
+                if cur.rowcount != 1:
+                    return None
+                row = conn.execute(f"SELECT {_NOTIFICATION_COLUMNS} FROM notifications n LEFT JOIN complaints c ON c.pk = n.complaint_pk "
+                                   "WHERE n.notification_id = ?", (notification_id,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Notification could not be updated") from exc
+        return _notification_dict(row)
+
+    def mark_all_notifications_read(self, recipient_pk: int) -> int:
+        return self._write("UPDATE notifications SET read_at = ? WHERE recipient_pk = ? AND read_at IS NULL",
+                           (utc_now(), recipient_pk), "Notifications update")
 
     def get(self, public_id: str) -> dict | None:
         try:
             with closing(self._connect()) as conn:
                 return self._load(conn, public_id)
-        except sqlite3.Error as exc:
+        except DB_ERRORS as exc:
             raise StoreError("Complaint could not be read") from exc
 
-    def _load(self, conn: sqlite3.Connection, public_id: str) -> dict | None:
+    def _load(self, conn, public_id: str) -> dict | None:
         row = conn.execute("SELECT * FROM complaints WHERE public_id = ?", (public_id,)).fetchone()
         if row is None:
             return None

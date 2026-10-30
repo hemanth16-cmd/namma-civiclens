@@ -10,6 +10,8 @@ import {navigate} from '../router.js';
 import {loadApiConfig} from '../api-config.js';
 import {ApiError, createApiClient} from '../api-client.js';
 import {staffSession} from '../staff-session.js';
+import {mountInbox} from './notifications.js';
+import {disablePush, registeredDevice, takePendingStaffReads} from '../push-client.js';
 
 const PAGE_SIZE = 25;
 const SAMPLE = /^NCL-\d{4}-[A-Z0-9]{6}$/;
@@ -20,10 +22,23 @@ const $ = id => document.getElementById(id);
 function page(root, body, {signedIn = false} = {}) {
   const session = staffSession.get();
   root.innerHTML = `<div class="page">
-    ${publicTopbar({fallback: 'home', right: signedIn && session ? `<span class="micro">${esc(session.staff.displayName)}</span> ${btn(icon('lock') + '<span>Sign out</span>', 'id="staff-sign-out"', 'ghost')}` : ''})}
+    ${publicTopbar({fallback: 'home', right: signedIn && session ? `<a class="btn btn-ghost" href="#/staff/notifications" id="staff-notifications-link">${icon('bell')}<span>Notifications</span><span id="staff-unread" class="count-badge" hidden></span></a> <span class="micro">${esc(session.staff.displayName)}</span> ${btn(icon('lock') + '<span>Sign out</span>', 'id="staff-sign-out"', 'ghost')}` : ''})}
     <main id="main" class="narrow" tabindex="-1" data-staff-console="server">${body}</main>
   </div>`;
   $('staff-sign-out')?.addEventListener('click', () => signOut(root));
+  if (signedIn && session) showUnread(session.token);
+}
+
+async function showUnread(token) {
+  try {
+    const count = await (await client())?.unreadCount(token);
+    const badge = $('staff-unread');
+    if (badge && count) {
+      badge.hidden = false;
+      badge.textContent = String(count);
+      badge.setAttribute('aria-label', `${count} unread`);
+    }
+  } catch { /* the badge is optional */ }
 }
 
 async function client() {
@@ -31,7 +46,7 @@ async function client() {
   return config.mode === 'backend' ? createApiClient({baseUrl: config.baseUrl}) : null;
 }
 
-/** Routes: #/staff (list) and #/staff/<publicId> (detail). */
+/** Routes: #/staff (list), #/staff/notifications and #/staff/<publicId> (detail). */
 export async function renderStaff(root, id = '') {
   const http = await client();
   if (!http) {
@@ -40,6 +55,7 @@ export async function renderStaff(root, id = '') {
     return;
   }
   if (!staffSession.get()) return renderSignIn(root, http);
+  if (id === 'notifications') return renderStaffNotifications(root, http);
   const publicId = decodeURIComponent(id || '').trim().toUpperCase();
   return publicId ? renderDetail(root, http, publicId) : renderList(root, http);
 }
@@ -61,6 +77,10 @@ function renderSignIn(root, http, message = '') {
     try {
       staffSession.set(await http.staffSignIn(String(form.get('username')), String(form.get('password'))));
       listOffset = 0;
+      // Notifications opened before signing in (sessions are memory-only) are marked read now.
+      for (const nid of takePendingStaffReads()) http.markNotification(staffSession.get().token, nid, true).catch(() => {});
+      const target = location.hash.replace(/^#\/staff\/?/, '');
+      if (target) return renderStaff(root, target);  // e.g. a notification's complaint or the inbox
       renderList(root, http);
     } catch (err) {
       button.disabled = false;
@@ -77,6 +97,16 @@ function handleError(root, http, err, slot) {
     return renderSignIn(root, http, 'Your staff session has ended. Sign in again.');
   }
   slot.innerHTML = notice(esc(err instanceof ApiError ? err.message : 'The request failed.'), 'error', 'alert');
+}
+
+async function renderStaffNotifications(root, http) {
+  page(root, `<p><a class="inline-link" href="#/staff">${icon('back', 'mini-icon')}<span>All server complaints</span></a></p>
+    ${heading({eyebrow: 'CivicLens staff · server', title: 'Staff notifications', lead: 'New complaints and new evidence on the server. Turn notifications on to get them as system notifications on this computer or phone, even when CivicLens is closed.'})}
+    <div id="staff-notifications" role="status" aria-live="polite"><p class="micro">Loading…</p></div>`, {signedIn: true});
+  return mountInbox($('staff-notifications'), {http, audience: 'staff', token: staffSession.get().token, onUnauthorized: () => {
+    staffSession.clear();
+    renderSignIn(root, http, 'Your staff session has ended. Sign in again.');
+  }});
 }
 
 async function renderList(root, http) {
@@ -195,6 +225,10 @@ async function signOut(root) {
   staffSession.clear();
   const http = await client();
   if (session && http) {
+    // A signed-out browser (for example a shared computer) must stop receiving staff notifications.
+    if (registeredDevice('staff')) {
+      try { await disablePush({http, token: session.token, audience: 'staff'}); } catch { /* deleted at a later failed delivery at worst */ }
+    }
     try { await http.staffSignOut(session.token); } catch { /* the in-memory session is gone either way */ }
   }
   toast('Signed out of the staff console.', 'success');

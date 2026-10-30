@@ -1,6 +1,5 @@
 import hashlib
 import io
-import sqlite3
 import sys
 from contextlib import closing
 from dataclasses import replace
@@ -8,6 +7,8 @@ from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests import dbutil
 
 from app import auth
 from app.main import create_app
@@ -77,7 +78,7 @@ def new_complaint(api, media_type="photo", content=JPEG, filename="e.jpg", ctype
 
 
 def rows(db, sql, params=()):
-    with closing(sqlite3.connect(db)) as conn:
+    with closing(dbutil.connect(db)) as conn:
         return conn.execute(sql, params).fetchall()
 
 
@@ -187,7 +188,7 @@ def test_disabling_an_account_ends_its_sessions_and_blocks_sign_in(api, token, i
 
 def test_a_disabled_account_is_refused_even_if_its_sessions_were_not_revoked(api, token, isolated_db_path):
     # Disabled by some other path (direct database edit, a future admin tool) without touching sessions.
-    with closing(sqlite3.connect(isolated_db_path)) as conn:
+    with closing(dbutil.connect(isolated_db_path)) as conn:
         conn.execute("UPDATE staff_accounts SET disabled_at = '2026-10-01T00:00:00.000Z' WHERE username = 'asha'")
         conn.commit()
     assert rows(isolated_db_path, "SELECT COUNT(*) FROM staff_sessions WHERE revoked_at IS NULL") == [(1,)]
