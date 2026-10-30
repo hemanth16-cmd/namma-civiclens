@@ -47,6 +47,10 @@ backend/
     dbutil.py          test helper: direct SQL on whichever backend the run uses
     test_notifications.py Web Push: ownership, follows, devices, events, history, delivery, real encryption/VAPID
     test_supabase_storage.py Supabase config, startup checks, adapter, failures, full API flow (fake HTTP; no real Supabase)
+    test_deep_stress.py 50 concurrent complaints, 100 tracking, 20 streaming uploads, Kannada/multilingual Unicode, 50 mixed DB workers, rate-limiter memory bounds, quota exhaustion
+    test_security_review.py IDOR isolation, staff session revocation, tracking secrecy, sanitization, media exploits (SVG, HTML, PHP, traversal), SQL injection, SSRF prevention
+    test_migration_stress.py Full 12-table SQLite-to-PostgreSQL synthetic migration, verification, sequence resets, idempotency, conflict halt
+    test_push_stress.py Push failure pruning (410 Gone, 5-failure threshold), unread race conditions, zero-leakage payload verification
   data/                Default database and evidence location (created on first start; git-ignored)
     civiclens.sqlite3  complaints, timeline, verification log, evidence metadata
     evidence/objects/  stored files, named by random key (objects/<first 2 hex>/<32 hex>)
@@ -486,6 +490,43 @@ docker stop civiclens-pgtest
 ```
 
 Without `CIVICLENS_TEST_POSTGRES_URL` the PostgreSQL tests are skipped. In PostgreSQL mode each test gets its own schema, and tests marked `sqlite_only` (SQLite files, PRAGMA, SQLite triggers) are skipped; their PostgreSQL equivalents are in `tests/test_postgres.py`. Never point these variables at a real Supabase project: tests create and drop schemas.
+
+## Load and Stress Testing
+
+A standalone load and stress testing harness is available in scripts/load-stress-harness.py. It tests the live API across all critical paths and concurrency boundaries.
+
+### Executing Stress Workloads
+
+`sh
+# Run against local API (default http://127.0.0.1:8000 or --base http://127.0.0.1:8010)
+python scripts/load-stress-harness.py --all
+
+# Run individual workload (e.g. concurrent complaints, uploads, rate limits)
+python scripts/load-stress-harness.py --workload 1
+python scripts/load-stress-harness.py --workload 3
+
+# Run 100-request burst simulation within 500ms
+python scripts/load-stress-harness.py --burst
+
+# Run 5-minute sustained load test
+python scripts/load-stress-harness.py --sustained --duration 300
+`
+
+### Sustained Performance Benchmarks (2026-10-30)
+
+| Metric | Result |
+| --- | --- |
+| **Duration** | 300 seconds (5 minutes) |
+| **Total Requests** | 29,527 |
+| **Successful Requests** | 29,527 (100.0%) |
+| **Failures / Errors** | 0 (0.0%) |
+| **Throughput** | 98.42 requests/second |
+| **p50 Latency** | 24.56 ms |
+| **p90 Latency** | 74.07 ms |
+| **p95 Latency** | 145.47 ms |
+| **p99 Latency** | 546.82 ms |
+| **Peak Memory (RSS)** | 47.5 MB |
+| **Database Locks / Corruption** | 0 detected |
 
 ## Endpoints
 

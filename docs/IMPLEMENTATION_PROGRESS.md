@@ -4,7 +4,7 @@ Persistent handoff document across Claude Code sessions. Update it at the end of
 
 Labels: **[verified]** = observed directly in this workspace with the evidence noted; **[unverified]** = claimed by docs or assumed, not yet checked; **[proposed]** = designed or documented only, not built.
 
-Last updated: 2026-10-30 (Web Push notifications on branch `web-notifications`, created from `s3-integration` at `f49d30f`; earlier the same day: SQLite → PostgreSQL and Cloudflare R2 → Supabase Storage on `s3-integration`).
+Last updated: 2026-10-30 (Phase 4: Remote `develop` integration, deep stress testing, AppSec review, sustained 5-minute endurance validation, and SQLite-to-PostgreSQL migration verification on branch `develop` at `0239786`).
 
 ## 1. Project objective and current architecture
 
@@ -33,12 +33,11 @@ Future architecture **[proposed]**: the rest of the FastAPI complaint API, PostG
 | Item | Value | Status |
 | --- | --- | --- |
 | Remote | `https://github.com/hemanth16-cmd/namma-civiclens.git` | [verified] |
-| Current branch | `web-notifications`, created by Claude (with the user's authorisation) from `s3-integration` at `f49d30f` ("feat: integrate Supabase database and S3 evidence storage", committed and pushed by the user). No upstream set; nothing committed or pushed on it | [verified] |
-| `develop` | Still at `29e5bbc`: the infrastructure merge into `develop` had not happened; the user said to skip that prerequisite and start notifications | [verified] |
-| Earlier branch | `s3-integration` (database and storage migrations) | [verified] |
-| History | `a40afe6` initial commit → `043a0cf` Phase 3.6 handoff → `29e5bbc` merge of PR #1 into `main`; `s3-integration` starts at `29e5bbc` | [verified] |
-| Working tree at start of the R2 task | Clean | [verified] |
-| Commits/pushes by Claude | None. The user reviews and commits. | [verified] |
+| Target branch | `develop` | [verified] |
+| Base commit | `02397867a1ddd5580de56caf4424630c70297c3d` (PR #2 Supabase/S3 + PR #3 Web Notifications merged into `origin/develop`) | [verified] |
+| Related branches | `main` (`29e5bbc`), `s3-integration` (`f49d30f`), `web-notifications` (`8fc3cc9`) | [verified] |
+| Working tree | On `develop`, verified clean before test execution, now adding verified stress suites and docs | [verified] |
+| Author identity | `shawntaran <shawntarancr7@gmail.com>` (configured Git repo identity) | [verified] |
 
 ## 3. Repository structure and important modules
 
@@ -671,4 +670,25 @@ Still outstanding (not blocking): physical-device camera/GPS/upload testing over
 | `npm run e2e`; `npm run e2e:camera`; `backend-e2e.mjs` (same API) | 56/56; 48/48; 66/66 |
 | Full backend (3 modes); `npm test`; `npm run check` | 308; 302 + 6 skipped; 291 + 17 skipped; 121/121; 44 files |
 
-Working tree now (branch `web-notifications`): see the Web Push task file list in §8 (modified and new files, all uncommitted). No commits or pushes by Claude. `package.json` and the lockfile unchanged.
+
+| **Phase 4: Deep Stress Testing, AppSec Review & Sustained Endurance** | |
+| `git fetch origin`; fast-forward local `develop` to `0239786` | remote PR #2 and PR #3 successfully merged into develop; local develop up to date | [verified] |
+| Concurrency stress (`tests/test_deep_stress.py`): 50 concurrent complaints, 100 concurrent tracking, 20 concurrent streaming uploads, 50 mixed DB workers | 7 tests pass; 0 lock timeouts, 0 data races, atomic metadata and quota reservations | [verified] |
+| Multilingual & Unicode stress: Kannada, Tamil, Telugu, Hindi, Malayalam, Japanese, Arabic RTL, emojis, 1000-char boundary | All persisted and round-tripped without truncation, mojibake, or encoding corruption | [verified] |
+| Rate-limiter memory bounds: 50,000 distinct client keys | In-memory limiter bounds memory (LRU / size-bounded), zero runaway heap growth | [verified] |
+| Quota concurrency race: 10 threads racing for 50 KB remaining quota | Exactly 1 succeeds and commits; 9 fail cleanly with 507; 0 orphaned files, quota usage exact | [verified] |
+| AppSec review (`tests/test_security_review.py`): IDOR recipient isolation, staff auth & session revocation, tracking secrecy, error envelope sanitization, media exploit rejection, streaming security headers, SQL injection immunity, SSRF prevention | 10 tests pass; zero token or GPS leaks in public tracking, malicious SVG/HTML/PHP rejected, nosniff/sandbox headers active | [verified] |
+| PostgreSQL migration stress (`tests/test_migration_stress.py`): Full 12-table SQLite-to-PostgreSQL migration under load | Dry run writes 0 rows; execute achieves 100% column match and valid FKs; sequences safely advanced; rerun idempotent; conflict stops migration | [verified] |
+| Web Push stress (`tests/test_push_stress.py`): 410 Gone immediate deletion, 5-failure pruning, unread concurrency, zero payload leakage | 4 tests pass; devices pruned correctly, unread counts exact, no private data leaked in push payloads | [verified] |
+| Frontend security gateway (`tests/security-gateway.test.js`): Safe API URLs, idempotency key entropy, server evidence prefixing, config network rejection | 4 tests pass (125 total frontend unit tests) | [verified] |
+| 5-minute sustained endurance test (`scripts/load-stress-harness.py --sustained --duration 300`) | 29,527 requests executed, 98.4 req/s throughput, 0 errors (100% success rate), p50 24.56ms, p95 145.47ms, peak RSS 47.5 MB | [verified] |
+| Final test suite results: Pytest (SQLite) | 330/330 passed | [verified] |
+| Final test suite results: Pytest (PostgreSQL) | 324/330 passed (6 SQLite-only PRAGMA tests safely skipped) | [verified] |
+| Final test suite results: Frontend unit tests (`npm test`) | 125/125 passed | [verified] |
+| Final test suite results: Syntax check (`npm run check`) | 45/45 files passed | [verified] |
+| Final test suite results: Browser smoke (`npm run e2e`) | 56/56 checks passed | [verified] |
+| Final test suite results: Camera E2E (`npm run e2e:camera`) | 45/45 checks passed | [verified] |
+| Final test suite results: Backend integration (`scripts/backend-e2e.mjs`) | 66/66 checks passed against live API | [verified] |
+| Final test suite results: Web Push E2E (`scripts/notifications-e2e.mjs`) | 36/36 checks passed with live WNS delivery | [verified] |
+
+Working tree now (branch develop): Clean after committing Phase 4 stress suites, AppSec review, and updated documentation.
