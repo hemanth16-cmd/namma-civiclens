@@ -40,6 +40,19 @@ export async function reportMode(options = {}) {
   return (await settings(options)).mode;
 }
 
+/** Server mode only: the server's notice about AI analysis of uploaded photos, or null when it is off,
+ * in local mode, or when the server cannot be asked (the report flow never waits on or fails for this). */
+export async function aiDisclosure(options = {}) {
+  const config = await settings(options);
+  if (config.mode !== 'backend') return null;
+  try {
+    const d = await client(config, options).getAiDisclosure();
+    return d.enabled ? d.disclosure : null;
+  } catch {
+    return null;
+  }
+}
+
 // Server reports submitted from this browser, so "My reports" can find them again (there are no
 // citizen accounts). Only the public ID, category and submission time are kept: never the claim
 // code, upload token, location or description.

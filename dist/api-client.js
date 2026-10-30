@@ -266,6 +266,38 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return d.map(e => ({username: String(e?.username ?? ''), displayName: String(e?.displayName ?? ''), action: String(e?.action ?? ''), accessedAt: e?.accessedAt ?? null}));
     },
 
+    // ---------- AI analysis (staff). Results are suggestions; the server never changes a case because of them. ----------
+
+    /** Public: whether photos may be analysed by an external AI service, and the notice to show before upload. */
+    async getAiDisclosure() {
+      const d = await request('GET', '/ai');
+      return {enabled: d.enabled === true, disclosure: typeof d.disclosure === 'string' ? d.disclosure.slice(0, 500) : null};
+    },
+
+    async getAiAnalysis(token, id) {
+      return toAiAnalysis(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/ai`, undefined, {headers: staffAuth(token)}));
+    },
+
+    async retryAiAnalysis(token, id) {
+      return toAiAnalysis(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/ai/retry`, {}, {headers: staffAuth(token)}));
+    },
+
+    async getRepairAssessments(token, id) {
+      return toRepairAssessments(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/repair-assessment`, undefined, {headers: staffAuth(token)}));
+    },
+
+    /** Compare the original photo with an after-repair photo (default: the latest). */
+    async verifyRepair(token, id, repairEvidenceId = null) {
+      return toRepairAssessments(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/verify-repair`,
+        repairEvidenceId ? {repairEvidenceId} : {}, {headers: staffAuth(token)}));
+    },
+
+    /** Supervisor review of an AI suggestion: decision 'approved' or 'rejected' (a note is required to reject). */
+    async reviewRepairAssessment(token, id, assessmentId, {decision, note = ''}) {
+      return toRepairAssessment(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/repair-assessment/${encodeURIComponent(assessmentId)}/review`,
+        {decision, note}, {headers: staffAuth(token)}));
+    },
+
     // ---------- Notifications. `token` is a staff session token or this device's citizen inbox token. ----------
 
     /** GET /notifications/config: whether Web Push is configured, and the VAPID public key. */
@@ -541,4 +573,66 @@ export function toPublicRecord(d) {
       response: e?.response ?? null, by: String(e?.by ?? ''), actor: String(e?.actor ?? ''), note: String(e?.note ?? '')
     }))
   };
+}
+
+// ---------- AI analysis ----------
+
+const AI_STATES = ['pending', 'running', 'completed', 'failed', 'skipped'];
+const OUTCOMES = ['likely_repaired', 'damage_visible', 'inconclusive'];
+const unit = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null);
+const px = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+
+function toAiStatus(a) {
+  return {enabled: a?.enabled === true, provider: typeof a?.provider === 'string' ? a.provider : null,
+    reason: typeof a?.reason === 'string' ? a.reason : null, disclosure: typeof a?.disclosure === 'string' ? a.disclosure : null,
+    thresholds: {present: unit(a?.thresholds?.present) ?? 0.5, low: unit(a?.thresholds?.low) ?? 0.25}};
+}
+
+/** One detection: class, mapped category (or null), model confidence and a top-left pixel box in the original photo. */
+export function toAiDetection(d) {
+  if (typeof d?.className !== 'string' || unit(d.confidence) === null || !d.bbox || typeof d.bbox !== 'object') return null;
+  return {className: d.className.slice(0, 100), category: typeof d.category === 'string' ? d.category : null, confidence: d.confidence,
+    bbox: {x: px(d.bbox.x), y: px(d.bbox.y), width: px(d.bbox.width), height: px(d.bbox.height)}};
+}
+
+function toAiInference(i) {
+  if (typeof i?.id !== 'string' || !AI_STATES.includes(i.state)) return null;
+  return {id: i.id, evidenceId: String(i.evidenceId ?? ''), evidenceRole: i.evidenceRole === 'repair' ? 'repair' : 'original',
+    detector: String(i.detector ?? ''), provider: String(i.provider ?? ''), mechanism: i.mechanism === 'model' ? 'model' : 'workflow',
+    modelId: String(i.modelId ?? ''), modelVersion: i.modelVersion ?? null, classPrompt: i.classPrompt ?? null, state: i.state,
+    detectedCategory: i.detectedCategory ?? null, originalClass: i.originalClass ?? null, topConfidence: unit(i.topConfidence),
+    detections: (Array.isArray(i.detections) ? i.detections : []).map(toAiDetection).filter(Boolean),
+    imageWidth: Number(i.imageWidth) || null, imageHeight: Number(i.imageHeight) || null, errorCode: i.errorCode ?? null,
+    attempts: Number(i.attempts) || 0, completedAt: i.completedAt ?? null};
+}
+
+export function toAiAnalysis(d) {
+  if (!d || typeof d !== 'object' || !Array.isArray(d.inferences)) throw new ApiError('The CivicLens server sent AI results this app could not read.', {code: 'malformed_response'});
+  return {complaintId: String(d.complaintId ?? ''), category: String(d.category ?? ''), ai: toAiStatus(d.ai),
+    routing: {detectors: (Array.isArray(d.routing?.detectors) ? d.routing.detectors : []).map(String)},
+    inferences: d.inferences.map(toAiInference).filter(Boolean), reset: Number.isFinite(d.reset) ? d.reset : null};
+}
+
+export function toRepairAssessment(a) {
+  if (typeof a?.id !== 'string' || !/^ra_[A-Za-z0-9_-]{22}$/.test(a.id)) return null;
+  const details = a.details && typeof a.details === 'object' ? a.details : {};
+  const review = a.review && typeof a.review === 'object' ? a.review : {};
+  return {id: a.id, workOrderId: a.workOrderId ?? null, originalEvidenceId: String(a.originalEvidenceId ?? ''), repairEvidenceId: String(a.repairEvidenceId ?? ''),
+    state: String(a.state ?? ''), suggestedOutcome: OUTCOMES.includes(a.suggestedOutcome) ? a.suggestedOutcome : null,
+    verificationConfidence: unit(a.verificationConfidence),
+    locationCheck: ['match', 'mismatch', 'unverified'].includes(a.locationCheck) ? a.locationCheck : null,
+    gpsDistanceM: typeof a.gpsDistanceM === 'number' && Number.isFinite(a.gpsDistanceM) ? a.gpsDistanceM : null,
+    reasons: (Array.isArray(details.reasons) ? details.reasons : []).map(r => String(r).slice(0, 300)),
+    visualMatch: typeof details.visualMatch === 'string' ? details.visualMatch : null,
+    matchedFeatures: Number(details.alignment?.inliers) || 0,
+    errorCode: a.errorCode ?? null,
+    review: {status: ['pending_review', 'approved', 'rejected'].includes(review.status) ? review.status : 'pending_review',
+      reviewer: review.reviewer ?? null, reviewerName: review.reviewerName ?? null, note: String(review.note ?? ''), reviewedAt: review.reviewedAt ?? null},
+    verifiedResolution: ['verified_repaired', 'verified_not_repaired'].includes(a.verifiedResolution) ? a.verifiedResolution : 'unverified',
+    requestedBy: a.requestedBy ?? null, createdAt: a.createdAt ?? null, completedAt: a.completedAt ?? null};
+}
+
+function toRepairAssessments(d) {
+  if (!d || typeof d !== 'object' || !Array.isArray(d.assessments)) throw new ApiError('The CivicLens server sent repair assessments this app could not read.', {code: 'malformed_response'});
+  return {ai: toAiStatus(d.ai), assessments: d.assessments.map(toRepairAssessment).filter(Boolean)};
 }

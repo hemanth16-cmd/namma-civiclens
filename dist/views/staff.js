@@ -13,6 +13,7 @@ import {loadApiConfig} from '../api-config.js';
 import {ApiError, createApiClient} from '../api-client.js';
 import {staffSession} from '../staff-session.js';
 import {mountInbox} from './notifications.js';
+import {aiSections, mountAiPanels, overlayDetections} from './staff-ai.js';
 import {disablePush, registeredDevice, takePendingStaffReads} from '../push-client.js';
 
 const PAGE_SIZE = 25;
@@ -179,6 +180,7 @@ async function renderDetail(root, http, publicId) {
            <div class="row-actions">${btn(icon('eye') + `<span>View ${what}</span>`, 'id="staff-view-evidence"', 'primary')}</div>
            <div id="staff-evidence-view" class="mt"></div>`
         : notice('No evidence has been uploaded for this complaint.', 'info', 'alert')}</div>
+      ${aiSections()}
       <h2 class="mt">Evidence access log</h2>
       <div id="staff-access-log"><p class="micro">${r.evidence ? 'Loading…' : 'No evidence, so no access.'}</p></div>
       <h2 class="mt">Public timeline</h2>
@@ -189,6 +191,30 @@ async function renderDetail(root, http, publicId) {
     loadAccessLog(root, http, r.id);
   }
   wireManagement(root, http, r);
+  mountAiPanels(http, r, {
+    onError: (err, slot) => handleError(root, http, err, slot),
+    viewOriginal: (target, evidenceId) => showEvidenceInto(root, http, target, () => http.fetchStaffEvidence(staffSession.get().token, r.id), evidenceId, 'Original evidence'),
+    viewAfter: (target, workOrderId, evidenceId) => showEvidenceInto(root, http, target,
+      () => http.fetchWorkOrderEvidence(staffSession.get().token, workOrderId, evidenceId), evidenceId, 'After-repair evidence')
+  });
+}
+
+/** Before/after viewer for the repair-verification panel. Each view is logged by the server. */
+async function showEvidenceInto(root, http, target, load, evidenceId, alt) {
+  target.innerHTML = '<p class="micro" role="status">Loading evidence…</p>';
+  try {
+    const blob = await load();
+    if (!target.isConnected) return;
+    const url = URL.createObjectURL(blob);
+    addCleanup(() => URL.revokeObjectURL(url));
+    target.innerHTML = blob.type.startsWith('video/')
+      ? `<video class="receipt-media" controls playsinline src="${url}" aria-label="${esc(alt)}"></video>`
+      : `<img class="receipt-media" src="${url}" alt="${esc(alt)}">`;
+    overlayDetections(target, evidenceId);
+    target.insertAdjacentHTML('beforeend', '<p class="micro">Viewing is recorded in the evidence access log.</p>');
+  } catch (err) {
+    if (target.isConnected) handleError(root, http, err, target);
+  }
 }
 
 // ---------- Case management ----------
@@ -350,6 +376,7 @@ async function showWorkOrderEvidence(root, http, order, evidenceId) {
     const url = URL.createObjectURL(blob);
     addCleanup(() => URL.revokeObjectURL(url));
     view.innerHTML = `<img class="receipt-media" src="${url}" alt="Work order evidence for ${esc(order.team)}"><p class="micro">Viewing is recorded in the evidence access log.</p>`;
+    overlayDetections(view, evidenceId);
   } catch (err) {
     if (view.isConnected) handleError(root, http, err, view);
   }
@@ -368,6 +395,7 @@ async function viewEvidence(root, http, r) {
     view.innerHTML = blob.type.startsWith('video/')
       ? `<video class="receipt-media" controls playsinline src="${url}" aria-label="Evidence video for ${esc(r.id)}"></video>`
       : `<img class="receipt-media" src="${url}" alt="Evidence photo for ${esc(r.id)}">`;
+    overlayDetections(view, r.evidence.evidenceId);
     view.insertAdjacentHTML('beforeend', '<p class="micro">Shown from the server for this session only. It is not saved in this browser.</p>');
     loadAccessLog(root, http, r.id);
   } catch (err) {

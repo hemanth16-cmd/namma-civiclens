@@ -36,7 +36,7 @@ from .lifecycle import RuleViolation
 logger = logging.getLogger("civiclens.store")
 
 MAX_ID_ATTEMPTS = 5
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 DEFAULT_UPLOAD_TOKEN_TTL = timedelta(hours=1)
 
 INITIAL_STATUS = "Submitted"
@@ -407,6 +407,82 @@ CREATE TRIGGER staff_notes_no_update BEFORE UPDATE ON staff_notes BEGIN SELECT R
 CREATE TRIGGER staff_notes_no_delete BEFORE DELETE ON staff_notes BEGIN SELECT RAISE(ABORT, 'staff_notes is append-only'); END;
 CREATE TRIGGER work_order_events_no_update BEFORE UPDATE ON work_order_events BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
 CREATE TRIGGER work_order_events_no_delete BEFORE DELETE ON work_order_events BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
+""",    8: """
+-- AI-assisted analysis (app/ai, docs/ARCHITECTURE.md "AI analysis"). Everything here is a suggestion for
+-- staff: nothing in these tables changes a complaint's status or citizen verification. JSON columns are
+-- TEXT here and JSONB on PostgreSQL.
+
+-- One row per (evidence file, detector). The UNIQUE key makes scheduling idempotent: a retry re-runs
+-- the same row instead of adding another.
+CREATE TABLE ai_inferences (
+    pk                 INTEGER PRIMARY KEY,
+    inference_id       TEXT NOT NULL UNIQUE,
+    complaint_pk       INTEGER NOT NULL REFERENCES complaints(pk),
+    evidence_pk        INTEGER NOT NULL REFERENCES evidence(pk),
+    detector           TEXT NOT NULL,
+    provider           TEXT NOT NULL,
+    mechanism          TEXT NOT NULL CHECK (mechanism IN ('model', 'workflow')),
+    model_id           TEXT NOT NULL,
+    model_version      TEXT,
+    class_prompt       TEXT,
+    state              TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed', 'skipped')),
+    original_class     TEXT,
+    detected_category  TEXT,
+    top_confidence     REAL CHECK (top_confidence IS NULL OR (top_confidence >= 0 AND top_confidence <= 1)),
+    detection_count    INTEGER NOT NULL DEFAULT 0,
+    predictions        TEXT NOT NULL DEFAULT '[]',
+    confidence_meta    TEXT NOT NULL DEFAULT '{}',
+    image_width        INTEGER,
+    image_height       INTEGER,
+    error_code         TEXT,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    started_at         TEXT,
+    completed_at       TEXT,
+    updated_at         TEXT NOT NULL,
+    UNIQUE (evidence_pk, detector)
+);
+CREATE INDEX ai_inferences_by_complaint ON ai_inferences (complaint_pk, pk);
+CREATE INDEX ai_inferences_by_state ON ai_inferences (state, updated_at);
+
+-- Before/after comparison of one original and one repair photo. The AI suggestion (suggested_outcome,
+-- verification_confidence) is kept apart from the human review (review_status), and both are apart from
+-- the complaint's administrative status.
+CREATE TABLE repair_assessments (
+    pk                       INTEGER PRIMARY KEY,
+    assessment_id            TEXT NOT NULL UNIQUE,
+    complaint_pk             INTEGER NOT NULL REFERENCES complaints(pk),
+    work_order_pk            INTEGER REFERENCES work_orders(pk),
+    original_evidence_pk     INTEGER NOT NULL REFERENCES evidence(pk),
+    repair_evidence_pk       INTEGER NOT NULL REFERENCES evidence(pk),
+    state                    TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed')),
+    suggested_outcome        TEXT CHECK (suggested_outcome IS NULL OR suggested_outcome IN ('likely_repaired', 'damage_visible', 'inconclusive')),
+    verification_confidence  REAL CHECK (verification_confidence IS NULL OR (verification_confidence >= 0 AND verification_confidence <= 1)),
+    location_check           TEXT CHECK (location_check IS NULL OR location_check IN ('match', 'mismatch', 'unverified')),
+    gps_distance_m           REAL,
+    details                  TEXT NOT NULL DEFAULT '{}',
+    error_code               TEXT,
+    attempts                 INTEGER NOT NULL DEFAULT 0,
+    requested_by_staff_pk    INTEGER REFERENCES staff_accounts(pk),
+    review_status            TEXT NOT NULL DEFAULT 'pending_review' CHECK (review_status IN ('pending_review', 'approved', 'rejected')),
+    reviewer_staff_pk        INTEGER REFERENCES staff_accounts(pk),
+    review_note              TEXT NOT NULL DEFAULT '',
+    reviewed_at              TEXT,
+    created_at               TEXT NOT NULL,
+    completed_at             TEXT,
+    updated_at               TEXT NOT NULL,
+    UNIQUE (original_evidence_pk, repair_evidence_pk)
+);
+CREATE INDEX repair_assessments_by_complaint ON repair_assessments (complaint_pk, pk);
+
+-- Which inference results an assessment compared.
+CREATE TABLE repair_assessment_inferences (
+    pk             INTEGER PRIMARY KEY,
+    assessment_pk  INTEGER NOT NULL REFERENCES repair_assessments(pk),
+    inference_pk   INTEGER NOT NULL REFERENCES ai_inferences(pk),
+    phase          TEXT NOT NULL CHECK (phase IN ('original', 'repair')),
+    UNIQUE (assessment_pk, inference_pk)
+);
 """,
 }
 
@@ -723,6 +799,80 @@ CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log FOR EACH STATE
 CREATE TRIGGER complaint_assignments_append_only BEFORE UPDATE OR DELETE ON complaint_assignments FOR EACH ROW EXECUTE FUNCTION civiclens_append_only();
 CREATE TRIGGER staff_notes_append_only BEFORE UPDATE OR DELETE ON staff_notes FOR EACH ROW EXECUTE FUNCTION civiclens_append_only();
 CREATE TRIGGER work_order_events_append_only BEFORE UPDATE OR DELETE ON work_order_events FOR EACH ROW EXECUTE FUNCTION civiclens_append_only();
+""",    8: """
+-- AI-assisted analysis (app/ai): the same tables as SQLite MIGRATIONS[8], with JSONB for JSON columns.
+
+-- One row per (evidence file, detector). The UNIQUE key makes scheduling idempotent: a retry re-runs
+-- the same row instead of adding another.
+CREATE TABLE ai_inferences (
+    pk                 BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    inference_id       TEXT NOT NULL UNIQUE,
+    complaint_pk       BIGINT NOT NULL REFERENCES complaints(pk),
+    evidence_pk        BIGINT NOT NULL REFERENCES evidence(pk),
+    detector           TEXT NOT NULL,
+    provider           TEXT NOT NULL,
+    mechanism          TEXT NOT NULL CHECK (mechanism IN ('model', 'workflow')),
+    model_id           TEXT NOT NULL,
+    model_version      TEXT,
+    class_prompt       TEXT,
+    state              TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed', 'skipped')),
+    original_class     TEXT,
+    detected_category  TEXT,
+    top_confidence     REAL CHECK (top_confidence IS NULL OR (top_confidence >= 0 AND top_confidence <= 1)),
+    detection_count    INTEGER NOT NULL DEFAULT 0,
+    predictions        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    confidence_meta    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    image_width        INTEGER,
+    image_height       INTEGER,
+    error_code         TEXT,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    started_at         TEXT,
+    completed_at       TEXT,
+    updated_at         TEXT NOT NULL,
+    UNIQUE (evidence_pk, detector)
+);
+CREATE INDEX ai_inferences_by_complaint ON ai_inferences (complaint_pk, pk);
+CREATE INDEX ai_inferences_by_state ON ai_inferences (state, updated_at);
+
+-- Before/after comparison of one original and one repair photo. The AI suggestion (suggested_outcome,
+-- verification_confidence) is kept apart from the human review (review_status), and both are apart from
+-- the complaint's administrative status.
+CREATE TABLE repair_assessments (
+    pk                       BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    assessment_id            TEXT NOT NULL UNIQUE,
+    complaint_pk             BIGINT NOT NULL REFERENCES complaints(pk),
+    work_order_pk            BIGINT REFERENCES work_orders(pk),
+    original_evidence_pk     BIGINT NOT NULL REFERENCES evidence(pk),
+    repair_evidence_pk       BIGINT NOT NULL REFERENCES evidence(pk),
+    state                    TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed')),
+    suggested_outcome        TEXT CHECK (suggested_outcome IS NULL OR suggested_outcome IN ('likely_repaired', 'damage_visible', 'inconclusive')),
+    verification_confidence  REAL CHECK (verification_confidence IS NULL OR (verification_confidence >= 0 AND verification_confidence <= 1)),
+    location_check           TEXT CHECK (location_check IS NULL OR location_check IN ('match', 'mismatch', 'unverified')),
+    gps_distance_m           REAL,
+    details                  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error_code               TEXT,
+    attempts                 INTEGER NOT NULL DEFAULT 0,
+    requested_by_staff_pk    BIGINT REFERENCES staff_accounts(pk),
+    review_status            TEXT NOT NULL DEFAULT 'pending_review' CHECK (review_status IN ('pending_review', 'approved', 'rejected')),
+    reviewer_staff_pk        BIGINT REFERENCES staff_accounts(pk),
+    review_note              TEXT NOT NULL DEFAULT '',
+    reviewed_at              TEXT,
+    created_at               TEXT NOT NULL,
+    completed_at             TEXT,
+    updated_at               TEXT NOT NULL,
+    UNIQUE (original_evidence_pk, repair_evidence_pk)
+);
+CREATE INDEX repair_assessments_by_complaint ON repair_assessments (complaint_pk, pk);
+
+-- Which inference results an assessment compared.
+CREATE TABLE repair_assessment_inferences (
+    pk             BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    assessment_pk  BIGINT NOT NULL REFERENCES repair_assessments(pk),
+    inference_pk   BIGINT NOT NULL REFERENCES ai_inferences(pk),
+    phase          TEXT NOT NULL CHECK (phase IN ('original', 'repair')),
+    UNIQUE (assessment_pk, inference_pk)
+);
 """,
 }
 
@@ -732,7 +882,8 @@ TABLES = ("staff_accounts", "departments", "staff_departments",
           "complaints", "complaint_timeline", "verification_log", "evidence", "idempotency_keys",
           "staff_sessions", "evidence_access_log",
           "notification_recipients", "notification_follows", "push_subscriptions", "notifications",
-          "complaint_assignments", "staff_notes", "work_orders", "work_order_events", "work_order_evidence", "audit_log")
+          "complaint_assignments", "staff_notes", "work_orders", "work_order_events", "work_order_evidence", "audit_log",
+          "ai_inferences", "repair_assessments", "repair_assessment_inferences")
 
 CREATE_SCOPE = "create_complaint"
 DEFAULT_REPLAY_WINDOW = timedelta(hours=24)

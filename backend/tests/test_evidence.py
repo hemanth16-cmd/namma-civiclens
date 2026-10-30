@@ -469,7 +469,7 @@ def test_version_1_database_is_migrated_in_place(tmp_path):
     store.initialize()
     store.initialize()  # idempotent
     with closing(dbutil.connect(db)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
         columns = {r[1] for r in conn.execute("PRAGMA table_info(complaints)")}
         assert {"upload_token_hash", "upload_token_expires_at", "credentials_used_at"} <= columns
         assert conn.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == 0

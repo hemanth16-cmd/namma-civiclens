@@ -161,11 +161,58 @@ Lifecycle and verification are independent fields with separate append-only logs
 | --- | --- | --- |
 | `GET /api/v1/priority/{complaintId}` | Normalised priority score with visible contributions (severity, exposure, unresolved time, recurrence) and separate evidence confidence | Implemented in the prototype; inputs illustrative |
 | `GET /api/v1/hotspots/outlook` | 30-day ward/category activity versus historical baseline | Proposed; not connected or trained |
-| `POST /api/v1/vision/road-damage` | Road-damage detection on images (YOLO11n proposed) | Proposed; not connected or trained |
+| `POST /api/v1/vision/road-damage` | Road-damage detection on images | Superseded by §8.1 (detection runs on stored evidence, not on an open endpoint) |
 | `POST /api/v1/incidents/link-suggestions` | Suggested duplicates for human review; never auto-merges | Proposed; not connected |
 | `POST /api/v1/scenarios/run` | Seeded Monte Carlo over labelled assumptions | Illustrative demo; exploratory |
 
 Techniques are not causal claims. Every response must carry its method, inputs, version and an uncertainty note, and no response may state a detection or confidence without a model behind it.
+
+### 8.1 Implemented (branch `feature/roboflow-ai-integration`): AI analysis and repair verification
+
+Staff routes need a staff bearer session; officials see only complaints in their scope (403 otherwise). Responses are `Cache-Control: no-store` and never contain storage keys, API keys, provider responses or the photos' EXIF data. Nothing here changes a complaint's status, verification or work orders. Errors use the usual envelope `{"error": {"code", "message"}}`.
+
+| Method and path | Who | Result |
+| --- | --- | --- |
+| `GET /api/v1/ai` | Public | `{enabled, disclosure}`: whether uploaded photos may be analysed by an external AI service, and the notice to show before upload |
+| `GET /api/v1/staff/complaints/{id}/ai` | Staff in scope | `{complaintId, category, ai, routing, inferences[]}` |
+| `POST /api/v1/staff/complaints/{id}/ai/retry` | Staff in scope | 202, same shape plus `reset` (failed jobs re-queued; missing ones created). 503 `ai_unavailable` when AI is off; 409 `no_evidence` |
+| `POST /api/v1/staff/complaints/{id}/verify-repair` | Staff in scope | Body `{}` or `{"repairEvidenceId": "ev_…"}` (default: latest repair photo). 202 `{complaintId, ai, assessments[]}`. The same pair is assessed once. 409 `no_original_evidence` / `no_repair_evidence`, 404 unknown repair photo, 422 `unsupported_media` (video original), 503 `ai_unavailable` |
+| `GET /api/v1/staff/complaints/{id}/repair-assessment` | Staff in scope | `{complaintId, ai, assessments[]}`, newest first |
+| `POST /api/v1/staff/complaints/{id}/repair-assessment/{assessmentId}/review` | Supervisor or admin, not the repair photo's uploader | Body `{"decision": "approved"|"rejected", "note"}` (note required to reject). Returns the assessment. 409 `assessment_not_ready` / `already_reviewed` |
+
+Repair photos are uploaded with the existing `POST /api/v1/staff/work-orders/{id}/evidence`; that upload now also schedules the analysis and an assessment automatically.
+
+Inference (`inferences[]`):
+
+```json
+{"id": "ai_…", "evidenceId": "ev_…", "evidenceRole": "original", "detector": "pavement", "provider": "roboflow",
+ "mechanism": "model", "modelId": "pavement-gvib5/1", "modelVersion": "1", "classPrompt": null,
+ "state": "completed", "originalClass": "pothole", "detectedCategory": "Potholes", "topConfidence": 0.91,
+ "detectionCount": 1, "imageWidth": 1000, "imageHeight": 750, "errorCode": null, "attempts": 1,
+ "detections": [{"className": "pothole", "category": "Potholes", "confidence": 0.91,
+                 "bbox": {"x": 425.0, "y": 367.5, "width": 150.0, "height": 90.0}, "polygon": [[x, y], …]}],
+ "confidence": {"max": 0.91, "mean": 0.91, "returned": 1, "mapped": 1, "present": 1, "presentThreshold": 0.5, "lowThreshold": 0.25},
+ "createdAt": "…", "startedAt": "…", "completedAt": "…"}
+```
+
+`state`: `pending`, `running`, `completed`, `failed` (with `errorCode`), `skipped` (e.g. `unsupported_media` for videos). `bbox` is the top-left corner and size in pixels of the upright original photo; `polygon` appears for segmentation results. For workflows, `modelId` is `<workspace>/<workflow_id>` and `modelVersion` is null.
+
+Assessment (`assessments[]`):
+
+```json
+{"id": "ra_…", "workOrderId": "wo_…", "originalEvidenceId": "ev_…", "repairEvidenceId": "ev_…",
+ "state": "completed", "suggestedOutcome": "likely_repaired", "verificationConfidence": 0.74,
+ "locationCheck": "match", "gpsDistanceM": 4.1, "errorCode": null, "attempts": 1, "requestedBy": null,
+ "details": {"reasons": ["…"], "gps": {"status": "match", "distanceM": 4.1, "reference": "complaint", "repairHasGps": true},
+             "visualMatch": "strong", "alignment": {"inliers": 952, "inlierRatio": 0.945, …},
+             "quality": {"original": {…}, "repair": {"brightness": 140.2, "sharpness": 210.0, "problems": [], "acceptable": true}},
+             "comparison": [{"detector": "pavement", "originalPresent": 1, "repairPresent": 0, …}],
+             "overlapsOriginalDamage": null, "thresholds": {…}},
+ "review": {"status": "pending_review", "reviewer": null, "reviewerName": null, "note": "", "reviewedAt": null},
+ "verifiedResolution": "unverified", "createdAt": "…", "completedAt": "…", "updatedAt": "…"}
+```
+
+`suggestedOutcome`: `likely_repaired`, `damage_visible`, `inconclusive` (null until completed). `state` `failed` with `errorCode` `inference_failed` means an analysis it needed failed; `POST …/ai/retry` re-runs both. `requestedBy` is null when the assessment was created automatically by a repair upload. `verificationConfidence` is about the comparison, not the model, and is null for `inconclusive`. `verifiedResolution` is `verified_repaired` only after a supervisor approves a `likely_repaired` suggestion; it never changes `status`.
 
 ## 9. Notifications
 
