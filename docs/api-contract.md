@@ -68,7 +68,7 @@ Staff authenticate with server accounts created by an administrator (`python -m 
 | `GET /api/v1/staff/me` | Official | Signed-in identity | Implemented and tested |
 | `GET /api/v1/staff/complaints` | Official | Newest-first list with paging (`limit` ≤ 100, `offset`) and an evidence flag | Implemented and tested |
 | `GET /api/v1/staff/complaints/{id}` | Official | Operational projection: description, precise location, timeline, evidence metadata. Never claim code, hashes, upload tokens or storage keys. | Implemented and tested |
-| `GET /api/v1/staff/complaints/{id}/evidence` | Official | Streams the original file (`no-store`, `nosniff`). Each view is written to an append-only access log before any byte is sent; no log, no bytes. | Implemented and tested |
+| `GET /api/v1/staff/complaints/{id}/evidence` | Official | Streams the original file (`no-store`, `nosniff`). Each view is written to an append-only access log before any byte is sent; no log, no bytes. Errors: `404 evidence_not_found` (nothing uploaded), `404 evidence_unavailable` (the record exists but this server's storage confirms the file is absent, or it is in a storage backend this server is not configured for; nothing is logged), `503 storage_unavailable` (storage unreachable; retry). | Implemented and tested |
 | `GET /api/v1/staff/complaints/{id}/evidence/access` | Official | Who viewed the evidence and when | Implemented and tested |
 
 Sessions end on expiry, sign-out, account disable or password change. Staff tokens and upload tokens are not interchangeable. The staff case-update and work-order endpoints in section 3 remain proposed.
