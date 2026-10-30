@@ -683,6 +683,29 @@ All errors use the shape from `docs/api-contract.md`:
 
 A failed create rolls back completely: no half-written complaint is left behind.
 
+## Complaint management (Workstream 1, schema 7)
+
+Staff manage complaints through the API in `docs/api-contract.md` §3.2. Design notes:
+
+- **Two state machines.** `status` (Submitted → Under Review → Assigned → In Progress → Marked Resolved, plus a few controlled backward moves) is changed only by staff. `verification` (Pending Verification, Citizen Confirmed, Disputed, Reinspection Required) is changed by citizens with the claim code and by a supervisor's reinspection request. The rules, roles and department scoping are pure functions in `app/lifecycle.py`, so another channel (for example a Telegram bot) must call the same store methods rather than write SQL.
+- **One transaction per action.** `store.py` locks the complaint row (`FOR UPDATE` on PostgreSQL, an immediate transaction on SQLite), re-reads the actor's role and departments, checks the rule, and writes the change, its public timeline or verification entry, and an `audit_log` row together. The client sends `expectedStatus`; if the case moved on, the result is `409 conflict` rather than a lost update.
+- **Visibility by table.** Internal notes live in `staff_notes`, which the public projection never queries. Public timeline text names departments and teams, never individual staff.
+- **Append-only history.** `audit_log`, `complaint_assignments`, `staff_notes` and `work_order_events` have no update or delete path in the code, and database triggers refuse `UPDATE` and `DELETE` (and `TRUNCATE` on `audit_log` in PostgreSQL).
+- **After-repair evidence** reuses the evidence pipeline and the `EvidenceStorage` interface unchanged: an `evidence` row with role `repair` (still exactly one `original` per complaint, enforced by a partial unique index), linked to the work order as "after". The orphan audit and the access log cover it automatically.
+- **Notifications** are not sent for management events yet. The notification kinds are a `CHECK` list in the notifications table, which belongs to the notification work; status-change events need an agreed interface first.
+
+Set up roles and departments with the CLI (the database follows `DATABASE_BACKEND`, like the API):
+
+```bash
+.venv/Scripts/python -m app.staff department add --code roads --name "Road maintenance"
+.venv/Scripts/python -m app.staff create --username ravi --display-name "Ravi" --role supervisor
+.venv/Scripts/python -m app.staff join --username asha --department roads
+.venv/Scripts/python -m app.staff set-role --username asha --role supervisor
+.venv/Scripts/python -m app.staff list
+```
+
+Migration 7 upgrades an existing database in place and keeps every row. Existing staff stay `official`, and existing complaints are unassigned (the triage queue). On SQLite, two tables (`staff_accounts`, `evidence`) are rebuilt to change their constraints; `apply_schema` turns foreign keys off for that and checks them before committing. On PostgreSQL the constraints are altered in place. Take a backup before deploying it to Supabase (`pg_dump`, or the dashboard's backup) and let the API apply it at startup, as with earlier migrations.
+
 ## Not included yet
 
-Authentication and sessions, shared (multi-process) rate limiting, claiming complaints, staff operations, repairs, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), staff case updates and work orders on the server, more staff roles, MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (staff case updates do not exist yet), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.
+Authentication and sessions for residents, shared (multi-process) rate limiting, claiming complaints, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (needs an agreed interface with the notification work), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.

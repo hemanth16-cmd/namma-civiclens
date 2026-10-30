@@ -345,3 +345,193 @@ class UnreadCount(BaseModel):
 class ReadAllResult(BaseModel):
     updated: int
     unreadCount: int
+
+
+# ---------- Complaint management (schema 7) ----------
+# Inputs are strict (unknown fields refused, lengths capped). Outputs are explicit allowlists: the
+# public projection (PublicComplaint above) is unchanged and never includes any of these fields.
+
+Status = Literal["Submitted", "Under Review", "Assigned", "In Progress", "Marked Resolved"]
+WorkOrderStatus = Literal["Open", "In Progress", "Completed", "Cancelled"]
+DepartmentCode = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")]
+Username = Annotated[str, Field(pattern=r"^[a-z0-9._-]{3,64}$")]
+
+
+class TransitionIn(_Strict):
+    to: Status
+    expectedStatus: Status
+    explanation: Annotated[str, Field(max_length=500)] = ""
+
+
+class AssignmentIn(_Strict):
+    department: DepartmentCode
+    assignee: Username | None = None
+    reason: Annotated[str, Field(max_length=500)] = ""
+    expectedStatus: Status
+
+
+class NoteIn(_Strict):
+    body: Annotated[str, Field(min_length=1, max_length=2000)]
+
+
+class PublicUpdateIn(_Strict):
+    text: Annotated[str, Field(min_length=1, max_length=500)]
+    kind: Literal["progress", "department_response"] = "progress"
+
+
+class ReinspectionIn(_Strict):
+    note: Annotated[str, Field(min_length=1, max_length=500)]
+    reopen: bool = False
+    expectedStatus: Status
+
+
+class WorkOrderIn(_Strict):
+    team: Annotated[str, Field(min_length=1, max_length=120)]
+    description: Annotated[str, Field(max_length=1000)] = ""
+    dueAt: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")] | None = None  # a local (IST) date
+    assignee: Username | None = None
+
+    @field_validator("dueAt")
+    @classmethod
+    def _real_date(cls, v: str | None) -> str | None:
+        if v is not None:
+            datetime.strptime(v, "%Y-%m-%d")
+        return v
+
+
+class WorkOrderChangeIn(_Strict):
+    to: Literal["In Progress", "Completed", "Cancelled"]
+    expectedStatus: WorkOrderStatus
+    note: Annotated[str, Field(max_length=1000)] = ""
+
+
+class CitizenResponseIn(_Strict):
+    claim: Annotated[str, Field(min_length=1, max_length=100)]
+    response: Literal["Appears Resolved", "Still Present", "Cannot Confirm"]
+
+
+class CitizenResponseOut(BaseModel):
+    verification: str
+    changed: bool
+
+
+class DepartmentOut(BaseModel):
+    code: str
+    name: str
+    active: bool
+
+
+class StaffRef(BaseModel):
+    username: str
+    displayName: str
+
+
+class DepartmentRef(BaseModel):
+    code: str
+    name: str
+
+
+class AssignmentOut(BaseModel):
+    department: DepartmentRef | None = None
+    assignee: StaffRef | None = None
+
+
+class AssignmentHistoryEntry(BaseModel):
+    id: str
+    department: DepartmentRef
+    assignee: str | None
+    reason: str
+    by: str
+    at: str
+
+
+class WorkOrderEvidence(BaseModel):
+    phase: Literal["before", "after"]
+    evidenceId: str
+    role: str
+    contentType: str
+    byteSize: int
+    sha256: str
+    uploadedAt: str
+
+
+class WorkOrderEvent(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    action: str
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None
+    note: str
+    by: str
+    at: str
+
+
+class WorkOrderOut(BaseModel):
+    id: str
+    complaintId: str
+    department: str | None
+    team: str
+    assignee: str | None
+    description: str
+    dueAt: str | None
+    status: str
+    startedAt: str | None
+    completedAt: str | None
+    completionNote: str
+    createdBy: str
+    createdAt: str
+    updatedAt: str
+    overdue: bool
+    evidence: list[WorkOrderEvidence]
+    history: list[WorkOrderEvent]
+
+
+class WorkOrderList(BaseModel):
+    items: list[WorkOrderOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class StaffNoteOut(BaseModel):
+    id: str
+    body: str
+    createdAt: str
+    author: StaffRef
+
+
+class AllowedAction(BaseModel):
+    action: str
+    label: str
+    to: str | None = None
+    needsExplanation: bool = False
+
+
+class StaffCase(StaffComplaint):
+    """StaffComplaint plus management data. Internal notes and staff names appear only here."""
+    version: int
+    assignment: AssignmentOut
+    assignmentHistory: list[AssignmentHistoryEntry]
+    workOrders: list[WorkOrderOut]
+    notes: list[StaffNoteOut]
+    allowedActions: list[AllowedAction]
+
+
+class AuditEntry(BaseModel):
+    id: str
+    actorType: str
+    actor: str | None
+    actorName: str | None
+    action: str
+    details: dict
+    at: str
+
+
+class RepairEvidenceReceipt(BaseModel):
+    evidenceId: str
+    mediaType: str
+    contentType: str
+    byteSize: int
+    sha256: str
+    capturedAt: str | None
+    uploadedAt: str

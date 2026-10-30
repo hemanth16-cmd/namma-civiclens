@@ -14,8 +14,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 
 from .claims import verify_claim_code
 from .errors import ApiProblem
-from .models import ComplaintCreate, ComplaintReceipt, PublicComplaint, UploadTokenRequest, UploadTokenResponse
-from .ratelimit import enforce
+from .models import CitizenResponseIn, CitizenResponseOut, ComplaintCreate, ComplaintReceipt, PublicComplaint, UploadTokenRequest, UploadTokenResponse
+from .ratelimit import client_ip, enforce
 from .store import ComplaintStore, IdempotencyCompleted, IdempotencyConflict, iso
 
 router = APIRouter(prefix="/complaints", tags=["complaints"])
@@ -111,3 +111,22 @@ def renew_upload_token(public_id: str, payload: UploadTokenRequest, request: Req
         raise HTTPException(status_code=404, detail=NOT_FOUND)
     response.headers["Cache-Control"] = "no-store"
     return {"uploadToken": issued[0], "uploadTokenExpiresAt": issued[1]}
+
+
+@router.post("/{public_id}/citizen-responses", response_model=CitizenResponseOut)
+def citizen_response(public_id: str, payload: CitizenResponseIn, request: Request, response: Response) -> dict:
+    """A citizen's view of a resolution: Appears Resolved, Still Present or Cannot Confirm. Proven
+    with the private claim code in the JSON body, never the URL. Changes only the verification state,
+    under the rules in docs/api-contract.md §6; the operational status never changes. Rate-limited
+    per IP and per complaint before the database lookup and the scrypt check."""
+    enforce(request, "citizen_response_per_ip", "ip")
+    if not PUBLIC_ID_PATTERN.fullmatch(public_id):
+        raise HTTPException(status_code=404, detail=NOT_FOUND)
+    enforce(request, "citizen_response_per_complaint", public_id)
+    store = _store(request)
+    record = store.get(public_id)
+    if record is None or not verify_claim_code(payload.claim, record["claimHash"]):
+        # One message for both cases, so the endpoint cannot be used to discover which IDs exist.
+        raise ApiProblem(401, "unauthorized", "The complaint ID and claim code do not match.")
+    response.headers["Cache-Control"] = "no-store"
+    return store.citizen_response(public_id, payload.response, client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))

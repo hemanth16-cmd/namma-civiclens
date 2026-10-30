@@ -1,5 +1,7 @@
-// Staff console for server mode (#/staff): server sign-in, the server's complaint list, case detail
-// and private evidence viewing. Every evidence view is logged by the server with the staff name.
+// Staff console for server mode (#/staff): server sign-in, the server's complaint list, case detail,
+// private evidence viewing and case management (status, assignment, work orders, notes, reinspection,
+// audit trail). Every evidence view is logged by the server with the staff name. Management controls
+// are drawn only from the server's `allowedActions`; the server re-checks every request anyway.
 // The session token lives only in memory (staff-session.js). Local mode keeps the existing
 // demonstration workspaces; this screen only explains that it needs server mode.
 
@@ -169,6 +171,8 @@ async function renderDetail(root, http, publicId) {
         <div><dt>Description</dt><dd>${r.description ? esc(r.description) : '<span class="micro">None given</span>'}</dd></div>
         <div><dt>Resident’s sharing choice</dt><dd>${r.shareEvidence ? 'Share with community' : 'Private'}</dd></div>
       </dl>
+      <h2 class="mt">Case management</h2>
+      <div id="staff-manage">${manageSection(r)}</div>
       <h2 class="mt">Evidence</h2>
       <div id="staff-evidence">${r.evidence
         ? `<p class="micro">${esc(r.evidence.contentType)} · ${Math.max(1, Math.round(r.evidence.byteSize / 1024))} KB · uploaded ${fmtDateTime(r.evidence.uploadedAt)} · checksum <span class="code-inline">${esc(r.evidence.sha256.slice(0, 12))}…</span></p>
@@ -184,6 +188,171 @@ async function renderDetail(root, http, publicId) {
   if (r.evidence) {
     $('staff-view-evidence').addEventListener('click', () => viewEvidence(root, http, r));
     loadAccessLog(root, http, r.id);
+  }
+  wireManagement(root, http, r);
+}
+
+// ---------- Case management ----------
+
+const can = (r, action) => r.allowedActions.some(a => a.action === action);
+const field = (id, label, control, hint = '') => `<div class="field"><label for="${id}">${label}</label>${control}${hint ? `<p class="micro">${hint}</p>` : ''}</div>`;
+
+function manageSection(r) {
+  const a = r.assignment;
+  const transitions = r.allowedActions.filter(x => x.action === 'transition');
+  const orders = r.workOrders.map(w => `<tr data-work-order="${esc(w.id)}">
+      <td>${esc(w.team)}${w.assignee ? `<br><span class="micro">${esc(w.assignee)}</span>` : ''}${w.description ? `<br><span class="micro">${esc(w.description)}</span>` : ''}</td>
+      <td>${esc(w.status)}${w.overdue ? ' <span class="count-badge" title="Past its target date">Overdue</span>' : ''}</td>
+      <td>${w.dueAt ? esc(w.dueAt) : '—'}</td>
+      <td>${w.evidence.map(e => `<button type="button" class="btn btn-ghost" data-wo-evidence="${esc(e.evidenceId)}">${icon('eye', 'mini-icon')}<span>${e.phase === 'after' ? 'After' : 'Before'}</span></button>`).join(' ') || '—'}</td>
+      <td class="row-actions">${w.status === 'Open' ? `<button type="button" class="btn btn-secondary" data-wo-to="In Progress">Start</button>` : ''}
+        ${w.status === 'In Progress' ? `<button type="button" class="btn btn-secondary" data-wo-to="Completed">Complete</button>` : ''}
+        ${['Open', 'In Progress'].includes(w.status) ? `<button type="button" class="btn btn-ghost" data-wo-to="Cancelled">Cancel</button>
+          <label class="btn btn-ghost">${icon('image', 'mini-icon')}<span>After photo</span><input type="file" accept="image/jpeg" data-wo-upload hidden></label>` : ''}</td></tr>`).join('');
+  return `<div id="manage-message" role="status" aria-live="polite"></div>
+    <dl class="meta-list two-col">
+      <div><dt>Department</dt><dd>${a.department ? esc(a.department.name) : '<span class="micro">Not assigned (triage queue)</span>'}</dd></div>
+      <div><dt>Assigned to</dt><dd>${a.assignee ? `${esc(a.assignee.displayName)} (${esc(a.assignee.username)})` : '<span class="micro">Nobody yet</span>'}</dd></div>
+    </dl>
+    ${transitions.length ? `<form id="manage-transition" class="panel mt">
+      <h3>Change status</h3>
+      ${field('manage-explanation', 'Public explanation', '<textarea id="manage-explanation" maxlength="500" rows="2"></textarea>', 'Shown in public tracking. Required for some changes; never include names or private details.')}
+      <div class="row-actions">${transitions.map(t => `<button type="submit" class="btn btn-secondary" data-to="${esc(t.to)}">${esc(t.label || t.to)} → ${esc(t.to)}</button>`).join(' ')}</div>
+    </form>` : ''}
+    ${can(r, 'assign') ? `<form id="manage-assign" class="panel mt">
+      <h3>${a.department ? 'Reassign' : 'Assign'}</h3>
+      ${field('manage-department', 'Department', '<select id="manage-department" required><option value="">Loading…</option></select>')}
+      ${field('manage-assignee', 'Staff username (optional)', '<input id="manage-assignee" autocomplete="off" spellcheck="false" maxlength="64">', 'Officials must be members of the department.')}
+      ${field('manage-reason', 'Reason', `<input id="manage-reason" maxlength="500" ${a.department ? 'required' : ''}>`, a.department ? 'Required when reassigning.' : '')}
+      <div class="row-actions"><button type="submit" class="btn btn-primary">Save assignment</button></div>
+    </form>` : ''}
+    ${can(r, 'request_reinspection') ? `<form id="manage-reinspect" class="panel mt">
+      <h3>Request reinspection</h3>
+      ${field('manage-reinspect-note', 'Reason (public)', '<textarea id="manage-reinspect-note" maxlength="500" rows="2" required></textarea>')}
+      <label class="check"><input type="checkbox" id="manage-reopen"> <span>Also reopen the complaint (back to In Progress)</span></label>
+      <div class="row-actions"><button type="submit" class="btn btn-secondary">Request reinspection</button></div>
+    </form>` : ''}
+    <h3 class="mt">Work orders</h3>
+    ${orders ? `<div class="table-wrap"><table class="data-table" id="work-orders"><thead><tr><th scope="col">Team</th><th scope="col">Status</th><th scope="col">Target date</th><th scope="col">Evidence</th><th scope="col">Actions</th></tr></thead><tbody>${orders}</tbody></table></div>
+      ${field('manage-wo-note', 'Completion note or cancellation reason', '<input id="manage-wo-note" maxlength="1000">', 'Kept internally with the work order.')}
+      <div id="wo-evidence-view" class="mt"></div>` : '<p class="micro">No work orders yet.</p>'}
+    ${can(r, 'create_work_order') ? `<form id="manage-work-order" class="panel mt">
+      <h3>New work order</h3>
+      ${field('manage-team', 'Responsible team', '<input id="manage-team" maxlength="120" required>', 'Shown publicly, e.g. “Ward 4 road crew”.')}
+      ${field('manage-due', 'Target date', '<input id="manage-due" type="date">')}
+      ${field('manage-description', 'Work description', '<textarea id="manage-description" maxlength="1000" rows="2"></textarea>')}
+      <div class="row-actions"><button type="submit" class="btn btn-secondary">Create work order</button></div>
+    </form>` : ''}
+    <h3 class="mt">Internal notes <span class="micro">(staff only; never shown publicly)</span></h3>
+    ${r.notes.length ? `<ol class="timeline">${r.notes.map(n => `<li><div class="tl-head"><strong>${esc(n.author?.displayName || '')}</strong><time datetime="${esc(n.createdAt)}">${fmtDateTime(n.createdAt)}</time></div><p>${esc(n.body)}</p></li>`).join('')}</ol>` : '<p class="micro">No internal notes.</p>'}
+    ${can(r, 'add_note') ? `<form id="manage-note" class="panel">
+      ${field('manage-note-body', 'Add an internal note', '<textarea id="manage-note-body" maxlength="2000" rows="2" required></textarea>')}
+      <div class="row-actions"><button type="submit" class="btn btn-secondary">Save note</button></div></form>` : ''}
+    ${can(r, 'add_public_update') ? `<form id="manage-update" class="panel mt">
+      <h3>Post a public update</h3>
+      ${field('manage-update-text', 'Update (public)', '<textarea id="manage-update-text" maxlength="500" rows="2" required></textarea>')}
+      <label class="check"><input type="checkbox" id="manage-update-dept"> <span>This is a department response</span></label>
+      <div class="row-actions"><button type="submit" class="btn btn-secondary">Publish update</button></div></form>` : ''}
+    ${r.assignmentHistory.length ? `<h3 class="mt">Assignment history</h3><ol class="timeline">${r.assignmentHistory.map(h => `<li><div class="tl-head"><strong>${esc(h.department)}${h.assignee ? ` · ${esc(h.assignee)}` : ''}</strong><time datetime="${esc(h.at)}">${fmtDateTime(h.at)}</time></div><p>${h.reason ? esc(h.reason) : 'No reason given'} · by ${esc(h.by)}</p></li>`).join('')}</ol>` : ''}
+    <h3 class="mt">Audit trail</h3>
+    <div id="manage-audit"><button type="button" class="btn btn-ghost" id="manage-load-audit">Show audit trail</button> <span class="micro">Supervisors and admins.</span></div>`;
+}
+
+function wireManagement(root, http, r) {
+  const token = () => staffSession.get()?.token;
+  const message = $('manage-message');
+  const run = async (button, fn, done) => {
+    if (button) button.disabled = true;
+    message.innerHTML = '';
+    try {
+      await fn();
+      toast(done);
+      renderDetail(root, http, r.id);  // re-read the case from the server
+    } catch (err) {
+      if (button) button.disabled = false;
+      if (message.isConnected) handleError(root, http, err, message);
+    }
+  };
+  const value = id => ($(id)?.value || '').trim();
+
+  $('manage-transition')?.addEventListener('submit', e => {
+    e.preventDefault();
+    const to = e.submitter?.dataset.to;
+    if (to) run(e.submitter, () => http.transitionComplaint(token(), r.id, {to, expectedStatus: r.status, explanation: value('manage-explanation')}), `Status changed to ${to}.`);
+  });
+  const departments = $('manage-department');
+  if (departments) {
+    http.listDepartments(token()).then(list => {
+      if (!departments.isConnected) return;
+      departments.innerHTML = '<option value="">Choose a department</option>' + list.map(d => `<option value="${esc(d.code)}" ${r.assignment.department?.code === d.code ? 'selected' : ''}>${esc(d.name)}</option>`).join('');
+    }).catch(err => handleError(root, http, err, message));
+  }
+  $('manage-assign')?.addEventListener('submit', e => {
+    e.preventDefault();
+    run(e.submitter, () => http.assignComplaint(token(), r.id, {department: value('manage-department'), assignee: value('manage-assignee').toLowerCase() || null,
+      reason: value('manage-reason'), expectedStatus: r.status}), 'Assignment saved.');
+  });
+  $('manage-reinspect')?.addEventListener('submit', e => {
+    e.preventDefault();
+    run(e.submitter, () => http.requestReinspection(token(), r.id, {note: value('manage-reinspect-note'), reopen: $('manage-reopen').checked, expectedStatus: r.status}),
+      'Reinspection requested.');
+  });
+  $('manage-work-order')?.addEventListener('submit', e => {
+    e.preventDefault();
+    run(e.submitter, () => http.createWorkOrder(token(), r.id, {team: value('manage-team'), dueAt: value('manage-due') || null, description: value('manage-description')}),
+      'Work order created.');
+  });
+  $('work-orders')?.addEventListener('click', e => {
+    const row = e.target.closest('[data-work-order]');
+    const order = row && r.workOrders.find(w => w.id === row.dataset.workOrder);
+    if (!order) return;
+    const to = e.target.closest('[data-wo-to]')?.dataset.woTo;
+    if (to) return run(e.target.closest('button'), () => http.changeWorkOrder(token(), order.id, {to, expectedStatus: order.status, note: value('manage-wo-note')}),
+      `Work order ${to === 'In Progress' ? 'started' : to.toLowerCase()}.`);
+    const evidenceId = e.target.closest('[data-wo-evidence]')?.dataset.woEvidence;
+    if (evidenceId) showWorkOrderEvidence(root, http, order, evidenceId);
+  });
+  $('work-orders')?.addEventListener('change', e => {
+    const input = e.target.closest('[data-wo-upload]');
+    const file = input?.files?.[0];
+    if (!file) return;
+    const id = e.target.closest('[data-work-order]').dataset.workOrder;
+    run(null, () => http.uploadRepairEvidence(token(), id, file), 'After-repair photo uploaded.');
+  });
+  $('manage-note')?.addEventListener('submit', e => {
+    e.preventDefault();
+    run(e.submitter, () => http.addStaffNote(token(), r.id, value('manage-note-body')), 'Internal note saved.');
+  });
+  $('manage-update')?.addEventListener('submit', e => {
+    e.preventDefault();
+    run(e.submitter, () => http.addPublicUpdate(token(), r.id, {text: value('manage-update-text'), kind: $('manage-update-dept').checked ? 'department_response' : 'progress'}),
+      'Public update published.');
+  });
+  $('manage-load-audit')?.addEventListener('click', async () => {
+    const slot = $('manage-audit');
+    try {
+      const entries = await http.getAuditTrail(token(), r.id);
+      if (!slot.isConnected) return;
+      slot.innerHTML = entries.length
+        ? `<ol class="timeline">${entries.map(e => `<li><div class="tl-head"><strong>${esc(e.action.replace(/_/g, ' '))}</strong><time datetime="${esc(e.at)}">${fmtDateTime(e.at)}</time></div><p class="micro">${esc(e.actorType === 'staff' ? `${e.actorName || ''} (${e.actor || ''})` : e.actorType)} · <span class="code-inline">${esc(JSON.stringify(e.details))}</span></p></li>`).join('')}</ol>`
+        : '<p class="micro">No audit entries yet.</p>';
+    } catch (err) {
+      if (slot.isConnected) handleError(root, http, err, slot);
+    }
+  });
+}
+
+async function showWorkOrderEvidence(root, http, order, evidenceId) {
+  const view = $('wo-evidence-view');
+  view.innerHTML = '<p class="micro" role="status">Loading evidence…</p>';
+  try {
+    const blob = await http.fetchWorkOrderEvidence(staffSession.get().token, order.id, evidenceId);
+    if (!view.isConnected) return;
+    const url = URL.createObjectURL(blob);
+    addCleanup(() => URL.revokeObjectURL(url));
+    view.innerHTML = `<img class="receipt-media" src="${url}" alt="Work order evidence for ${esc(order.team)}"><p class="micro">Viewing is recorded in the evidence access log.</p>`;
+  } catch (err) {
+    if (view.isConnected) handleError(root, http, err, view);
   }
 }
 

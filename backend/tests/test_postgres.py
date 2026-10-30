@@ -129,7 +129,7 @@ def test_version_5_postgres_database_is_upgraded_in_place(pg_url):
         record, _ = old.create(payload(capturedAt=None))
         assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(5,)]
         ComplaintStore(database=db).initialize()
-        assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)] == [(6,)]
+        assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)] == [(7,)]
         assert old.get(record["id"])["id"] == record["id"]
         for table in ("notification_recipients", "notification_follows", "push_subscriptions", "notifications"):
             assert pg_query(pg_url, f"SELECT COUNT(*) FROM {table}") == [(0,)]
@@ -278,7 +278,19 @@ def populated_sqlite(isolated_db_path, evidence_dir):
                              headers={"Authorization": f"Bearer {receipts[0]['uploadToken']}"})
         assert upload.status_code == 201
         token = client.post("/api/v1/staff/sessions", json={"username": "asha", "password": PASSWORD}).json()["token"]
-        assert client.get(f"/api/v1/staff/complaints/{receipts[0]['id']}/evidence", headers={"Authorization": f"Bearer {token}"}).content == JPEG
+        staff = {"Authorization": f"Bearer {token}"}
+        assert client.get(f"/api/v1/staff/complaints/{receipts[0]['id']}/evidence", headers=staff).content == JPEG
+        # Complaint management (schema 7): department, assignment, note, work order with before/after evidence, audit.
+        store.create_department("roads", "Road maintenance")
+        store.set_staff_role("asha", "supervisor")
+        store.set_staff_department("asha", "roads", True)
+        cid = receipts[0]["id"]
+        assert client.post(f"/api/v1/staff/complaints/{cid}/assignment", json={"department": "roads", "expectedStatus": "Submitted"},
+                           headers=staff).status_code == 200
+        assert client.post(f"/api/v1/staff/complaints/{cid}/notes", json={"body": "internal"}, headers=staff).status_code == 201
+        order = client.post(f"/api/v1/staff/complaints/{cid}/work-orders", json={"team": "crew"}, headers=staff).json()["workOrders"][0]["id"]
+        assert client.post(f"/api/v1/staff/work-orders/{order}/evidence", files={"file": ("a.jpg", JPEG, "image/jpeg")},
+                           headers=staff).status_code == 201
     with closing(sqlite3.connect(isolated_db_path)) as conn:
         counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
     assert all(counts[t] > 0 for t in TABLES if t != "verification_log"), counts
