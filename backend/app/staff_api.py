@@ -5,6 +5,8 @@ streamed only through GET /staff/complaints/{id}/evidence after the session is c
 view is written to evidence_access_log; there are no public, permanent or signed links.
 """
 
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
@@ -16,8 +18,25 @@ from .ratelimit import client_ip, enforce
 from .store import STAFF_LIST_MAX, StoreError
 
 router = APIRouter(prefix="/staff", tags=["staff"])
+logger = logging.getLogger("civiclens.staff")
 CHUNK = 64 * 1024
 EXTENSIONS = {"image/jpeg": "jpg", "video/webm": "webm", "video/mp4": "mp4"}
+# 404 evidence_unavailable messages: the record exists but this server cannot serve its file.
+UNAVAILABLE = {
+    "supabase": "This evidence is stored in Supabase Storage, which this server is not connected to, so it cannot be shown here.",
+    "local": "This evidence is stored on a server's local disk that this server cannot reach, so it cannot be shown here.",
+    "other": "This evidence is stored in a location this server is not connected to, so it cannot be shown here.",
+}
+MISSING_FILE = ("The evidence file for this complaint is not in this server's storage. It may have been uploaded while the "
+                "API was running elsewhere, for example on another machine's local disk. Nothing was opened or logged.")
+
+
+def _definitely_missing(storage, key: str) -> bool:
+    """True only when the storage confirms the object is absent; False when it cannot tell."""
+    try:
+        return not storage.exists(key)
+    except StoreError:
+        return False
 
 
 @router.post("/sessions", response_model=StaffSessionOut)
@@ -98,8 +117,16 @@ def stream_evidence(request: Request, evidence: dict, staff: dict, basename: str
     # Read from the backend that stored this file (local evidence stays readable after switching to Supabase Storage).
     storage = request.app.state.evidence_storages.get(evidence["storageBackend"])
     if storage is None:
-        raise StoreError(f"Evidence is in the {evidence['storageBackend']!r} backend, which is not configured")
-    handle = storage.open_read(evidence["storageKey"])  # StoreError → 503
+        logger.warning("Evidence for %s is in the %r backend, which this server is not configured for", public_id, evidence["storageBackend"])
+        raise ApiProblem(404, "evidence_unavailable", UNAVAILABLE.get(evidence["storageBackend"], UNAVAILABLE["other"]))
+    try:
+        handle = storage.open_read(evidence["storageKey"])
+    except StoreError:
+        # A file that is definitely absent is a permanent condition, not an outage: say so instead of 503.
+        if _definitely_missing(storage, evidence["storageKey"]):
+            logger.warning("Evidence file for %s is missing from the %r backend", public_id, evidence["storageBackend"])
+            raise ApiProblem(404, "evidence_unavailable", MISSING_FILE)
+        raise  # → 503 storage_unavailable (e.g. Supabase unreachable)
     try:
         store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
     except BaseException:

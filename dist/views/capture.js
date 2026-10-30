@@ -684,7 +684,7 @@ function startRecording() {
     if (cam.holdRecording) cam.mode = 'photo';
     cam.holdRecording = false;
     if (!blob.size) return toast('No video was recorded. Try again.');
-    if (blob.size > MAX_VIDEO_BYTES) return toast('This clip is too large (over 200 MB). Record a shorter clip.');
+    if (blob.size > MAX_VIDEO_BYTES) return toast('This clip is too large (over 50 MB). Record a shorter clip.');
     state.capture = {blob, type: 'video', mimeType: type, gps: evidenceLocation(fix, startedAt), capturedAt: new Date(startedAt).toISOString(), captureSource: 'Live camera', duration: Math.round((Date.now() - startedAt) / 1000)};
     return navigate('review');
   };
@@ -1238,7 +1238,7 @@ async function renderServerReceipt(root, {receipt: r, evidenceKept, following = 
           <p class="micro">This preview comes from this browser’s copy, which is kept even after the upload. ${isPhoto ? 'The server receives the original photo, not the stamped copy. The stamp shows the logo, complaint ID, evidence reference, capture time and, if you chose it, the address and coordinates; never the claim code. ' : ''}Uploaded evidence is private: it is not shown in public tracking, and it cannot yet be viewed from the server.</p>
         </section>
       </div>
-      <p class="receipt-foot"><a class="inline-link" href="#/camera">${icon('camera')}<span>Report another issue</span></a></p>
+      <p class="receipt-foot"><a class="inline-link" href="#/camera">${icon('camera')}<span>Report another issue</span></a> · <a class="inline-link" href="#/my-reports" id="receipt-my-reports">${icon('list')}<span>My reports on this device</span></a></p>
     </main>
   </div>`;
   root.querySelector('[data-evidence]')?.addEventListener('click', async () => {

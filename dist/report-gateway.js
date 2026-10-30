@@ -40,6 +40,42 @@ export async function reportMode(options = {}) {
   return (await settings(options)).mode;
 }
 
+// Server reports submitted from this browser, so "My reports" can find them again (there are no
+// citizen accounts). Only the public ID, category and submission time are kept: never the claim
+// code, upload token, location or description.
+const REPORTS_KEY = 'ncl-server-reports-v1';
+const REPORT_ID = /^NCL-\d{4}-[A-Z0-9]{6}$/;
+const MAX_REMEMBERED = 200;
+
+function storageOf(options) {
+  try { return options.storage ?? globalThis.localStorage ?? null; } catch { return null; }
+}
+
+/** Newest first. Entries that are not well-formed are dropped. */
+export function rememberedServerReports(options = {}) {
+  let list = [];
+  try { list = JSON.parse(storageOf(options)?.getItem(REPORTS_KEY) || '[]'); } catch { list = []; }
+  if (!Array.isArray(list)) return [];
+  return list.filter(r => typeof r?.id === 'string' && REPORT_ID.test(r.id))
+    .map(r => ({id: r.id, category: String(r.category ?? '').slice(0, 80), submittedAt: typeof r.submittedAt === 'string' ? r.submittedAt : null}));
+}
+
+function writeRemembered(list, options) {
+  try { storageOf(options)?.setItem(REPORTS_KEY, JSON.stringify(list.slice(0, MAX_REMEMBERED))); return true; } catch { return false; }
+}
+
+/** Adds or refreshes one report. Returns false when browser storage is unavailable (the report itself is unaffected). */
+export function rememberServerReport({id, category = '', submittedAt = null}, options = {}) {
+  if (typeof id !== 'string' || !REPORT_ID.test(id)) return false;
+  const rest = rememberedServerReports(options).filter(r => r.id !== id);
+  return writeRemembered([{id, category: String(category).slice(0, 80), submittedAt: submittedAt ?? new Date().toISOString()}, ...rest], options);
+}
+
+/** Removes a report from this browser's list only. The complaint on the server is unchanged. */
+export function forgetServerReport(id, options = {}) {
+  return writeRemembered(rememberedServerReports(options).filter(r => r.id !== id), options);
+}
+
 /**
  * Saves a report. Local mode: unchanged api.create(). Backend mode: creates the complaint from
  * metadata, keeps a copy of the evidence in IndexedDB and prepares (but does not start) the upload,
@@ -56,6 +92,7 @@ export async function submitReport(data, blob, options = {}) {
   const payload = toCreatePayload(data);
   // options.idempotencyKey: one key per report, reused for every retry of that report (see capture.js).
   const {uploadToken, uploadTokenExpiresAt, ...receipt} = await client(config, options).createComplaint(payload, {idempotencyKey: options.idempotencyKey});
+  rememberServerReport({id: receipt.id, category: receipt.category, submittedAt: receipt.uploadedAt ?? receipt.created}, options);
   const hasFile = blob instanceof Blob && blob.size > 0;
   let evidenceKept = false;
   if (hasFile) {

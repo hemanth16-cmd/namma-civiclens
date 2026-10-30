@@ -464,12 +464,23 @@ def test_database_failure_and_failed_cleanup_still_reports_failure(supabase_api,
     assert "Supabase evidence delete failed" in caplog.text and SERVICE_KEY not in caplog.text
 
 
-def test_missing_object_returns_503_and_logs_nothing(supabase_api, fake, isolated_db_path):
+def test_missing_object_is_reported_as_unavailable_and_logs_nothing(supabase_api, fake, isolated_db_path):
+    """Supabase confirms the object is absent: a permanent condition, so 404 evidence_unavailable, not 503."""
     receipt, _ = new_complaint(supabase_api)
     fake.objects.clear()
     token = staff_token(supabase_api)
     response = supabase_api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token))
-    assert response.status_code == 503
+    assert response.status_code == 404 and response.json()["error"]["code"] == "evidence_unavailable"
+    assert rows(isolated_db_path, "SELECT COUNT(*) FROM evidence_access_log") == [(0,)]
+
+
+def test_supabase_outage_while_viewing_stays_503_and_logs_nothing(supabase_api, fake, isolated_db_path):
+    receipt, _ = new_complaint(supabase_api)
+    token = staff_token(supabase_api)
+    fake.outage = True
+    response = supabase_api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token))
+    fake.outage = False
+    assert response.status_code == 503 and response.json()["error"]["code"] == "storage_unavailable"
     assert rows(isolated_db_path, "SELECT COUNT(*) FROM evidence_access_log") == [(0,)]
 
 
@@ -496,7 +507,9 @@ def test_supabase_evidence_needs_supabase_configured(supabase_env, fake, monkeyp
     monkeypatch.setenv("EVIDENCE_STORAGE_BACKEND", "local")
     with TestClient(create_app(db_path=isolated_db_path, evidence_dir=evidence_dir)) as local_app:
         token = staff_token(local_app)
-        assert local_app.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token)).status_code == 503
+        response = local_app.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token))
+        assert response.status_code == 404 and response.json()["error"]["code"] == "evidence_unavailable"
+        assert "Supabase Storage" in response.json()["error"]["message"]
         assert rows(isolated_db_path, "SELECT COUNT(*) FROM evidence_access_log") == [(0,)]
 
 

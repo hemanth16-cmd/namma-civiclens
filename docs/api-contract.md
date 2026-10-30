@@ -68,7 +68,7 @@ Staff authenticate with server accounts created by an administrator (`python -m 
 | `GET /api/v1/staff/me` | Official | Signed-in identity | Implemented and tested |
 | `GET /api/v1/staff/complaints` | Official | Newest-first list with paging (`limit` ≤ 100, `offset`) and an evidence flag | Implemented and tested |
 | `GET /api/v1/staff/complaints/{id}` | Official | Operational projection: description, precise location, timeline, evidence metadata. Never claim code, hashes, upload tokens or storage keys. | Implemented and tested |
-| `GET /api/v1/staff/complaints/{id}/evidence` | Official | Streams the original file (`no-store`, `nosniff`). Each view is written to an append-only access log before any byte is sent; no log, no bytes. | Implemented and tested |
+| `GET /api/v1/staff/complaints/{id}/evidence` | Official | Streams the original file (`no-store`, `nosniff`). Each view is written to an append-only access log before any byte is sent; no log, no bytes. Errors: `404 evidence_not_found` (nothing uploaded), `404 evidence_unavailable` (the record exists but this server's storage confirms the file is absent, or it is in a storage backend this server is not configured for; nothing is logged), `503 storage_unavailable` (storage unreachable; retry). | Implemented and tested |
 | `GET /api/v1/staff/complaints/{id}/evidence/access` | Official | Who viewed the evidence and when | Implemented and tested |
 
 Sessions end on expiry, sign-out, account disable or password change. Staff tokens and upload tokens are not interchangeable.
@@ -120,7 +120,7 @@ Authorisation, without user accounts: the creation receipt includes a random upl
 Rules enforced by the server:
 
 - Types are decided from the file's leading bytes: JPEG (photo), WebM or MP4 (video). The declared MIME type and filename extension must agree with the signature or the upload is rejected. The file must match the complaint's `mediaType`.
-- Limits (configurable): photo 25 MB, video 200 MB, checked against `Content-Length` before reading and again while streaming. A stalled upload (30 s without data) is stopped. A total storage quota (default 2 GB) is enforced with reservations taken before the body is read; exceeding it returns `507 storage_quota_exceeded` and nothing is deleted to make room.
+- Limits (configurable): photo 25 MB, video 200 MB by default; deployments set `CIVICLENS_MAX_VIDEO_BYTES=52428800` (50 MB, see `backend/.env.example`), which the frontend's citizen capture limit matches. Checked against `Content-Length` before reading and again while streaming. A stalled upload (30 s without data) is stopped. A total storage quota (default 2 GB) is enforced with reservations taken before the body is read; exceeding it returns `507 storage_quota_exceeded` and nothing is deleted to make room.
 - The file is streamed in chunks to a temporary file, hashed (SHA-256) on the way, then moved into place atomically. Failed or interrupted uploads leave no file and no database row.
 - One original per complaint. Re-sending the same file returns the existing record (`200`, `already_uploaded`); a different file returns `409 evidence_exists`.
 - The response carries an opaque `evidenceId`, type, size, checksum and times. Never a storage key, path or URL.

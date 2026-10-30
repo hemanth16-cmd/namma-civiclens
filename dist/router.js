@@ -50,3 +50,12 @@ export function goBack(fallback) {
 let renderer = null;
 export function setRenderer(fn) { renderer = fn; }
 export function rerender() { return renderer?.(); }
+
+/** Where a demonstration-workspace route leads in server mode, or null to keep it. */
+export function serverModeRoute(parts) {
+  const [head, second] = parts;
+  if (head === 'official') return second === 'video-review' ? null : 'staff';  // video review never leaves this browser
+  if (head === 'resident') return second === 'notifications' ? 'notifications' : 'my-reports';
+  if (head === 'issue') return second ? 'track/' + second : 'my-reports';
+  return null;
+}
