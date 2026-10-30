@@ -43,6 +43,12 @@ FOREIGN_KEYS = (
     ("staff_sessions", "staff_pk", "staff_accounts"),
     ("evidence_access_log", "evidence_pk", "evidence"),
     ("evidence_access_log", "staff_pk", "staff_accounts"),
+    ("notification_recipients", "staff_pk", "staff_accounts"),
+    ("notification_follows", "recipient_pk", "notification_recipients"),
+    ("notification_follows", "complaint_pk", "complaints"),
+    ("push_subscriptions", "recipient_pk", "notification_recipients"),
+    ("notifications", "recipient_pk", "notification_recipients"),
+    ("notifications", "complaint_pk", "complaints"),
 )
 _IMPORT_LOCK_ID = 7_201_027
 
@@ -191,7 +197,9 @@ def _validate(conn, source_rows) -> dict:
         counts[table] = {"source": len(rows), "target": len(target)}
     orphans = {}
     for child, column, parent in FOREIGN_KEYS:
-        n = conn.execute(f"SELECT COUNT(*) FROM {child} c LEFT JOIN {parent} p ON p.pk = c.{column} WHERE p.pk IS NULL").fetchone()[0]
+        # Nullable references (a citizen recipient has no staff_pk) are not orphans.
+        n = conn.execute(f"SELECT COUNT(*) FROM {child} c LEFT JOIN {parent} p ON p.pk = c.{column} "
+                         f"WHERE c.{column} IS NOT NULL AND p.pk IS NULL").fetchone()[0]
         if n:
             orphans[f"{child}.{column}"] = n
     return {"rowsMatch": not mismatched, "mismatched": mismatched[:50], "counts": counts,

@@ -56,7 +56,8 @@ def isolated_db_path(tmp_path, monkeypatch, request):
     monkeypatch.setenv("CIVICLENS_RATE_LIMITS", "off")
     for name in ("CIVICLENS_TRUSTED_PROXIES", "CIVICLENS_EVIDENCE_QUOTA_BYTES", "EVIDENCE_STORAGE_BACKEND", "SUPABASE_URL",
                  "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_STORAGE_BUCKET",
-                 "DATABASE_BACKEND", "DATABASE_URL", "CIVICLENS_DB_POOL_MAX"):
+                 "DATABASE_BACKEND", "DATABASE_URL", "CIVICLENS_DB_POOL_MAX", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY",
+                 "VAPID_SUBJECT", "CIVICLENS_PUSH_ENDPOINT_HOSTS", "CIVICLENS_PUSH_TTL_SECONDS"):
         monkeypatch.delenv(name, raising=False)
     if not POSTGRES_MODE or "sqlite_only" in request.keywords:
         yield path

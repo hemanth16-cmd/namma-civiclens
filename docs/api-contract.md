@@ -2,7 +2,7 @@
 
 **Status: mostly proposed.** This document describes the HTTP API a FastAPI backend would expose so that the browser prototype's rules move to the server without changing the screens. In local mode (the default) the same operations run in `dist/services.js` against `localStorage` and IndexedDB, and the functions are named to match these endpoints.
 
-**Implemented in `backend/` so far** (see `backend/README.md` for exact request and response shapes): `GET /api/v1/health`, `POST /api/v1/complaints`, `GET /api/v1/complaints/{publicId}`, `POST /api/v1/complaints/{publicId}/upload-token` `POST /api/v1/complaints/{publicId}/evidence` (section 5) and the staff console endpoints under `/api/v1/staff` (section 3.1), with per-IP/per-complaint rate limits (`429 rate_limited` + `Retry-After`), an evidence storage quota (`507 storage_quota_exceeded`) and `Idempotency-Key` support on complaint creation (section 2.1). Everything else below is still proposed. Evidence files can be stored on local disk (default) or in a private Supabase Storage bucket (`EVIDENCE_STORAGE_BACKEND=supabase`), and complaint data in SQLite (default) or PostgreSQL / Supabase Postgres (`DATABASE_BACKEND=postgres`); the API contract is identical in every combination. Resident accounts, staff case updates and shared (multi-process) rate limiting are not built.
+**Implemented in `backend/` so far** (see `backend/README.md` for exact request and response shapes): `GET /api/v1/health`, `POST /api/v1/complaints`, `GET /api/v1/complaints/{publicId}`, `POST /api/v1/complaints/{publicId}/upload-token` `POST /api/v1/complaints/{publicId}/evidence` (section 5) the staff console endpoints under `/api/v1/staff` (section 3.1) and Web Push notifications under `/api/v1/notifications` (section 9.1), with per-IP/per-complaint rate limits (`429 rate_limited` + `Retry-After`), an evidence storage quota (`507 storage_quota_exceeded`) and `Idempotency-Key` support on complaint creation (section 2.1). Everything else below is still proposed. Evidence files can be stored on local disk (default) or in a private Supabase Storage bucket (`EVIDENCE_STORAGE_BACKEND=supabase`), and complaint data in SQLite (default) or PostgreSQL / Supabase Postgres (`DATABASE_BACKEND=postgres`); the API contract is identical in every combination. Resident accounts, staff case updates and shared (multi-process) rate limiting are not built.
 
 Conventions: JSON over HTTPS under `/api/v1`. Times are ISO 8601 in UTC; the UI displays Asia/Kolkata. Errors use `{ "error": { "code": "...", "message": "..." } }`. Every mutation is authorised on the server, never by the client's role guard.
 
@@ -146,9 +146,20 @@ Techniques are not causal claims. Every response must carry its method, inputs, 
 
 | Method and path | Purpose | Status |
 | --- | --- | --- |
-| `GET /api/v1/notifications` | Notifications for the principal, filtered by per-user preferences | Proposed |
-| `PUT /api/v1/notification-preferences` | Per-user preferences | Proposed |
-| Push delivery (FCM) | Device alerts | Proposed; not configured |
+| `GET /api/v1/notifications` | Notification history for the principal (staff session or citizen inbox token), newest first, with unread count | **Implemented** (9.1) |
+| `PUT /api/v1/notification-preferences` | Per-user preferences (which events to receive) | Proposed |
+| Push delivery | Web Push with VAPID to every registered device (FCM, Mozilla, Windows and Apple push services) | **Implemented** (9.1) |
+
+### 9.1 Implemented: Web Push notifications
+
+Request and response shapes are in `backend/README.md` → "Web Push notifications". Summary:
+
+- Principals: a staff session, or a citizen **notification inbox** (`POST /notifications/inboxes`, a device-held bearer token stored hashed). Citizens follow a complaint with its claim code (`POST /notifications/follows`); staff receive staff events automatically.
+- Events: citizens (followers) — follow confirmed, evidence received, evidence first opened by staff; staff — new complaint, new evidence. Each event at most once per recipient. Case-status notifications wait for server-side staff case updates (section 3).
+- History is stored before any push (`GET /notifications`, read/unread per notification, `POST /notifications/read-all`, `GET /notifications/unread-count`).
+- Devices: `POST/GET/DELETE /notifications/subscriptions`, up to 10 per principal, idempotent per browser; endpoints restricted to known push services; expired or repeatedly failing devices are deleted.
+- `GET /notifications/config` gives the VAPID public key; `POST /notifications/test` sends a test to the caller's devices.
+- Payloads carry the notification ID, title, short body (public ID and category only) and an in-app link (`#/track/<id>` or `#/staff/<id>`); never descriptions, locations, claim codes or tokens.
 
 ## 10. Open questions before implementation
 

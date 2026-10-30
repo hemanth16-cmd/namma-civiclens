@@ -260,3 +260,77 @@ class EvidenceReceipt(BaseModel):
     sha256: str
     capturedAt: str | None
     uploadedAt: str
+
+
+# ---------- Notifications ----------
+
+class PushConfig(BaseModel):
+    pushEnabled: bool
+    vapidPublicKey: str | None
+
+
+class InboxCreated(BaseModel):
+    """A citizen notification inbox. The token is shown once; only its hash is stored."""
+    inboxToken: str
+
+
+class PushKeys(_Strict):
+    p256dh: str = Field(min_length=80, max_length=100)
+    auth: str = Field(min_length=16, max_length=30)
+
+
+class PushSubscriptionIn(_Strict):
+    """The browser's PushSubscription.toJSON(), plus an optional device label."""
+    endpoint: str = Field(min_length=12, max_length=2048)
+    keys: PushKeys
+    expirationTime: int | None = Field(default=None, ge=0)
+    label: str = Field(default="", max_length=80)
+
+
+class PushDevice(BaseModel):
+    """A registered device. The endpoint and keys are never returned."""
+    subscriptionId: str
+    label: str
+    createdAt: str
+    updatedAt: str
+    lastSuccessAt: str | None
+    lastFailureAt: str | None
+    failureCount: int
+
+
+class FollowIn(_Strict):
+    complaintId: str = Field(max_length=32)
+    claim: str = Field(min_length=1, max_length=64)
+
+
+class FollowOut(BaseModel):
+    complaintId: str
+    followedAt: str
+
+
+class NotificationOut(BaseModel):
+    id: str
+    kind: str
+    title: str
+    body: str
+    url: str
+    complaintId: str | None
+    createdAt: str
+    readAt: str | None
+    read: bool
+    pushStatus: str
+
+
+class NotificationList(BaseModel):
+    items: list[NotificationOut]
+    unreadCount: int
+    nextBefore: str | None
+
+
+class UnreadCount(BaseModel):
+    unreadCount: int
+
+
+class ReadAllResult(BaseModel):
+    updated: int
+    unreadCount: int

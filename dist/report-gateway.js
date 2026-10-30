@@ -10,6 +10,7 @@
 import {api, mediaDB} from './services.js';
 import {loadApiConfig} from './api-config.js';
 import {ApiError, createApiClient, toCreatePayload} from './api-client.js';
+import {enablePush, ensureInbox, inbox, pushState, requestPermissionNow} from './push-client.js';
 
 // A copy of server-mode evidence always stays in this browser until the user removes it; it is
 // never deleted automatically, even after a confirmed upload. A separate key prefix keeps it apart
@@ -70,8 +71,46 @@ export async function submitReport(data, blob, options = {}) {
     blob: hasFile ? blob : null, capturedAt: payload.capturedAt ?? null,
     state: hasFile && uploadToken ? 'pending' : 'unavailable', evidence: null, inFlight: null
   });
-  lastServerReceipt = {receipt, evidenceKept};
+  // A device that already turned notifications on follows its new reports automatically (before the
+  // evidence upload, so "evidence received" is notified too). Never blocks or fails the submission.
+  let following = false;
+  const inboxToken = inbox.get(options.env);
+  if (inboxToken && pushState('citizen', options.env) === 'enabled') {
+    try {
+      await client(config, options).followComplaint(inboxToken, receipt.id, receipt.claim);
+      following = true;
+    } catch {
+      following = false;
+    }
+  }
+  lastServerReceipt = {receipt, evidenceKept, following};
   return {mode: 'backend', id: receipt.id};
+}
+
+/**
+ * Follow a just-submitted report on this device and turn on push (called from a click on the
+ * receipt page; it asks for notification permission first). Uses the claim code held in memory.
+ * Resolves to {following, push: 'enabled'|'denied'|'dismissed'|'unsupported'|'unavailable', message}.
+ */
+export async function notifyAboutReport(id, options = {}) {
+  const ctx = uploads.get(id);
+  if (!ctx?.claim) return {following: false, message: 'The claim code is no longer available on this page. Follow the report from Notifications with its ID and claim code.'};
+  await requestPermissionNow(options.env);
+  const http = client(options.config ?? ctx.config, options);
+  let token;
+  try {
+    token = await ensureInbox(http, options.env);
+    await http.followComplaint(token, id, ctx.claim);
+  } catch (err) {
+    return {following: false, message: err instanceof ApiError ? err.message : 'Following this report failed.'};
+  }
+  try {
+    const result = await enablePush({http, token, audience: 'citizen', config: await http.getPushConfig(), env: options.env});
+    return {following: true, push: result.state, message: result.message ?? ''};
+  } catch (err) {
+    // e.g. the browser's push service could not be reached: history still records every update.
+    return {following: true, push: 'failed', message: err instanceof ApiError ? err.message : 'This browser could not register for push notifications.'};
+  }
 }
 
 /** Returns the in-memory server receipt for `id` once, then forgets it. */

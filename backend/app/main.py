@@ -19,6 +19,9 @@ from .evidence import UploadSettings
 from .evidence import router as evidence_router
 from .auth import session_ttl
 from .evidence_storage import EvidenceStorage, LocalEvidenceStorage
+from .notifications import MAX_FAILURES, Notifier
+from .notifications_api import router as notifications_router
+from .push import DEFAULT_ENDPOINT_HOSTS, PushSender, PushSettings, WebPushSender
 from .supabase_storage import SupabaseEvidenceStorage, SupabaseSettings, selected_backend
 from .staff_api import router as staff_router
 from .quota import EvidenceQuota, quota_from_env
@@ -53,6 +56,8 @@ def create_app(
     evidence_quota: EvidenceQuota | None = None,
     replay_window: timedelta | None = None,
     staff_session_ttl: timedelta | None = None,
+    push_settings: PushSettings | None = None,
+    push_sender: PushSender | None = None,
 ) -> FastAPI:
     """Build the app. The database is chosen by DATABASE_BACKEND: sqlite (default; the file is `db_path`,
     else CIVICLENS_DB_PATH, else backend/data/civiclens.sqlite3) or postgres (DATABASE_URL; `db_path`
@@ -97,6 +102,13 @@ def create_app(
     if staff_session_ttl is None:
         staff_session_ttl = session_ttl()
     origins = resolve_cors_origins(cors_origins)
+    # Web Push: VAPID_* variables (push.py). Without keys, notifications are stored but not pushed.
+    # Tests pass push_settings and a fake push_sender.
+    if push_settings is None:
+        push_settings = PushSettings.from_env()
+    if push_sender is None and push_settings is not None:
+        push_sender = WebPushSender(push_settings)
+    notifier = Notifier(store, push_sender if push_settings is not None else None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -106,6 +118,7 @@ def create_app(
         # Stored usage survives restarts: the larger of the database total and the bytes actually stored
         # across all configured backends.
         evidence_quota.load(store.total_evidence_bytes(), sum(s.stored_bytes() for s in evidence_storages.values()))
+        store.prune_push_subscriptions(MAX_FAILURES)  # expired or repeatedly failing devices
         yield
         if owns_store:
             store.close()  # returns pooled PostgreSQL connections; no-op for SQLite
@@ -127,6 +140,9 @@ def create_app(
     app.state.evidence_quota = evidence_quota
     app.state.replay_window = replay_window
     app.state.staff_session_ttl = staff_session_ttl
+    app.state.push_settings = push_settings
+    app.state.push_endpoint_hosts = push_settings.endpoint_hosts if push_settings else DEFAULT_ENDPOINT_HOSTS
+    app.state.notifier = notifier
     install_error_handlers(app)
     install_cors(app, origins)
 
@@ -135,6 +151,7 @@ def create_app(
     router.include_router(complaints_router)
     router.include_router(evidence_router)
     router.include_router(staff_router)
+    router.include_router(notifications_router)
     app.include_router(router)
     return app
 

@@ -106,7 +106,8 @@ async function renderServerTrack(root, id) {
       ? `<strong>${esc(id)}</strong> is a sample report. Samples exist only in local demo mode and are not stored on the CivicLens server, which starts empty.`
       : `No complaint with the ID <strong>${esc(id)}</strong> was found on the CivicLens server. Check the ID for typos. Reports saved in local mode stay on the device that created them and are not on the server.`, 'warn', 'alert', 'mt');
   } else {
-    slot.innerHTML = trackResult(record, false);
+    slot.innerHTML = trackResult(record, false)
+      + `<p class="mt"><a class="btn btn-secondary" href="#/notifications/follow/${esc(record.id)}" id="track-notify">${icon('bell')}<span>Get notified about this report</span></a> <span class="micro">Needs the private claim code from the receipt.</span></p>`;
   }
 }
 
