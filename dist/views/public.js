@@ -3,7 +3,7 @@ import {api, esc, DEMO_PASSWORD} from '../services.js';
 import {icon, btn, statusPill, verificationPill, heading, notice, publicTopbar, fmtDate, fmtDateTime, toast, panel, logo} from '../ui.js';
 import {setSession, viewer} from '../state.js';
 import {navigate} from '../router.js';
-import {reportMode, trackPublic} from '../report-gateway.js';
+import {reportMode, trackPublic, respondToResolution} from '../report-gateway.js';
 
 const SAMPLE_ID = /^NCL-2026-DEMO0[1-8]$/;
 
@@ -107,8 +107,52 @@ async function renderServerTrack(root, id) {
       : `No complaint with the ID <strong>${esc(id)}</strong> was found on the CivicLens server. Check the ID for typos. Reports saved in local mode stay on the device that created them and are not on the server.`, 'warn', 'alert', 'mt');
   } else {
     slot.innerHTML = trackResult(record, false)
+      + (record.status === 'Marked Resolved' ? verifyForm(record) : '')
       + `<p class="mt"><a class="btn btn-secondary" href="#/notifications/follow/${esc(record.id)}" id="track-notify">${icon('bell')}<span>Get notified about this report</span></a> <span class="micro">Needs the private claim code from the receipt.</span></p>`;
+    wireVerifyForm(root, record);
   }
+}
+
+// Citizen verification (server mode): the reporter confirms or disputes a resolution with the
+// private claim code from the receipt. The code is sent once in the request body; it is never
+// stored in this browser or put in the address bar.
+function verifyForm(r) {
+  return `<form class="panel mt" id="verify-form" autocomplete="off">
+      <h2>Is the issue fixed?</h2>
+      <p class="micro">The civic team marked this complaint resolved. If you reported it, tell them whether the problem is really gone. Your answer is shown publicly as “Citizen”, without your name.</p>
+      <div class="field"><label for="verify-claim">Private claim code from your receipt</label>
+        <input id="verify-claim" name="claim" type="password" autocomplete="off" spellcheck="false" maxlength="100" required></div>
+      <div class="row-actions">
+        <button class="btn btn-primary" type="submit" value="Appears Resolved">Yes, it appears resolved</button>
+        <button class="btn btn-secondary" type="submit" value="Still Present">No, it is still there</button>
+        <button class="btn btn-ghost" type="submit" value="Cannot Confirm">I cannot confirm</button>
+      </div>
+      <div id="verify-outcome" role="status" aria-live="polite"></div>
+    </form>`;
+}
+
+function wireVerifyForm(root, r) {
+  const form = root.querySelector('#verify-form');
+  if (!form) return;
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const response = e.submitter?.value;
+    const claim = form.querySelector('#verify-claim').value.trim();
+    const outcome = form.querySelector('#verify-outcome');
+    if (!response || !claim) return;
+    form.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    try {
+      const result = await respondToResolution(r.id, claim, response);
+      form.querySelector('#verify-claim').value = '';
+      outcome.innerHTML = notice(result.changed
+        ? `Thank you. Verification is now <strong>${esc(result.verification)}</strong>.`
+        : 'Thank you. Your response was recorded.', 'success', 'check', 'mt');
+      setTimeout(() => { if (form.isConnected) renderTrack(root, r.id); }, 1500);
+    } catch (err) {
+      form.querySelectorAll('button').forEach(b => { b.disabled = false; });
+      outcome.innerHTML = notice(esc(err?.message || 'Your response could not be sent.'), 'error', 'alert', 'mt');
+    }
+  };
 }
 
 function trackResult(r, signedIn) {

@@ -181,6 +181,17 @@ export async function uploadEvidence(id, options = {}) {
  * Public tracking. Resolves to {mode, record, error}: record is null when nothing matches, and
  * error is a user-facing message when the lookup itself failed (backend or configuration).
  */
+/**
+ * Server mode only: the citizen's view of a resolution ("Appears Resolved", "Still Present" or
+ * "Cannot Confirm"), proven with the private claim code. The code is sent in the request body and
+ * never stored. Resolves to {verification, changed}; throws ApiError.
+ */
+export async function respondToResolution(id, claim, response, options = {}) {
+  const config = await settings(options);
+  if (config.mode !== 'backend') throw new ApiError('Responses to a resolution are sent to the CivicLens server, which is not configured.', {code: 'not_configured'});
+  return client(config, options).submitCitizenResponse(id, claim, response);
+}
+
 export async function trackPublic(id, options = {}) {
   const config = await settings(options);
   if (config.mode === 'local') return {mode: 'local', record: await api.publicRecord(id), error: null};
