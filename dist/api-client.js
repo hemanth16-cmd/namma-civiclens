@@ -4,7 +4,7 @@
 // network failure or timeout the server may already have saved the report.
 
 const DEFAULT_TIMEOUT_MS = 10000;
-const DEFAULT_UPLOAD_TIMEOUT_MS = 180000;  // a 200 MB video on a slow connection needs minutes
+const DEFAULT_UPLOAD_TIMEOUT_MS = 180000;  // a 50 MB video on a slow connection needs minutes
 const EVIDENCE_STATUSES = ['uploaded', 'already_uploaded'];
 const PUBLIC_ID = /^NCL-\d{4}-[A-Z0-9]{6}$/;
 const SOURCE_TYPES = ['gps', 'exif', 'manual'];
