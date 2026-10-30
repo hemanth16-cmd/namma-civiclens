@@ -3,9 +3,6 @@ import {api, esc, DEMO_PASSWORD} from '../services.js';
 import {icon, btn, statusPill, verificationPill, heading, notice, publicTopbar, fmtDate, fmtDateTime, toast, panel, logo} from '../ui.js';
 import {setSession, viewer} from '../state.js';
 import {navigate} from '../router.js';
-import {reportMode, trackPublic} from '../report-gateway.js';
-
-const SAMPLE_ID = /^NCL-2026-DEMO0[1-8]$/;
 
 const EVENT_LABEL = {state: 'Verification changed', response: 'Community response'};
 
@@ -53,8 +50,6 @@ export function renderEntry(root) {
 
 export async function renderTrack(root, rawId = '') {
   const id = decodeURIComponent(rawId || '').trim().toUpperCase();
-  const mode = await reportMode();
-  if (mode !== 'local') return renderServerTrack(root, id);
   const r = id ? await api.publicRecord(id) : null;
   const signedIn = viewer().role !== 'public';
   root.innerHTML = `<div class="page">
@@ -74,40 +69,6 @@ export async function renderTrack(root, rawId = '') {
     e.preventDefault();
     navigate('track/' + encodeURIComponent(new FormData(e.target).get('id').trim().toUpperCase()));
   };
-}
-
-// Server-mode tracking: shows only the server's public projection. A failed or empty server lookup
-// is reported as such; local records are never shown in its place.
-async function renderServerTrack(root, id) {
-  root.innerHTML = `<div class="page">
-    ${publicTopbar({fallback: 'home'})}
-    <main id="main" class="narrow" tabindex="-1" data-track-source="server">
-      ${heading({eyebrow: 'Public complaint tracking · CivicLens server', title: 'Follow the change', lead: 'Enter the public complaint ID. You will see the status and timeline the CivicLens server shows the public, and nothing private.'})}
-      <form class="panel form-row" id="track-form" role="search">
-        <label for="track-id" class="sr-only">Complaint ID</label>
-        <input id="track-id" name="id" autocomplete="off" spellcheck="false" placeholder="e.g. NCL-2026-K7Q2MX" value="${esc(id)}" required>
-        <button class="btn btn-primary" type="submit">${icon('search')}<span>Track</span></button>
-      </form>
-      <div id="track-outcome" role="status" aria-live="polite">${id ? `<p class="micro mt">Checking the CivicLens server for <strong>${esc(id)}</strong>…</p>` : ''}</div>
-    </main>
-  </div>`;
-  root.querySelector('#track-form').onsubmit = e => {
-    e.preventDefault();
-    navigate('track/' + encodeURIComponent(new FormData(e.target).get('id').trim().toUpperCase()));
-  };
-  if (!id) return;
-  const {record, error} = await trackPublic(id);
-  const slot = root.querySelector('#track-outcome');
-  if (!slot?.isConnected) return; // the user navigated away while the request was in flight
-  if (error) {
-    slot.innerHTML = notice(`<strong>Tracking is unavailable right now.</strong> ${esc(error)}`, 'error', 'alert', 'mt');
-  } else if (!record) {
-    slot.innerHTML = notice(SAMPLE_ID.test(id)
-      ? `<strong>${esc(id)}</strong> is a sample report. Samples exist only in local demo mode and are not stored on the CivicLens server, which starts empty.`
-      : `No complaint with the ID <strong>${esc(id)}</strong> was found on the CivicLens server. Check the ID for typos. Reports saved in local mode stay on the device that created them and are not on the server.`, 'warn', 'alert', 'mt');
-  } else {
-    slot.innerHTML = trackResult(record, false);
-  }
 }
 
 function trackResult(r, signedIn) {
@@ -159,12 +120,6 @@ export function renderLogin(root, role = 'resident', register = false) {
       </section>
     </main>
   </div>`;
-  if (official) {
-    reportMode().then(mode => {
-      if (mode !== 'backend') return;
-      root.querySelector('.auth-panel')?.insertAdjacentHTML('afterbegin', notice('<strong>Server mode:</strong> complaints stored on the CivicLens server are in the <a class="inline-link" href="#/staff">staff console</a>, which uses a server staff account. This demonstration sign-in only opens the local workspace.', 'info', 'shield'));
-    });
-  }
   root.querySelector('#login-form').onsubmit = async e => {
     e.preventDefault();
     const fd = new FormData(e.target);

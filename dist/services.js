@@ -151,6 +151,9 @@ function db() {
 }
 const mediaFail = (cause, verb) => new StorageError(`The evidence file could not be ${verb} this browser. Storage may be full, blocked, or the file may be damaged. Try a smaller file.`, {cause});
 
+/** Storage key for the stamped copy of a complaint's photo (kept beside the untouched original). */
+export const stampedKey = id => `${id}:stamped`;
+
 export const mediaDB = {
   async put(id, blob) {
     const d = await db();
@@ -322,7 +325,8 @@ export const api = {
     const r = readAll().find(x => x.id === id);
     if (!r) return null;
     return {id: r.id, claim: r.claim, category: r.category, area: r.area, created: r.created, capturedAt: r.capturedAt ?? null,
-      uploadedAt: r.uploadedAt ?? r.created, captureSource: r.captureSource ?? null, gps: r.gps, mediaType: r.mediaType, shareEvidence: r.shareEvidence === true};
+      uploadedAt: r.uploadedAt ?? r.created, captureSource: r.captureSource ?? null, gps: r.gps, mediaType: r.mediaType, shareEvidence: r.shareEvidence === true,
+      evidenceRef: r.evidenceRef ?? null};
   },
 
   /** Public tracking: allowlisted, no claim codes, no reporter data, no media, no precise evidence. */
@@ -382,6 +386,8 @@ export const api = {
         source: data.gps.source, sourceType: ['gps', 'exif', 'manual'].includes(data.gps.sourceType) ? data.gps.sourceType : null,
         timestamp: data.gps.timestamp ?? null, address: data.gps.address ?? null
       } : null,
+      // Fingerprint of the original file (not a secret). Printed on the stamped photo instead of the claim code.
+      evidenceRef: typeof data.evidenceRef === 'string' && /^EV-[0-9A-F]{4}-[0-9A-F]{4}$/.test(data.evidenceRef) ? data.evidenceRef : null,
       created: data.created || now,
       capturedAt: data.created || null,
       captureSource: data.captureSource || 'Live camera',

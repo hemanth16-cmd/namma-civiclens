@@ -1,1 +1,1 @@
-{"geocoder":"https://photon.komoot.io/","attribution":"© OpenStreetMap contributors / Photon","usage":"Optional, user-triggered, cached address lookup. Replace with a self-hosted Photon endpoint for production."}
+{"geocoder":"https://photon.komoot.io/","attribution":"© OpenStreetMap contributors / Photon","usage":"Automatic, debounced, cached reverse geocoding of the device fix (disclosed on the camera screen). Replace with a self-hosted Photon endpoint for production."}

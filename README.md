@@ -1,4 +1,4 @@
-# Namma CivicLens — Version 5.1
+# Namma CivicLens — Version 5.2
 
 A camera-first civic reporting prototype for Bengaluru, built for Alliance One / SHASTRA 2026, CodeSangram 3.0 (problem CS/26-0012).
 
@@ -24,6 +24,8 @@ npm test           # 41 Node unit tests
 npm run check      # syntax check over all source, script and test files
 npm run e2e        # browser smoke suite (needs Playwright and Chromium; see below)
 npm run e2e:camera # camera and location journeys (needs Playwright and Chromium)
+npm run e2e:photo  # automatic address, photo stamp and saving journeys (needs Playwright and Chromium)
+npm run brand -- path/to/official-logo.png   # install the official logo and regenerate every icon
 ```
 
 ### Camera and location need a secure page
@@ -51,6 +53,37 @@ These are demonstration credentials only. They are shown in the sign-in forms an
 - Illustrative private claim code for that case: `DEMO-CLAIM-01` (for testing the claim flow as a signed-in resident)
 
 Eight sample cases (`NCL-2026-DEMO01` to `DEMO08`) are seeded across Bengaluru neighbourhoods. Their positions are approximate neighbourhood points, not verified locations. Residents can register additional local profiles from the sign-in screen.
+
+## What changed in version 5.2: automatic address, stamped photos, saving, logo
+
+**Why the address needed the Search button.** Reverse geocoding was wired only to the "Look up street address" button. The result was also written onto the fix object itself, and the location service replaces that object every time a refined fix arrives, so the address vanished on the next refinement. A lookup was also discarded if the fix improved while it was running. Together, these meant the normal flow never showed an address.
+
+**Fix.** `dist/address-service.js` resolves the address automatically whenever the camera screen has a current fix. It waits 700 ms for a refining fix to settle, reuses any address already found within 30 m (no request), shares one in-flight request between the camera, review and submit steps, cancels a request made stale by a move, backs off for 30 s after a failure, and retries by itself when the browser comes back online. Addresses are kept by position, not on the fix object. The manual button remains as **Retry address / Refresh address**.
+
+**Photo stamp.** Every photo is saved as a stamped JPEG (`dist/photo-stamp.js`). The panel is drawn into the pixels with Canvas at the photo's own resolution (scaled only above the 16.7 MP browser canvas limit), sized from the photo's shorter side, bottom-left on landscape and full-width on portrait. It shows the logo, complaint ID, an evidence reference, the address, latitude, longitude with accuracy and source, and the capture time in IST. The review screen shows a preview; the final stamp is drawn after submission with the ID of the record that now exists.
+
+- **Private ID.** The app's private identifier is the claim code, a secret that lets someone take ownership of a report. It is never drawn on a photo or used in a file name. The stamp shows an **Evidence ref** instead (`EV-XXXX-XXXX`, the first 32 bits of the SHA-256 of the original file), which identifies the photo without granting access. It is stored on the record and shown on the receipt.
+- **Location consent.** Address and coordinates appear on the photo only when the reporter ticks "Show the address and GPS coordinates on the saved photo". The choice is remembered on the device. Otherwise the stamp says the location is kept with the complaint.
+- **File name.** `NCL_2026_ABC123_20261030_124500.jpg`: public ID and IST capture time only.
+
+**Saving to the device** (`dist/photo-save.js`). Browsers cannot silently write to Photos or Gallery, so the app uses the best supported flow and reports only what the browser confirms:
+
+| Platform | Behaviour |
+| --- | --- |
+| Android Chrome, installed PWA | Share sheet with the JPEG; choose Gallery, Photos or Files. Falls back to a download if sharing fails. |
+| iPhone and iPad Safari, home-screen app | Share sheet; choose **Save Image** to put it in Photos. |
+| Desktop Chrome, Edge, Firefox | Download starts automatically on submit. |
+| Very old browsers | Opens the image in a new tab to press and hold. |
+
+Saving starts automatically after submitting a live-camera photo (toggle on the review screen). If the browser refuses because too much time passed since the tap, the receipt asks for one tap on **Save to Photos**. Each complaint is saved automatically at most once per session, and concurrent saves collapse into one. The stamped copy is also stored in IndexedDB beside the untouched original (key `<ID>:stamped`), so the receipt can offer it again.
+
+**Camera.** Where the browser supports `ImageCapture` (Chrome on Android and desktop), the shutter takes a full-sensor still and falls back to the preview frame if that is slower than 3.5 s, unsupported, or not sharper. Safari uses the preview frame (up to the 1920×1080 stream). A capture lock stops double taps producing two photos, and the fix is copied at the moment of the press.
+
+**Location card.** A Detecting / Located / Needs attention line, an automatically filled address card labelled *approximate* (separate from the GPS coordinates and accuracy), and the address under the coordinates in the viewfinder.
+
+**Logo.** One asset, `dist/assets/logo.svg`, referenced from `dist/brand.js`, feeds the navbar, entry and sign-in screens, the camera chip and viewfinder, the photo stamp, a loading splash, the favicon and the install icons in `manifest.webmanifest`. No official logo file was supplied with this version, so the asset is the app's existing mark (coral tile, navy pin), not a new design. To install the official logo, run `npm run brand -- path/to/logo.png` (PNG, SVG, JPEG or WebP). It copies the file unchanged, updates the path, and regenerates the 32, 180, 192, 512 and maskable 512 px icons, fitted without stretching or cropping.
+
+**Configuration.** No new environment variables or API keys. The geocoder endpoint stays in `dist/map-config.json` (public Photon, free; self-host for production volume).
 
 ## What changed in version 5.1: camera and location fixes
 
@@ -91,8 +124,9 @@ Reporting and evidence
 - Photo capture with a frame-ready wait. Photo-mode press-and-hold recording and accessible tap-to-start video mode, capped at 30 seconds. **Implemented; device/browser verification pending** for real camera pipelines and codecs.
 - Live capture requires device GPS with accuracy and fix time. **Implemented and tested** (flow); **device verification pending** (real GPS).
 - Gallery JPEG EXIF GPS parsing, capture-time reading (as IST when present), and rejection reasons. **Implemented and tested** with synthetic JPEG fixtures. Real phone photos **device verification pending**.
-- Optional address lookup through Photon, disclosed, cached per session, coordinates kept on failure. **Implemented**; requires network access to the configured endpoint, which was blocked in the test sandbox, so **not verified live**.
-- Evidence copy download with a navy and coral strip (public ID, category, capture time, location). It never includes the claim code. The original file is untouched. **Implemented and tested** in the browser suite.
+- Automatic address lookup through Photon: debounced, cached by position, cancellable, offline-aware, disclosed, coordinates kept on failure. **Implemented and tested** in Node and in headless Chromium against a mocked Photon. The live Photon service was blocked in the test sandbox, so **not verified live**.
+- Stamped photo: logo, public ID, evidence reference, IST capture time and (with consent) address and coordinates drawn into the JPEG. Never the claim code. The original file is untouched. **Implemented and tested** (unit rules and pixel checks on the downloaded file).
+- Saving: share sheet on phones, download on desktop, honest outcome messages, one automatic save per complaint. **Implemented and tested** with a stubbed share sheet; **device verification pending** for real Android and iOS share targets.
 - Private receipt text file with the claim code, separate from the evidence copy. **Implemented and tested**.
 
 Tracking and workspaces
@@ -144,6 +178,12 @@ dist/presentation.js     Category symbols, colour rules, resolution state, icons
 dist/ui.js               Shared components: pills, dialogs, shell, toast, lightbox
 dist/video-service.js    Admin-only video library, observations, export
 dist/video-review.js     Video review UI
+dist/address-service.js  Automatic reverse geocoding: debounce, position cache, cancellation, offline retry
+dist/photo-stamp.js      Evidence stamp drawn into the photo; file names; evidence reference
+dist/photo-save.js       Share-sheet or download saving with de-duplication and honest outcomes
+dist/brand.js            The single logo path used everywhere
+dist/assets/             Logo and the icons generated from it
+dist/manifest.webmanifest Install manifest
 dist/views/              Capture, geo lookup, public, workspace, issue, map, map page, intelligence
 dist/map-config.json     Geocoder endpoint configuration
 dist/fonts/, fonts.css   Bundled Inter (no external font requests)
@@ -171,7 +211,9 @@ Results recorded on 30 October 2026 in this workspace (headless Chromium, no phy
 - `npm run e2e:camera`: **48 of 48 checks pass**. It uses Chromium’s synthetic camera device: automatic start with permission granted, visible decoded preview, one request and one live track, tracks stopped on leaving and during a pending start, reopening, Back from the camera, real frame capture at 1920×1080, video recording with tap to start and stop, review location details, camera released during review, camera denial (simulated `NotAllowedError`) then Retry, real location denial then Retry, switching between two reported cameras, single-camera switch disabled, location timeout then Retry, poor fix refined from ±350 m to ±11 m, address lookup failure keeping coordinates, a plain-HTTP network address reporting the secure-page requirement, and 375 px and 320 px layouts.
 - Map fallback check: with the basemap blocked, the Leaflet fallback rendered eight plotted markers with category symbols and a cluster.
 
-Still needs your device: a real phone camera (rear and front), the browser's real camera permission prompt and denial, a real GPS receiver outdoors and indoors, switching on a phone with several lenses, returning to the app from the background, EXIF from real phone photos, MOV and other codecs, vector tile rendering with network access, live Photon lookup, and browsers other than Chromium.
+Version 5.2 additions: `npm test` **61 of 61 pass** (20 new: resolver debounce, caching, cancellation, back-off, offline, bounded wait; stamp rows, consent, no claim code, file names, layout proportions, evidence reference; save method, share outcomes, de-duplication). `npm run e2e:photo` **45 of 45 pass**. The earlier suites still pass unchanged.
+
+Still needs your device: real share sheets (Save Image on iOS, gallery targets on Android), a real phone camera (rear and front), the browser's real camera permission prompt and denial, a real GPS receiver outdoors and indoors, switching on a phone with several lenses, returning to the app from the background, EXIF from real phone photos, MOV and other codecs, vector tile rendering with network access, live Photon lookup, and browsers other than Chromium.
 
 ## Limits
 
@@ -215,5 +257,6 @@ Vendored libraries: Leaflet 1.9.4 (BSD-2-Clause), MapLibre GL JS 5.6.2 (BSD-3-Cl
 - Version 2: camera-first entry with three-choice navigation, self-hosted Inter, role-separated navigation, disclosed address lookup, vector map with Leaflet fallback.
 - Version 3: category symbols, community issues with persistent reviews, before/after evidence, explicit sharing controls.
 - Version 4: admin video review with observations, frames, case linking and JSON export.
+- Version 5.2: automatic address, stamped photos with consent-based location, device saving, central logo with favicon and install icons, full-resolution stills where supported, 20 new unit tests and a 45-check photo browser suite.
 - Version 5.1: camera preview and location fixes (see above), 18 new unit tests and a 48-check camera and location browser suite.
 - Version 5: consolidated design system; public ID and private claim code separated; role projections built separately; append-only repair and verification history; independent lifecycle and verification; EXIF rejection without location substitution; map and list driven by one filter path; accessible dialogs and focus handling; intelligence studio with explained priority and labelled demos; backend-readiness documents; 23 unit tests and a 55-check browser suite.

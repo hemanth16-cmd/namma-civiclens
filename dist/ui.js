@@ -3,6 +3,7 @@ import {esc, categories} from './services.js';
 import {icon, categoryIcon, resolutionState} from './presentation.js';
 import {state, viewer} from './state.js';
 import {navigate, currentPath} from './router.js';
+import {LOGO_SRC, BRAND_NAME} from './brand.js';
 
 export {esc, icon, categoryIcon, resolutionState, categories};
 
@@ -65,7 +66,7 @@ export function panelHead(title, right = '', eyebrow = '') {
 }
 
 export function logo(href = '#/camera') {
-  return `<a class="logo" href="${href}" aria-label="Namma CivicLens home"><span class="logo-mark" aria-hidden="true">${icon('pin')}</span><span class="logo-text"><strong>Namma CivicLens</strong><small>Accountable civic action</small></span></a>`;
+  return `<a class="logo" href="${href}" aria-label="${BRAND_NAME} home"><span class="logo-mark" aria-hidden="true"><img src="${LOGO_SRC}" alt="" width="34" height="34" decoding="async"></span><span class="logo-text"><strong>${BRAND_NAME}</strong><small>Accountable civic action</small></span></a>`;
 }
 
 export function demoBadge() {
