@@ -240,3 +240,23 @@ failures as before), targeted browser checks **21/21**.
 
 Still open: issue 4 (config/test, team decision), 5 (Render CORS), 7 (Range), 9–14, and everything in
 issue 2 (Workstream 1).
+
+## I. Follow-up: staff list timeout and the admin workspace (uncommitted)
+
+Reported after deployment: the staff console showed "The CivicLens server did not answer in time", and
+the admin map and dashboards had disappeared.
+
+| Problem | Root cause | Fix | Verified by |
+|---|---|---|---|
+| Staff list timed out on Render | `store.list_complaints` loaded each complaint separately (~4 queries per complaint). Measured on the live API: each query from Render to the Supabase database costs ~0.2 s, so 12+ complaints took ~10 s, the browser's timeout | One query for the page plus one count, whatever the page size. The list now also carries `title`, `department` and `gps` for the map | backend test asserting exactly 2 queries for 6 complaints; SQLite 316 passed, PostgreSQL 328 passed |
+| Map and dashboards gone | Remediation step 2 redirected `#/official/*` to the plain staff console. Before that, in backend mode, those screens showed **demo sample data**, so neither version was right | The admin workspace is back with real data. In server mode "Login as admin" is the server staff sign-in; overview, incident management, city map and intelligence read `GET /staff/complaints` (`dist/server-records.js`); opening a case leads to the staff case page with the evidence viewer; the activity chart is measured from server dates; work orders show an honest "not on the server yet" state with no local form; sign-out revokes the server session | 24 browser checks (sign-in, overview counts, mini-map, city map with every complaint plotted, map filters, incident search, work orders, case with photo, sign-out, phone width); screenshots compared with the original design |
+| Map showed "Report symbols could not be drawn: Source "reports" already exists" | **Pre-existing**, also in local mode on the original branch: the layer setup runs on both `load` and `style.load` and tried to re-add its source | Update the existing source and add only missing layers | reproduced 3/3 in local mode before the fix, 0 after; admin map check |
+
+Test results after these changes: `npm test` 155/156 (only the known `api-config` test), `npm run
+check` passed (55 files), backend SQLite 316 passed / 18 skipped, PostgreSQL 328 passed / 6 skipped,
+`backend-e2e` 62/66 (the same 4 config-related failures; its admin sign-in check was updated to the new
+behaviour), server-mode checks 21/21, admin workspace checks 24/24.
+
+The live Render service must be redeployed with this backend change for the timeout to go away.
+Moving the Render service to the Singapore region (closest to the Seoul database) would cut each query
+further.
