@@ -124,7 +124,7 @@ async function renderList(root, http) {
     }
     const rows = items.map(i => `<tr>
       <td><a class="inline-link code-inline" href="#/staff/${esc(i.id)}">${esc(i.id)}</a></td>
-      <td>${esc(i.category)}</td><td>${esc(i.area)}</td>
+      <td>${esc(i.category)}${i.mergedInto ? `<br><span class="micro">Merged into ${esc(i.mergedInto)}</span>` : ''}</td><td>${esc(i.area)}</td>
       <td>${statusPill(i.status)} ${verificationPill(i.verification)}</td>
       <td>${i.created ? fmtDate(i.created) : '—'}</td>
       <td>${i.hasEvidence ? `${icon(i.mediaType === 'video' ? 'video' : 'image', 'mini-icon')} Uploaded` : 'Not uploaded'}</td></tr>`).join('');
@@ -209,6 +209,7 @@ function manageSection(r) {
         ${['Open', 'In Progress'].includes(w.status) ? `<button type="button" class="btn btn-ghost" data-wo-to="Cancelled">Cancel</button>
           <label class="btn btn-ghost">${icon('image', 'mini-icon')}<span>After photo</span><input type="file" accept="image/jpeg" data-wo-upload hidden></label>` : ''}</td></tr>`).join('');
   return `<div id="manage-message" role="status" aria-live="polite"></div>
+    ${duplicateSection(r)}
     <dl class="meta-list two-col">
       <div><dt>Department</dt><dd>${a.department ? esc(a.department.name) : '<span class="micro">Not assigned (triage queue)</span>'}</dd></div>
       <div><dt>Assigned to</dt><dd>${a.assignee ? `${esc(a.assignee.displayName)} (${esc(a.assignee.username)})` : '<span class="micro">Nobody yet</span>'}</dd></div>
@@ -273,6 +274,7 @@ function wireManagement(root, http, r) {
     }
   };
   const value = id => ($(id)?.value || '').trim();
+  wireDuplicates(root, http, r, run);
 
   $('manage-transition')?.addEventListener('submit', e => {
     e.preventDefault();
@@ -338,6 +340,76 @@ function wireManagement(root, http, r) {
     } catch (err) {
       if (slot.isConnected) handleError(root, http, err, slot);
     }
+  });
+}
+
+// ---------- Duplicate review ----------
+
+const LABEL_TEXT = {likely_duplicate: 'Likely duplicate', possible_duplicate: 'Possible duplicate', recurrence: 'Recurrence after a fix', nearby_separate: 'Probably a separate issue'};
+
+function duplicateSection(r) {
+  if (r.mergedInto) {
+    const active = r.merges.find(m => m.duplicate === r.id && !m.revertedAt);
+    return `${notice(`This report was merged into <a class="inline-link code-inline" href="#/staff/${esc(r.mergedInto)}">${esc(r.mergedInto)}</a> as a report of the same issue${active ? ` by ${esc(active.by)}: “${esc(active.reason)}”` : ''}. Manage it there.`, 'info', 'alert')}
+      ${can(r, 'revert_merge') && active ? `<form id="dup-revert" class="panel" data-merge="${esc(active.id)}">
+        <div class="field"><label for="dup-revert-reason">Reason for reverting</label><input id="dup-revert-reason" maxlength="500" required></div>
+        <div class="row-actions"><button type="submit" class="btn btn-secondary">Revert merge</button></div></form>` : ''}`;
+  }
+  const linked = r.merges.filter(m => m.canonical === r.id && !m.revertedAt);
+  return `${linked.length ? notice(`Reports merged into this complaint: ${linked.map(m => `<a class="inline-link code-inline" href="#/staff/${esc(m.duplicate)}">${esc(m.duplicate)}</a>`).join(', ')}.`, 'info', 'alert') : ''}
+    ${can(r, 'review_duplicates') ? `<div class="panel" id="dup-panel">
+      <h3>Possible duplicates</h3>
+      <p class="micro">Suggestions only, from location (against GPS accuracy), category, time, wording and identical files. Nothing is merged without a supervisor.</p>
+      <div class="row-actions"><button type="button" class="btn btn-secondary" id="dup-find">Find possible duplicates</button></div>
+      <div id="dup-list" class="mt" role="status" aria-live="polite"></div></div>` : ''}`;
+}
+
+function candidateRow(r, c) {
+  const factors = c.factors.map(f => `<li>${esc(f.name)}: ${esc(f.detail)} <span class="micro">(adds ${Math.round(f.contribution * 100)} of 100)</span></li>`).join('');
+  return `<li class="panel" data-candidate="${esc(c.id)}">
+    <div class="tl-head"><strong><a class="inline-link code-inline" href="#/staff/${esc(c.id)}">${esc(c.id)}</a> · ${esc(LABEL_TEXT[c.label] || c.label)}</strong>
+      <span>${Math.round(c.score * 100)}% · ${Math.round(c.distanceM)} m away</span></div>
+    <p class="micro">${esc(c.category)} · ${esc(c.area)} · ${esc(c.status)} · reported ${c.created ? fmtDate(c.created) : '—'}</p>
+    ${c.reasons.length ? `<ul>${c.reasons.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+    ${c.caution ? notice(esc(c.caution), 'warn', 'alert') : ''}
+    <details><summary>How the score was worked out</summary><ul>${factors}</ul></details>
+    ${can(r, 'merge') ? `<div class="field mt"><label for="dup-reason-${esc(c.id)}">Reason</label><input id="dup-reason-${esc(c.id)}" maxlength="500" placeholder="e.g. same pothole, same photo angle"></div>
+      <div class="row-actions">
+        <button type="button" class="btn btn-secondary" data-dup-act="merge-into">Merge this report into ${esc(c.id)}</button>
+        <button type="button" class="btn btn-secondary" data-dup-act="merge-from">Merge ${esc(c.id)} into this report</button>
+        <button type="button" class="btn btn-ghost" data-dup-act="dismiss">Not a duplicate</button>
+      </div>` : ''}
+  </li>`;
+}
+
+function wireDuplicates(root, http, r, run) {
+  const token = () => staffSession.get()?.token;
+  $('dup-revert')?.addEventListener('submit', e => {
+    e.preventDefault();
+    run(e.submitter, () => http.revertMerge(token(), e.target.dataset.merge, $('dup-revert-reason').value.trim()), 'Merge reverted.');
+  });
+  $('dup-find')?.addEventListener('click', async () => {
+    const list = $('dup-list');
+    list.innerHTML = '<p class="micro">Looking for nearby reports…</p>';
+    try {
+      const result = await http.getDuplicateCandidates(token(), r.id);
+      if (!list.isConnected) return;
+      list.innerHTML = result.note ? notice(esc(result.note), 'info', 'alert')
+        : result.candidates.length ? `<p class="micro">Within ${Math.round(result.radiusM)} m and ${result.days} days, same or related category, best first.</p><ol class="stack">${result.candidates.map(c => candidateRow(r, c)).join('')}</ol>`
+        : '<p class="micro">No similar reports nearby.</p>';
+    } catch (err) {
+      if (list.isConnected) handleError(root, http, err, list);
+    }
+  });
+  $('dup-list')?.addEventListener('click', e => {
+    const act = e.target.closest('[data-dup-act]')?.dataset.dupAct;
+    const other = e.target.closest('[data-candidate]')?.dataset.candidate;
+    if (!act || !other) return;
+    const reason = ($(`dup-reason-${other}`)?.value || '').trim();
+    const button = e.target.closest('button');
+    if (act === 'merge-into') return run(button, () => http.mergeComplaint(token(), r.id, {canonical: other, reason}), `Merged into ${other}.`);
+    if (act === 'merge-from') return run(button, () => http.mergeComplaint(token(), other, {canonical: r.id, reason}), `${other} merged into this complaint.`);
+    return run(button, () => http.dismissDuplicate(token(), r.id, other, reason), 'Marked as not a duplicate.');
   });
 }
 
