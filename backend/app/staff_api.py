@@ -117,14 +117,14 @@ def stream_evidence(request: Request, evidence: dict, staff: dict, basename: str
     # Read from the backend that stored this file (local evidence stays readable after switching to Supabase Storage).
     storage = request.app.state.evidence_storages.get(evidence["storageBackend"])
     if storage is None:
-        logger.warning("Evidence for %s is in the %r backend, which this server is not configured for", public_id, evidence["storageBackend"])
+        logger.warning("Evidence %s is in the %r backend, which this server is not configured for", basename, evidence["storageBackend"])
         raise ApiProblem(404, "evidence_unavailable", UNAVAILABLE.get(evidence["storageBackend"], UNAVAILABLE["other"]))
     try:
         handle = storage.open_read(evidence["storageKey"])
     except StoreError:
         # A file that is definitely absent is a permanent condition, not an outage: say so instead of 503.
         if _definitely_missing(storage, evidence["storageKey"]):
-            logger.warning("Evidence file for %s is missing from the %r backend", public_id, evidence["storageBackend"])
+            logger.warning("Evidence file %s is missing from the %r backend", basename, evidence["storageBackend"])
             raise ApiProblem(404, "evidence_unavailable", MISSING_FILE)
         raise  # → 503 storage_unavailable (e.g. Supabase unreachable)
     try:
