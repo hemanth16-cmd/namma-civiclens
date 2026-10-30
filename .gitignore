@@ -6,3 +6,4 @@ node_modules/
 screenshots/
 load_stress_report.json
 sustained_stress_report.json
+dist/
