@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, FastAPI
 
 from . import API_VERSION, APP_VERSION, SERVICE_NAME
+from .cases_api import router as cases_router
 from .complaints import router as complaints_router
 from .cors import install_cors, resolve_cors_origins
 from .errors import install_error_handlers
@@ -151,6 +152,7 @@ def create_app(
     router.include_router(complaints_router)
     router.include_router(evidence_router)
     router.include_router(staff_router)
+    router.include_router(cases_router)
     router.include_router(notifications_router)
     app.include_router(router)
     return app

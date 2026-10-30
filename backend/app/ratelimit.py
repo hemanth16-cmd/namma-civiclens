@@ -63,6 +63,8 @@ class RateLimitSettings:
     follow_per_complaint: Rule = Rule(10, 3600)
     push_register_per_ip: Rule = Rule(30, 3600)     # POST /notifications/subscriptions
     push_test_per_recipient: Rule = Rule(5, 3600)   # POST /notifications/test
+    citizen_response_per_ip: Rule = Rule(10, 900)   # POST /complaints/{id}/citizen-responses (claim-code check)
+    citizen_response_per_complaint: Rule = Rule(10, 3600)
     trusted_proxies: tuple = field(default_factory=tuple)
 
     ENV_RULES = {
@@ -79,6 +81,8 @@ class RateLimitSettings:
         "follow_per_complaint": "CIVICLENS_RATE_FOLLOW_COMPLAINT",
         "push_register_per_ip": "CIVICLENS_RATE_PUSH_REGISTER_IP",
         "push_test_per_recipient": "CIVICLENS_RATE_PUSH_TEST",
+        "citizen_response_per_ip": "CIVICLENS_RATE_CITIZEN_RESPONSE_IP",
+        "citizen_response_per_complaint": "CIVICLENS_RATE_CITIZEN_RESPONSE_COMPLAINT",
     }
 
     @classmethod

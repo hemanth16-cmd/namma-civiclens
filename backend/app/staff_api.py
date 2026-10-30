@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from .auth import current_staff, normalise_username, session_ttl, sign_in
 from .complaints import NOT_FOUND, PUBLIC_ID_PATTERN
 from .errors import ApiProblem
-from .models import EvidenceAccessEntry, StaffComplaint, StaffComplaintList, StaffIdentity, StaffSessionOut, StaffSignIn
+from .models import EvidenceAccessEntry, StaffCase, StaffComplaintList, StaffIdentity, StaffSessionOut, StaffSignIn
 from .ratelimit import client_ip, enforce
 from .store import STAFF_LIST_MAX, StoreError
 
@@ -69,34 +69,51 @@ def _summary(record: dict) -> dict:
 @router.get("/complaints", response_model=StaffComplaintList)
 def list_complaints(request: Request, response: Response, staff: dict = Depends(current_staff),
                     limit: int = Query(50, ge=1, le=STAFF_LIST_MAX), offset: int = Query(0, ge=0)) -> dict:
-    records, total = request.app.state.store.list_complaints(limit, offset)
+    records, total = request.app.state.store.list_complaints(limit, offset, staff_pk=staff["pk"])
     response.headers["Cache-Control"] = "no-store"
     return {"items": [_summary(r) for r in records], "total": total, "limit": limit, "offset": offset}
 
 
-def _record_or_404(request: Request, public_id: str) -> dict:
+def _record_or_404(request: Request, public_id: str, staff: dict) -> dict:
+    """The staff record, or 404. Officials outside the complaint's departments get 403 (lifecycle.in_scope)."""
     if not PUBLIC_ID_PATTERN.fullmatch(public_id):
         raise ApiProblem(404, "not_found", NOT_FOUND)
-    record = request.app.state.store.get_staff_complaint(public_id)
+    store = request.app.state.store
+    record = store.get_staff_complaint(public_id)
     if record is None:
         raise ApiProblem(404, "not_found", NOT_FOUND)
+    store.require_case_scope(public_id, staff["pk"])
     return record
 
 
-@router.get("/complaints/{public_id}", response_model=StaffComplaint)
+@router.get("/complaints/{public_id}", response_model=StaffCase)
 def get_complaint(public_id: str, request: Request, response: Response, staff: dict = Depends(current_staff)) -> dict:
+    """The staff view plus management data (assignment, work orders, internal notes, allowed actions)."""
+    if not PUBLIC_ID_PATTERN.fullmatch(public_id):
+        raise ApiProblem(404, "not_found", NOT_FOUND)
+    record = request.app.state.store.case_detail(public_id, staff["pk"])
+    if record is None:
+        raise ApiProblem(404, "not_found", NOT_FOUND)
     response.headers["Cache-Control"] = "no-store"
-    return _record_or_404(request, public_id)
+    return record
 
 
 @router.get("/complaints/{public_id}/evidence")
 def view_evidence(public_id: str, request: Request, background: BackgroundTasks, staff: dict = Depends(current_staff)) -> StreamingResponse:
     """Stream the original evidence to signed-in staff. The view is logged before any byte is sent;
     if logging fails, nothing is sent."""
-    store = request.app.state.store
-    evidence = _record_or_404(request, public_id)["evidence"]
+    evidence = _record_or_404(request, public_id, staff)["evidence"]
     if evidence is None:
         raise ApiProblem(404, "evidence_not_found", "No evidence has been uploaded for this complaint.")
+    streamed = stream_evidence(request, evidence, staff, f"{public_id}-evidence", background)
+    background.add_task(request.app.state.notifier.evidence_viewed, public_id)  # only once the view is logged; followers are told once
+    return streamed
+
+
+def stream_evidence(request: Request, evidence: dict, staff: dict, basename: str, background: BackgroundTasks | None = None) -> StreamingResponse:
+    """Stream one evidence file to signed-in staff. The view is logged before any byte is sent; if
+    logging fails, nothing is sent. `evidence` needs pk, storageBackend, storageKey, contentType, byteSize."""
+    store = request.app.state.store
     # Read from the backend that stored this file (local evidence stays readable after switching to Supabase Storage).
     storage = request.app.state.evidence_storages.get(evidence["storageBackend"])
     if storage is None:
@@ -123,9 +140,8 @@ def view_evidence(public_id: str, request: Request, background: BackgroundTasks,
         finally:
             handle.close()
 
-    background.add_task(request.app.state.notifier.evidence_viewed, public_id)  # followers are told once
-    filename = f"{public_id}-evidence.{EXTENSIONS.get(evidence['contentType'], 'bin')}"
-    return StreamingResponse(chunks(), media_type=evidence["contentType"], headers={
+    filename = f"{basename}.{EXTENSIONS.get(evidence['contentType'], 'bin')}"
+    return StreamingResponse(chunks(), media_type=evidence["contentType"], background=background, headers={
         "Content-Length": str(evidence["byteSize"]),
         "Content-Disposition": f'inline; filename="{filename}"',
         "Cache-Control": "no-store, private",
@@ -136,7 +152,7 @@ def view_evidence(public_id: str, request: Request, background: BackgroundTasks,
 
 @router.get("/complaints/{public_id}/evidence/access", response_model=list[EvidenceAccessEntry])
 def evidence_access_log(public_id: str, request: Request, response: Response, staff: dict = Depends(current_staff)) -> list[dict]:
-    evidence = _record_or_404(request, public_id)["evidence"]
+    evidence = _record_or_404(request, public_id, staff)["evidence"]
     response.headers["Cache-Control"] = "no-store"
     if evidence is None:
         return []

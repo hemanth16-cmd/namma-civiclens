@@ -179,6 +179,87 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return new Blob([bytes], {type});
     },
 
+    // ---------- Complaint management (staff). Every call returns the updated staff case from the server. ----------
+
+    /** POST /staff/complaints/{id}/transitions. `expectedStatus` is the status shown on screen (409 if it changed). */
+    async transitionComplaint(token, id, {to, expectedStatus, explanation = ''}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/transitions`, {to, expectedStatus, explanation}, {headers: staffAuth(token)}));
+    },
+
+    async assignComplaint(token, id, {department, assignee = null, reason = '', expectedStatus}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/assignment`, {department, assignee: assignee || null, reason, expectedStatus}, {headers: staffAuth(token)}));
+    },
+
+    /** Internal note: visible to staff only, never in public tracking. */
+    async addStaffNote(token, id, body) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/notes`, {body}, {headers: staffAuth(token)}));
+    },
+
+    /** Public update: appears in the public timeline. kind is "progress" or "department_response". */
+    async addPublicUpdate(token, id, {text, kind = 'progress'}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/updates`, {text, kind}, {headers: staffAuth(token)}));
+    },
+
+    async requestReinspection(token, id, {note, reopen = false, expectedStatus}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/reinspections`, {note, reopen: reopen === true, expectedStatus}, {headers: staffAuth(token)}));
+    },
+
+    async createWorkOrder(token, id, {team, description = '', dueAt = null, assignee = null}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/work-orders`, {team, description, dueAt: dueAt || null, assignee: assignee || null}, {headers: staffAuth(token)}));
+    },
+
+    /** Start ("In Progress"), complete ("Completed", needs a note) or cancel ("Cancelled", supervisors) a work order. */
+    async changeWorkOrder(token, workOrderId, {to, expectedStatus, note = ''}) {
+      return toStaffComplaint(await request('POST', `/staff/work-orders/${encodeURIComponent(workOrderId)}/transitions`, {to, expectedStatus, note}, {headers: staffAuth(token)}));
+    },
+
+    /** After-repair JPEG for a work order (multipart). Resolves to the evidence receipt. */
+    async uploadRepairEvidence(token, workOrderId, blob) {
+      const form = new FormData();
+      form.append('file', blob, 'repair.jpg');
+      const d = await request('POST', `/staff/work-orders/${encodeURIComponent(workOrderId)}/evidence`, form, {headers: staffAuth(token), timeout: uploadTimeoutMs});
+      if (typeof d.evidenceId !== 'string') throw new ApiError('The CivicLens server sent an upload result this app could not read.', {code: 'malformed_response'});
+      return {evidenceId: d.evidenceId, byteSize: Number(d.byteSize) || 0, sha256: String(d.sha256 ?? ''), uploadedAt: d.uploadedAt ?? null};
+    },
+
+    /** GET a before/after file of a work order as a Blob. Each view is logged by the server. */
+    async fetchWorkOrderEvidence(token, workOrderId, evidenceId) {
+      const response = await request('GET', `/staff/work-orders/${encodeURIComponent(workOrderId)}/evidence/${encodeURIComponent(evidenceId)}`, undefined, {headers: staffAuth(token), timeout: uploadTimeoutMs, raw: true});
+      const type = String(response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+      if (!EVIDENCE_TYPES.includes(type)) throw new ApiError('The CivicLens server sent evidence of an unexpected type, so it is not shown.', {code: 'malformed_response'});
+      return new Blob([await response.arrayBuffer()], {type});
+    },
+
+    async listWorkOrders(token, {status = '', overdue = false, department = '', limit = 50, offset = 0} = {}) {
+      const q = new URLSearchParams({limit: String(limit), offset: String(offset)});
+      if (status) q.set('status', status);
+      if (overdue) q.set('overdue', 'true');
+      if (department) q.set('department', department);
+      const d = await request('GET', '/staff/work-orders?' + q, undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a work-order list this app could not read.', {code: 'malformed_response'});
+      return {items: d.items.map(toWorkOrder).filter(Boolean), total: Number(d.total) || 0};
+    },
+
+    async listDepartments(token) {
+      const d = await request('GET', '/staff/departments', undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent a department list this app could not read.', {code: 'malformed_response'});
+      return d.filter(x => typeof x?.code === 'string').map(x => ({code: x.code, name: String(x.name ?? x.code)}));
+    },
+
+    /** Supervisors and admins only (403 otherwise). Newest first. */
+    async getAuditTrail(token, id) {
+      const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/audit`, undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent an audit trail this app could not read.', {code: 'malformed_response'});
+      return d.map(e => ({id: String(e?.id ?? ''), actorType: String(e?.actorType ?? ''), actor: e?.actor ?? null, actorName: e?.actorName ?? null,
+        action: String(e?.action ?? ''), details: e?.details && typeof e.details === 'object' ? e.details : {}, at: e?.at ?? null}));
+    },
+
+    /** Citizen response with the private claim code (in the JSON body only). No staff session. */
+    async submitCitizenResponse(id, claim, response) {
+      const d = await request('POST', `/complaints/${encodeURIComponent(id)}/citizen-responses`, {claim, response});
+      return {verification: String(d.verification ?? ''), changed: d.changed === true};
+    },
+
     async getEvidenceAccessLog(token, id) {
       const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/evidence/access`, undefined, {headers: staffAuth(token)});
       if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent an access log this app could not read.', {code: 'malformed_response'});
@@ -289,6 +370,42 @@ function toDevice(d) {
 const EVIDENCE_TYPES = ['image/jpeg', 'video/webm', 'video/mp4'];
 const staffAuth = token => ({Authorization: 'Bearer ' + token});
 
+const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update'];
+const staffRef = s => (s && typeof s.username === 'string' ? {username: s.username, displayName: String(s.displayName ?? s.username)} : null);
+
+/** Work order for staff. Only known fields are copied. */
+export function toWorkOrder(w) {
+  if (typeof w?.id !== 'string' || !/^wo_[A-Za-z0-9_-]{16}$/.test(w.id)) return null;
+  return {
+    id: w.id, complaintId: String(w.complaintId ?? ''), department: w.department ?? null, team: String(w.team ?? ''), assignee: w.assignee ?? null,
+    description: String(w.description ?? ''), dueAt: w.dueAt ?? null, status: String(w.status ?? ''), startedAt: w.startedAt ?? null,
+    completedAt: w.completedAt ?? null, completionNote: String(w.completionNote ?? ''), createdBy: String(w.createdBy ?? ''),
+    createdAt: w.createdAt ?? null, overdue: w.overdue === true,
+    evidence: (Array.isArray(w.evidence) ? w.evidence : []).filter(e => typeof e?.evidenceId === 'string').map(e => ({
+      phase: e.phase === 'after' ? 'after' : 'before', evidenceId: e.evidenceId, contentType: String(e.contentType ?? ''),
+      byteSize: Number(e.byteSize) || 0, uploadedAt: e.uploadedAt ?? null})),
+    history: (Array.isArray(w.history) ? w.history : []).map(h => ({action: String(h?.action ?? ''), to: h?.to ?? null, note: String(h?.note ?? ''),
+      by: String(h?.by ?? ''), at: h?.at ?? null}))
+  };
+}
+
+/** Management data in the staff case: assignment, work orders, internal notes and the server's allowed actions. */
+function toManagement(d) {
+  const a = d.assignment && typeof d.assignment === 'object' ? d.assignment : {};
+  return {
+    version: Number(d.version) || 0,
+    assignment: {department: a.department && typeof a.department.code === 'string' ? {code: a.department.code, name: String(a.department.name ?? '')} : null,
+      assignee: staffRef(a.assignee)},
+    assignmentHistory: (Array.isArray(d.assignmentHistory) ? d.assignmentHistory : []).map(h => ({department: String(h?.department?.name ?? ''),
+      assignee: h?.assignee ?? null, reason: String(h?.reason ?? ''), by: String(h?.by ?? ''), at: h?.at ?? null})),
+    workOrders: (Array.isArray(d.workOrders) ? d.workOrders : []).map(toWorkOrder).filter(Boolean),
+    notes: (Array.isArray(d.notes) ? d.notes : []).map(n => ({id: String(n?.id ?? ''), body: String(n?.body ?? ''), createdAt: n?.createdAt ?? null,
+      author: staffRef(n?.author)})),
+    allowedActions: (Array.isArray(d.allowedActions) ? d.allowedActions : []).filter(x => STAFF_ACTIONS.includes(x?.action)).map(x => ({
+      action: x.action, label: String(x.label ?? ''), to: typeof x.to === 'string' ? x.to : null, needsExplanation: x.needsExplanation === true}))
+  };
+}
+
 /** Operational projection for staff. Only known fields are copied; no claim, token or storage data exists to copy. */
 export function toStaffComplaint(d) {
   if (typeof d?.id !== 'string' || !PUBLIC_ID.test(d.id) || !d.gps || !Array.isArray(d.timeline)) {
@@ -304,7 +421,8 @@ export function toStaffComplaint(d) {
     gps: {lat: g.lat, lng: g.lng, accuracy: g.accuracy ?? null, source: g.source ?? null, sourceType: g.sourceType ?? null, timestamp: g.timestamp ?? null, address: g.address ?? null},
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
     evidence: e && typeof e === 'object' ? {evidenceId: String(e.evidenceId ?? ''), mediaType: e.mediaType === 'video' ? 'video' : 'photo',
-      contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, sha256: String(e.sha256 ?? ''), capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null} : null
+      contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, sha256: String(e.sha256 ?? ''), capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null} : null,
+    ...toManagement(d)
   };
 }
 
