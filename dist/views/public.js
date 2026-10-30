@@ -5,6 +5,7 @@ import {setSession, viewer} from '../state.js';
 import {navigate} from '../router.js';
 import {reportMode, trackPublic, respondToResolution} from '../report-gateway.js';
 import {staffSession} from '../staff-session.js';
+import {residentSession} from '../resident-session.js';
 import {serverClient} from '../server-records.js';
 
 const SAMPLE_ID = /^NCL-2026-DEMO0[1-8]$/;
@@ -260,7 +261,7 @@ function renderServerAdminLogin(root) {
           <button class="btn btn-primary btn-block btn-lg" type="submit">Sign in ${icon('forward')}</button>
         </form>
         ${notice('Your session is kept only in this tab’s memory: reloading or closing the page signs you out. Staff accounts are created by an administrator with <code>python -m app.staff create</code>.', 'info', 'lock', 'mt')}
-        <div class="auth-foot"><a class="inline-link" href="#/my-reports">Reported without an account? Open Reports on This Device</a></div>
+        <div class="auth-foot"><a class="inline-link" href="#/login/resident">Resident? Use resident sign-in</a> <a class="inline-link" href="#/my-reports">Reported without an account? Open Reports on This Device</a></div>
       </section>
     </main>
   </div>`;
@@ -272,6 +273,7 @@ function renderServerAdminLogin(root) {
     try {
       const session = await (await serverClient()).staffSignIn(String(fd.get('username')), String(fd.get('password')));
       staffSession.set(session);
+      residentSession.clear();  // one identity per tab: a staff sign-in ends any resident session held here
       setSession({role: 'official', name: session.staff.displayName, email: session.staff.username, server: true});
       toast(`Signed in as ${session.staff.displayName}.`, 'success');
       navigate('official');
@@ -285,18 +287,54 @@ function renderServerAdminLogin(root) {
 
 // Server mode: residents sign in with a resident account on the CivicLens server. The demonstration
 // profiles in services.js are never used in server mode, so they cannot stand in for an account.
-function renderServerResidentLogin(root) {
+// The session token stays in this tab's memory only (resident-session.js).
+function renderServerResidentLogin(root, register = false) {
+  if (residentSession.get()) return navigate('resident');
   root.innerHTML = `<div class="page">
     ${publicTopbar({fallback: 'home'})}
     <main id="main" class="narrow" tabindex="-1">
       <section class="panel auth-panel" aria-labelledby="login-title">
         <p class="pill pill-coral">${icon('user', 'pill-icon')}<span>Resident · server account</span></p>
-        <h1 id="login-title" tabindex="-1">Resident sign-in</h1>
-        ${notice('Resident accounts are not available on this server yet. You can still report and track without an account.', 'info', 'user')}
-        <div class="auth-foot"><a class="inline-link" href="#/camera">Report an issue without an account</a> <a class="inline-link" href="#/my-reports">Reports on This Device</a></div>
+        <h1 id="login-title" tabindex="-1">${register ? 'Create your resident account' : 'Resident sign-in'}</h1>
+        <p class="lead">${register ? 'An account keeps your complaints together on any device. Reporting never needs one.' : 'Sign in to see the complaints in your resident account, claim reports you made without an account, and set your preferences.'}</p>
+        <form id="login-form" class="stack" data-resident-login autocomplete="on">
+          ${register ? '<div class="field"><label for="login-name">Your name</label><input id="login-name" name="name" required maxlength="80" autocomplete="name"></div>' : ''}
+          <div class="field"><label for="login-email">Email address</label><input id="login-email" name="email" type="email" required maxlength="254" autocomplete="username" spellcheck="false"></div>
+          <div class="field"><label for="login-password">Password${register ? ' (12 or more characters)' : ''}</label><input id="login-password" name="password" type="password" required ${register ? 'minlength="12"' : ''} maxlength="256" autocomplete="${register ? 'new-password' : 'current-password'}"></div>
+          <div id="login-error" role="alert"></div>
+          <button class="btn btn-primary btn-block btn-lg" type="submit">${register ? 'Create account' : 'Sign in'} ${icon('forward')}</button>
+        </form>
+        ${notice('Your session is kept only in this tab’s memory: reloading or closing the page signs you out.', 'info', 'lock', 'mt')}
+        <div class="auth-foot">
+          ${register ? '<a class="inline-link" href="#/login/resident">Already have an account? Sign in</a>' : '<a class="inline-link" href="#/register">New here? Create a resident account</a>'}
+          <a class="inline-link" href="#/camera">Report an issue without an account</a>
+          <a class="inline-link" href="#/my-reports">Reports on This Device</a>
+        </div>
       </section>
     </main>
   </div>`;
+  root.querySelector('#login-form').onsubmit = async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const submit = e.target.querySelector('button[type=submit]');
+    submit.disabled = true;
+    try {
+      const http = await serverClient();
+      const email = String(fd.get('email')).trim();
+      const session = register
+        ? await http.residentRegister(email, String(fd.get('password')), String(fd.get('name') || '').trim())
+        : await http.residentSignIn(email, String(fd.get('password')));
+      residentSession.set(session);
+      staffSession.clear();  // one identity per tab: a resident sign-in ends any staff session held here
+      setSession({role: 'resident', name: session.resident.displayName, email: session.resident.email, server: true});
+      toast(`Signed in as ${session.resident.displayName}.`, 'success');
+      navigate('resident');
+    } catch (err) {
+      submit.disabled = false;
+      e.target.querySelector('#login-password').value = '';
+      document.getElementById('login-error').innerHTML = notice(esc(err?.name === 'ApiError' ? err.message : 'Sign-in failed.'), 'error', 'alert');
+    }
+  };
 }
 
 export {logo, panel, btn};

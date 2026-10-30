@@ -1211,6 +1211,7 @@ async function renderServerReceipt(root, {receipt: r, evidenceKept, following = 
         <h2 id="status-title">Submission status</h2>
         <dl class="meta-list">
           <div><dt>Complaint details</dt><dd data-step="metadata">Saved on the CivicLens server</dd></div>
+          <div><dt>Account</dt><dd data-step="account">${r.inAccount ? 'Linked to your resident account' : 'Sent without an account. Claim it later in a resident account with the ID and claim code.'}</dd></div>
           <div><dt>${what === 'video' ? 'Video' : 'Photo'}</dt><dd id="evidence-upload-status" role="status" aria-live="polite"></dd></div>
         </dl>
         <div id="evidence-upload-actions" class="row-actions"></div>

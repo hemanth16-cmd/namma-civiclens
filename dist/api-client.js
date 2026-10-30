@@ -104,8 +104,11 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
      * With an idempotency key, a retry of the same report returns the same complaint (replayed: true)
      * with newly issued credentials instead of creating a duplicate.
      */
-    async createComplaint(payload, {idempotencyKey} = {}) {
-      return toReceipt(await request('POST', '/complaints', payload, {headers: idempotencyKey ? {'Idempotency-Key': idempotencyKey} : {}}));
+    async createComplaint(payload, {idempotencyKey, residentToken} = {}) {
+      // A signed-in resident's token makes the complaint theirs (the server takes the owner from the
+      // session). Without it the report is anonymous: no account is needed to report.
+      const headers = {...(idempotencyKey ? {'Idempotency-Key': idempotencyKey} : {}), ...(residentToken ? bearer(residentToken) : {})};
+      return toReceipt(await request('POST', '/complaints', payload, {headers}));
     },
 
     /** GET /complaints/{id}. Resolves to the public projection, or null when the server has no such ID. */
@@ -135,6 +138,38 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       const data = await request('POST', `/complaints/${encodeURIComponent(id)}/upload-token`, {claim});
       if (typeof data.uploadToken !== 'string' || !data.uploadToken) throw new ApiError('The CivicLens server sent an upload token this app could not read.', {code: 'malformed_response'});
       return {uploadToken: data.uploadToken, uploadTokenExpiresAt: data.uploadTokenExpiresAt ?? null};
+    },
+
+    // ---------- Resident accounts (server mode). The token is passed in; it is never stored here. ----------
+
+    /** POST /residents (register) or POST /residents/sessions (sign in). Resolves to {token, expiresAt, resident}. */
+    async residentRegister(email, password, displayName) {
+      return toResidentSession(await request('POST', '/residents', {email, password, displayName}));
+    },
+    async residentSignIn(email, password) {
+      return toResidentSession(await request('POST', '/residents/sessions', {email, password}));
+    },
+    async residentSignOut(token) {
+      await request('DELETE', '/residents/sessions/current', undefined, {headers: bearer(token)});
+    },
+    async residentMe(token) {
+      return toResident(await request('GET', '/residents/me', undefined, {headers: bearer(token)}));
+    },
+    async listResidentComplaints(token, {limit = 100, offset = 0} = {}) {
+      const d = await request('GET', `/residents/me/complaints?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`, undefined, {headers: bearer(token)});
+      if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a complaint list this app could not read.', {code: 'malformed_response'});
+      return {items: d.items.map(toResidentComplaint), total: Number(d.total) || 0};
+    },
+    /** POST /residents/me/claims. The claim code travels in the JSON body only. */
+    async claimComplaint(token, id, claim) {
+      const d = await request('POST', '/residents/me/claims', {id, claim}, {headers: bearer(token)});
+      return {outcome: d.outcome, complaint: toResidentComplaint(d.complaint)};
+    },
+    async getResidentPreferences(token) {
+      return toResidentPrefs(await request('GET', '/residents/me/preferences', undefined, {headers: bearer(token)}));
+    },
+    async putResidentPreferences(token, prefs) {
+      return toResidentPrefs(await request('PUT', '/residents/me/preferences', toResidentPrefs(prefs), {headers: bearer(token)}));
     },
 
     // ---------- Staff console (server mode). The session token is passed in; it is never stored here. ----------
@@ -346,6 +381,35 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
 }
 
 const bearer = token => ({Authorization: 'Bearer ' + token});
+
+function toResident(r) {
+  if (!r || typeof r.email !== 'string') throw new ApiError('The CivicLens server sent an account this app could not read.', {code: 'malformed_response'});
+  return {residentId: String(r.residentId ?? ''), email: r.email, displayName: String(r.displayName ?? r.email), demo: r.demo === true};
+}
+
+function toResidentSession(d) {
+  if (typeof d?.token !== 'string' || !d.token) throw new ApiError('The CivicLens server sent a sign-in response this app could not read.', {code: 'malformed_response'});
+  return {token: d.token, expiresAt: d.expiresAt ?? null, resident: toResident(d.resident)};
+}
+
+function toResidentPrefs(p) {
+  return {updates: p?.updates !== false, verification: p?.verification !== false, hotspots: p?.hotspots === true};
+}
+
+/** A complaint as its owner sees it (allowlisted; never a claim code, token or storage key). */
+export function toResidentComplaint(d) {
+  const gps = d?.gps && Number.isFinite(d.gps.lat) && Number.isFinite(d.gps.lng)
+    ? {lat: d.gps.lat, lng: d.gps.lng, accuracy: d.gps.accuracy ?? null, sourceType: d.gps.sourceType ?? null, address: d.gps.address ?? null} : null;
+  return {
+    id: String(d.id), title: String(d.title || `${d.category} reported by a citizen`), category: String(d.category), area: String(d.area ?? ''),
+    description: String(d.description ?? ''), mediaType: d.mediaType === 'video' ? 'video' : 'photo', shareEvidence: d.shareEvidence === true,
+    hasEvidence: d.hasEvidence === true, gps, created: d.created ?? null, updated: d.updated ?? null, status: String(d.status),
+    verification: String(d.verification), department: String(d.department ?? ''), ownedVia: d.ownedVia === 'claimed' ? 'claimed' : 'submitted',
+    ownedAt: d.ownedAt ?? null,
+    timeline: Array.isArray(d.timeline) ? d.timeline.map(t => ({status: String(t.status), text: String(t.text), date: t.date})) : [],
+    verificationLog: toVerificationLog(d.verificationLog)
+  };
+}
 const NOTIFICATION_ID = /^nt_[A-Za-z0-9_-]{16,40}$/;
 const SUBSCRIPTION_ID = /^ps_[A-Za-z0-9_-]{16,40}$/;
 // In-app destinations only: a notification can never send the browser to another site.

@@ -22,9 +22,10 @@ import {toast, workspaceShell, notice, esc, btn} from './ui.js';
 
 const app = document.querySelector('#app');
 
-// An identity restored from sessionStorage is only a display hint. A server-mode identity whose
-// in-memory token is gone (reload, new tab), and the old "this device" pseudo-resident, are dropped.
-if (state.session?.device || (state.session?.server && !staffSession.get() && !residentSession.get())) setSession(null);
+// An identity restored from sessionStorage is only a display hint. The old "this device" pseudo-resident
+// and a server resident whose in-memory token is gone (reload, new tab) are dropped here. A stale staff
+// identity is kept until the router sees it, so a reloaded case page sends staff back to sign-in.
+if (state.session?.device || (state.session?.server && state.session.role === 'resident' && !residentSession.get())) setSession(null);
 const TITLES = {
   camera: 'Report an issue', review: 'Review evidence', home: 'Choose an option', track: 'Track a problem',
   login: 'Sign in', register: 'Create a demo profile', receipt: 'Receipt', issue: 'Case', staff: 'Staff console',
