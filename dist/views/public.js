@@ -9,7 +9,31 @@ const SAMPLE_ID = /^NCL-2026-DEMO0[1-8]$/;
 
 const EVENT_LABEL = {state: 'Verification changed', response: 'Community response'};
 
-export function renderEntry(root) {
+export async function renderEntry(root) {
+  // Server mode: the two cards lead to the real screens, not the demonstration workspaces.
+  const server = await reportMode() === 'backend';
+  const residentCard = server
+    ? `<a class="entry-card entry-link" href="#/my-reports" data-entry="my-reports">
+          <span class="entry-icon">${icon('user')}</span>
+          <div><p class="eyebrow">Residents · this device</p><h2>My reports</h2><p>Complaints you submitted from this browser and their current status on the CivicLens server.</p></div>
+          <span class="entry-go">${icon('forward')}</span>
+        </a>`
+    : `<a class="entry-card entry-link" href="#/login/resident">
+          <span class="entry-icon">${icon('user')}</span>
+          <div><p class="eyebrow">Resident workspace</p><h2>Login as user</h2><p>Your reports, claims, neighbourhood issues, notifications and preferences.</p></div>
+          <span class="entry-go">${icon('forward')}</span>
+        </a>`;
+  const adminCard = server
+    ? `<a class="entry-card entry-link" href="#/staff" data-entry="staff">
+          <span class="entry-icon">${icon('shield')}</span>
+          <div><p class="eyebrow">Civic operations · staff account</p><h2>Staff console</h2><p>Complaints stored on the CivicLens server, their private evidence and the evidence access log.</p></div>
+          <span class="entry-go">${icon('forward')}</span>
+        </a>`
+    : `<a class="entry-card entry-link" href="#/login/official">
+          <span class="entry-icon">${icon('shield')}</span>
+          <div><p class="eyebrow">Civic operations</p><h2>Login as admin</h2><p>Incident management, assignments, work orders, video review and decision support.</p></div>
+          <span class="entry-go">${icon('forward')}</span>
+        </a>`;
   root.innerHTML = `<div class="page page-entry">
     ${publicTopbar({fallback: 'camera', right: `<a class="btn btn-ghost" href="#/camera">${icon('camera')}<span>Report an issue</span></a>`})}
     <main id="main" class="entry-main" tabindex="-1">
@@ -26,22 +50,14 @@ export function renderEntry(root) {
           <p>See the public status, responsible department and timeline. Claim codes, reporter details and private evidence never appear here.</p>
           <form class="inline-form" id="entry-track-form" role="search">
             <label for="entry-track-id" class="sr-only">Public complaint ID</label>
-            <input id="entry-track-id" name="id" autocomplete="off" spellcheck="false" placeholder="NCL-2026-DEMO01" required>
+            <input id="entry-track-id" name="id" autocomplete="off" spellcheck="false" placeholder="${server ? 'NCL-2026-XXXXXX' : 'NCL-2026-DEMO01'}" required>
             <button class="btn btn-primary" type="submit">Track issue</button>
           </form>
         </section>
-        <a class="entry-card entry-link" href="#/login/resident">
-          <span class="entry-icon">${icon('user')}</span>
-          <div><p class="eyebrow">Resident workspace</p><h2>Login as user</h2><p>Your reports, claims, neighbourhood issues, notifications and preferences.</p></div>
-          <span class="entry-go">${icon('forward')}</span>
-        </a>
-        <a class="entry-card entry-link" href="#/login/official">
-          <span class="entry-icon">${icon('shield')}</span>
-          <div><p class="eyebrow">Civic operations</p><h2>Login as admin</h2><p>Incident management, assignments, work orders, video review and decision support.</p></div>
-          <span class="entry-go">${icon('forward')}</span>
-        </a>
+        ${residentCard}
+        ${adminCard}
       </div>
-      <p class="micro entry-sample">Sample public ID to try: <a class="inline-link" href="#/track/NCL-2026-DEMO01">NCL-2026-DEMO01</a>. Sample data is illustrative.</p>
+      ${server ? '' : '<p class="micro entry-sample">Sample public ID to try: <a class="inline-link" href="#/track/NCL-2026-DEMO01">NCL-2026-DEMO01</a>. Sample data is illustrative.</p>'}
     </main>
   </div>`;
   root.querySelector('#entry-track-form').onsubmit = e => {
@@ -160,12 +176,12 @@ export function renderLogin(root, role = 'resident', register = false) {
       </section>
     </main>
   </div>`;
-  if (official) {
-    reportMode().then(mode => {
-      if (mode !== 'backend') return;
-      root.querySelector('.auth-panel')?.insertAdjacentHTML('afterbegin', notice('<strong>Server mode:</strong> complaints stored on the CivicLens server are in the <a class="inline-link" href="#/staff">staff console</a>, which uses a server staff account. This demonstration sign-in only opens the local workspace.', 'info', 'shield'));
-    });
-  }
+  reportMode().then(mode => {
+    if (mode !== 'backend') return;
+    root.querySelector('.auth-panel')?.insertAdjacentHTML('afterbegin', official
+      ? notice('<strong>Server mode:</strong> complaints stored on the CivicLens server are in the <a class="inline-link" href="#/staff">staff console</a>, which uses a server staff account. This demonstration sign-in does not show server complaints.', 'info', 'shield')
+      : notice('<strong>Server mode:</strong> reports you sent to the CivicLens server are under <a class="inline-link" href="#/my-reports">My reports</a>. No sign-in is needed.', 'info', 'user'));
+  });
   root.querySelector('#login-form').onsubmit = async e => {
     e.preventDefault();
     const fd = new FormData(e.target);

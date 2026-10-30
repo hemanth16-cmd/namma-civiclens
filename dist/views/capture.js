@@ -1238,7 +1238,7 @@ async function renderServerReceipt(root, {receipt: r, evidenceKept, following = 
           <p class="micro">This preview comes from this browser’s copy, which is kept even after the upload. ${isPhoto ? 'The server receives the original photo, not the stamped copy. The stamp shows the logo, complaint ID, evidence reference, capture time and, if you chose it, the address and coordinates; never the claim code. ' : ''}Uploaded evidence is private: it is not shown in public tracking, and it cannot yet be viewed from the server.</p>
         </section>
       </div>
-      <p class="receipt-foot"><a class="inline-link" href="#/camera">${icon('camera')}<span>Report another issue</span></a></p>
+      <p class="receipt-foot"><a class="inline-link" href="#/camera">${icon('camera')}<span>Report another issue</span></a> · <a class="inline-link" href="#/my-reports" id="receipt-my-reports">${icon('list')}<span>My reports on this device</span></a></p>
     </main>
   </div>`;
   root.querySelector('[data-evidence]')?.addEventListener('click', async () => {

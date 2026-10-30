@@ -6,6 +6,8 @@ import {renderIssue} from './views/issue.js';
 import {renderIntelligence} from './views/intelligence.js';
 import {renderMapPage} from './views/map-page.js';
 import {renderStaff} from './views/staff.js';
+import {renderMyReports} from './views/my-reports.js';
+import {reportMode} from './report-gateway.js';
 import {renderNotifications as renderServerNotifications} from './views/notifications.js';
 import {openNotification, refreshPush, takeLaunchNotification, inbox} from './push-client.js';
 import {staffSession} from './staff-session.js';
@@ -14,14 +16,14 @@ import {createApiClient} from './api-client.js';
 import {mountVideoReview} from './video-review.js';
 import {api} from './services.js';
 import {state, viewer, setSession, runCleanups, addCleanup} from './state.js';
-import {navigate, currentPath, recordRoute, goBack, setRenderer} from './router.js';
+import {navigate, currentPath, recordRoute, goBack, setRenderer, serverModeRoute} from './router.js';
 import {toast, workspaceShell, notice, esc, btn} from './ui.js';
 
 const app = document.querySelector('#app');
 const TITLES = {
   camera: 'Report an issue', review: 'Review evidence', home: 'Choose an option', track: 'Track a problem',
   login: 'Sign in', register: 'Create a demo profile', receipt: 'Receipt', issue: 'Case', staff: 'Staff console',
-  notifications: 'Notifications'
+  notifications: 'Notifications', 'my-reports': 'My reports'
 };
 
 function fallbackPath(name) {
@@ -48,6 +50,7 @@ async function dispatch(path, parts, root) {
   if (head === 'login') return renderLogin(root, second === 'official' ? 'official' : 'resident');
   if (head === 'register') return renderLogin(root, 'resident', true);
   if (head === 'issue') return renderIssue(root, parts[1]);
+  if (head === 'my-reports') return renderMyReports(root);  // server mode only
   if (head === 'staff') return renderStaff(root, parts[1]);  // server mode only; authorisation is enforced by the API
   if (head === 'notifications') return renderServerNotifications(root, parts[1], parts[2]);  // server mode only
   if (head === 'official' || head === 'resident') {
@@ -76,6 +79,14 @@ async function render({focus = true} = {}) {
   const parts = path.split('/').filter(Boolean);
   const head = parts[0] || 'camera';
   const role = viewer().role;
+
+  // Server mode: the demonstration workspaces hold only browser-local sample data, so they must never
+  // stand in for server complaints. Officials go to the staff console, residents to their reports.
+  if (['official', 'resident', 'issue'].includes(head) && await reportMode() === 'backend') {
+    if (seq !== renderSeq) return;
+    const target = serverModeRoute(parts);
+    if (target) return navigate(target);
+  }
 
   // Role guards. Frontend checks are demonstration controls, not production authorisation.
   if (head === 'official' && role !== 'official') return navigate('login/official');
