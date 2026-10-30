@@ -5,7 +5,7 @@ streamed only through GET /staff/complaints/{id}/evidence after the session is c
 view is written to evidence_access_log; there are no public, permanent or signed links.
 """
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from .auth import current_staff, normalise_username, session_ttl, sign_in
@@ -13,7 +13,7 @@ from .complaints import NOT_FOUND, PUBLIC_ID_PATTERN
 from .errors import ApiProblem
 from .models import EvidenceAccessEntry, StaffComplaint, StaffComplaintList, StaffIdentity, StaffSessionOut, StaffSignIn
 from .ratelimit import client_ip, enforce
-from .store import STAFF_LIST_MAX
+from .store import STAFF_LIST_MAX, StoreError
 
 router = APIRouter(prefix="/staff", tags=["staff"])
 CHUNK = 64 * 1024
@@ -71,14 +71,18 @@ def get_complaint(public_id: str, request: Request, response: Response, staff: d
 
 
 @router.get("/complaints/{public_id}/evidence")
-def view_evidence(public_id: str, request: Request, staff: dict = Depends(current_staff)) -> StreamingResponse:
+def view_evidence(public_id: str, request: Request, background: BackgroundTasks, staff: dict = Depends(current_staff)) -> StreamingResponse:
     """Stream the original evidence to signed-in staff. The view is logged before any byte is sent;
     if logging fails, nothing is sent."""
     store = request.app.state.store
     evidence = _record_or_404(request, public_id)["evidence"]
     if evidence is None:
         raise ApiProblem(404, "evidence_not_found", "No evidence has been uploaded for this complaint.")
-    handle = request.app.state.evidence_storage.open_read(evidence["storageKey"])  # StoreError → 503
+    # Read from the backend that stored this file (local evidence stays readable after switching to Supabase Storage).
+    storage = request.app.state.evidence_storages.get(evidence["storageBackend"])
+    if storage is None:
+        raise StoreError(f"Evidence is in the {evidence['storageBackend']!r} backend, which is not configured")
+    handle = storage.open_read(evidence["storageKey"])  # StoreError → 503
     try:
         store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
     except BaseException:
@@ -92,6 +96,7 @@ def view_evidence(public_id: str, request: Request, staff: dict = Depends(curren
         finally:
             handle.close()
 
+    background.add_task(request.app.state.notifier.evidence_viewed, public_id)  # followers are told once
     filename = f"{public_id}-evidence.{EXTENSIONS.get(evidence['contentType'], 'bin')}"
     return StreamingResponse(chunks(), media_type=evidence["contentType"], headers={
         "Content-Length": str(evidence["byteSize"]),

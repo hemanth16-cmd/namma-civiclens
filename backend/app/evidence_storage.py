@@ -1,8 +1,9 @@
 """Private evidence file storage.
 
 `EvidenceStorage` is the interface routes depend on; `LocalEvidenceStorage` keeps files on the
-local disk for development. An S3-compatible implementation can replace it later (begin → multipart
-upload, commit → complete, delete → delete object) without changing the API layer.
+local disk (the development default) and `supabase_storage.SupabaseEvidenceStorage` keeps them in a
+private Supabase Storage bucket. Each implementation has a `name` ("local" / "supabase") that is recorded on every evidence row,
+so a file is always read and deleted from the backend that stored it.
 
 Safety rules kept here:
 - Storage keys are generated on the server (128 random bits, hex). A client filename is never used.
@@ -33,6 +34,7 @@ STALE_TEMP_SECONDS = 3600
 class PendingObject(Protocol):
     size: int
     sha256: str
+    content_type: str | None  # set by the upload route once the file type is known
 
     def write(self, data: bytes) -> None: ...
     def commit(self) -> str: ...
@@ -40,6 +42,8 @@ class PendingObject(Protocol):
 
 
 class EvidenceStorage(Protocol):
+    name: str  # "local" or "supabase": stored on each evidence row
+
     def initialize(self) -> None: ...
     def begin(self) -> PendingObject: ...
     def delete(self, key: str) -> None: ...
@@ -55,6 +59,7 @@ class _LocalPending:
         self._file = open(temp_path, "xb")  # exclusive create: never reuses or overwrites a file
         self._hash = hashlib.sha256()
         self.size = 0
+        self.content_type = None
         self._done = False
 
     @property
@@ -106,6 +111,8 @@ class _LocalPending:
 
 
 class LocalEvidenceStorage:
+    name = "local"
+
     def __init__(self, root: str | os.PathLike, forbidden_roots: list[Path] | tuple[Path, ...] = ()):
         self.root = Path(root).resolve()
         self._objects = self.root / "objects"
@@ -187,6 +194,11 @@ class LocalEvidenceStorage:
                 yield path, st.st_size, st.st_mtime
             except OSError:
                 continue
+
+    @property
+    def tmp_dir(self) -> Path:
+        """Private staging folder for in-progress uploads (also used by Supabase uploads)."""
+        return self._tmp
 
     @property
     def objects_dir(self) -> Path:

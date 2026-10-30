@@ -183,8 +183,107 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/evidence/access`, undefined, {headers: staffAuth(token)});
       if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent an access log this app could not read.', {code: 'malformed_response'});
       return d.map(e => ({username: String(e?.username ?? ''), displayName: String(e?.displayName ?? ''), action: String(e?.action ?? ''), accessedAt: e?.accessedAt ?? null}));
+    },
+
+    // ---------- Notifications. `token` is a staff session token or this device's citizen inbox token. ----------
+
+    /** GET /notifications/config: whether Web Push is configured, and the VAPID public key. */
+    async getPushConfig() {
+      const d = await request('GET', '/notifications/config');
+      return {pushEnabled: d.pushEnabled === true, vapidPublicKey: typeof d.vapidPublicKey === 'string' && d.vapidPublicKey ? d.vapidPublicKey : null};
+    },
+
+    /** POST /notifications/inboxes: a new citizen inbox token for this device (shown once). */
+    async createInbox() {
+      const d = await request('POST', '/notifications/inboxes', {});
+      if (typeof d.inboxToken !== 'string' || !/^[A-Za-z0-9_-]{20,200}$/.test(d.inboxToken)) throw new ApiError('The CivicLens server sent an inbox this app could not read.', {code: 'malformed_response'});
+      return d.inboxToken;
+    },
+
+    async listNotifications(token, {limit = 30, before = null, unread = false} = {}) {
+      const query = `?limit=${encodeURIComponent(limit)}${before ? '&before=' + encodeURIComponent(before) : ''}${unread ? '&unread=true' : ''}`;
+      const d = await request('GET', '/notifications' + query, undefined, {headers: bearer(token)});
+      if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent notifications this app could not read.', {code: 'malformed_response'});
+      return {items: d.items.map(toNotification).filter(Boolean), unreadCount: Number(d.unreadCount) || 0,
+        nextBefore: typeof d.nextBefore === 'string' && NOTIFICATION_ID.test(d.nextBefore) ? d.nextBefore : null};
+    },
+
+    async unreadCount(token) {
+      return Number((await request('GET', '/notifications/unread-count', undefined, {headers: bearer(token)})).unreadCount) || 0;
+    },
+
+    /** Mark one notification read (read = true) or unread. Resolves to the updated notification. */
+    async markNotification(token, id, read = true) {
+      const n = toNotification(await request('POST', `/notifications/${encodeURIComponent(id)}/${read ? 'read' : 'unread'}`, {}, {headers: bearer(token)}));
+      if (!n) throw new ApiError('The CivicLens server sent a notification this app could not read.', {code: 'malformed_response'});
+      return n;
+    },
+
+    async markAllNotificationsRead(token) {
+      return Number((await request('POST', '/notifications/read-all', {}, {headers: bearer(token)})).updated) || 0;
+    },
+
+    /** POST /notifications/subscriptions with PushSubscription.toJSON(). Registering again updates the same device. */
+    async registerPushSubscription(token, subscription, label = '') {
+      const body = {endpoint: subscription?.endpoint, keys: {p256dh: subscription?.keys?.p256dh, auth: subscription?.keys?.auth},
+        expirationTime: Number.isFinite(subscription?.expirationTime) ? subscription.expirationTime : null, label: String(label).slice(0, 80)};
+      return toDevice(await request('POST', '/notifications/subscriptions', body, {headers: bearer(token)}));
+    },
+
+    async listPushDevices(token) {
+      const d = await request('GET', '/notifications/subscriptions', undefined, {headers: bearer(token)});
+      if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent a device list this app could not read.', {code: 'malformed_response'});
+      return d.map(toDevice);
+    },
+
+    async removePushDevice(token, subscriptionId) {
+      await request('DELETE', '/notifications/subscriptions/' + encodeURIComponent(subscriptionId), undefined, {headers: bearer(token)});
+    },
+
+    /** POST /notifications/follows. The claim code travels in the JSON body only. */
+    async followComplaint(token, id, claim) {
+      const d = await request('POST', '/notifications/follows', {complaintId: id, claim}, {headers: bearer(token)});
+      return {complaintId: String(d.complaintId ?? id), followedAt: d.followedAt ?? null};
+    },
+
+    async listFollows(token) {
+      const d = await request('GET', '/notifications/follows', undefined, {headers: bearer(token)});
+      if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent a follow list this app could not read.', {code: 'malformed_response'});
+      return d.filter(f => typeof f?.complaintId === 'string' && PUBLIC_ID.test(f.complaintId)).map(f => ({complaintId: f.complaintId, followedAt: f.followedAt ?? null}));
+    },
+
+    async unfollowComplaint(token, id) {
+      await request('DELETE', '/notifications/follows/' + encodeURIComponent(id), undefined, {headers: bearer(token)});
+    },
+
+    async sendTestNotification(token) {
+      const d = await request('POST', '/notifications/test', {}, {headers: bearer(token)});
+      return {pushEnabled: d.pushEnabled === true};
     }
   };
+}
+
+const bearer = token => ({Authorization: 'Bearer ' + token});
+const NOTIFICATION_ID = /^nt_[A-Za-z0-9_-]{16,40}$/;
+const SUBSCRIPTION_ID = /^ps_[A-Za-z0-9_-]{16,40}$/;
+// In-app destinations only: a notification can never send the browser to another site.
+export const SAFE_NOTIFICATION_URL = /^#\/[A-Za-z0-9/_-]{0,120}$/;
+
+/** Only known fields are copied; the link is kept only if it is an in-app route. */
+export function toNotification(n) {
+  if (typeof n?.id !== 'string' || !NOTIFICATION_ID.test(n.id)) return null;
+  return {
+    id: n.id, kind: String(n.kind ?? ''), title: String(n.title ?? '').slice(0, 120), body: String(n.body ?? '').slice(0, 300),
+    url: typeof n.url === 'string' && SAFE_NOTIFICATION_URL.test(n.url) ? n.url : '#/notifications',
+    complaintId: typeof n.complaintId === 'string' && PUBLIC_ID.test(n.complaintId) ? n.complaintId : null,
+    createdAt: n.createdAt ?? null, readAt: n.readAt ?? null, read: n.read === true || Boolean(n.readAt), pushStatus: String(n.pushStatus ?? '')
+  };
+}
+
+function toDevice(d) {
+  if (typeof d?.subscriptionId !== 'string' || !SUBSCRIPTION_ID.test(d.subscriptionId)) throw new ApiError('The CivicLens server sent a device this app could not read.', {code: 'malformed_response'});
+  return {subscriptionId: d.subscriptionId, label: String(d.label ?? ''), createdAt: d.createdAt ?? null, lastSuccessAt: d.lastSuccessAt ?? null,
+    lastFailureAt: d.lastFailureAt ?? null, failureCount: Number(d.failureCount) || 0};
 }
 
 const EVIDENCE_TYPES = ['image/jpeg', 'video/webm', 'video/mp4'];
