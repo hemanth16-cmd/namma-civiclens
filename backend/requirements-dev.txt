@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==9.2.0
+# Used by FastAPI's TestClient (Starlette deprecates plain httpx for this).
+httpx2==2.16.0

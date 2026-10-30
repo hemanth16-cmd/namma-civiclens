@@ -1,0 +1,5 @@
+# Runtime dependencies for the Namma CivicLens backend (Python 3.11+; developed on 3.14.3).
+fastapi==0.162.0
+uvicorn==0.54.0
+# Streaming multipart parser for evidence uploads (the same parser FastAPI uses for forms).
+python-multipart==0.0.32
