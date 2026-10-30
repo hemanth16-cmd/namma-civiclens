@@ -150,6 +150,7 @@ const CAMERA = {
   'switch-camera': () => cameraActions.switchCamera(),
   'refresh-location': () => cameraActions.locate(),
   'lookup-live': () => cameraActions.lookupLive(),
+  'lookup-street': () => cameraActions.lookupLive(),
   'gallery': () => cameraActions.openGallery(),
   'stop-recording': () => cameraActions.stopRecording(),
   'retake': () => cameraActions.retake(),
