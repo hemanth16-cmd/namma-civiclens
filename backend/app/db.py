@@ -129,8 +129,25 @@ class SQLiteDatabase:
             conn.raw.executescript(schema)
             # A brand-new file reports 0; the base schema has just created the version-1 tables.
             version = conn.raw.execute("PRAGMA user_version").fetchone()[0] or 1
-            for target in sorted(v for v in migrations if v > version):
-                conn.raw.executescript(f"BEGIN;\n{migrations[target]}\nPRAGMA user_version = {target};\nCOMMIT;")
+            pending = sorted(v for v in migrations if v > version)
+            if pending:
+                # Some migrations rebuild a table (create new, copy, drop old, rename), SQLite's only way to
+                # change a CHECK or UNIQUE constraint. Foreign keys must be off for that, or dropping the old
+                # table would cascade; they are verified before each migration commits instead.
+                conn.raw.isolation_level = None
+                conn.raw.execute("PRAGMA foreign_keys = OFF")
+            for target in pending:
+                try:
+                    conn.raw.executescript(f"BEGIN;\n{migrations[target]}")
+                    problems = conn.raw.execute("PRAGMA foreign_key_check").fetchall()
+                    if problems:
+                        raise sqlite3.IntegrityError(f"Migration {target} would leave {len(problems)} broken foreign key(s)")
+                    conn.raw.execute(f"PRAGMA user_version = {target}")
+                    conn.raw.execute("COMMIT")
+                except BaseException:
+                    if conn.raw.in_transaction:
+                        conn.raw.execute("ROLLBACK")
+                    raise
         finally:
             conn.close()
 

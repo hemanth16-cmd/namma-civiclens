@@ -49,7 +49,18 @@ FOREIGN_KEYS = (
     ("push_subscriptions", "recipient_pk", "notification_recipients"),
     ("notifications", "recipient_pk", "notification_recipients"),
     ("notifications", "complaint_pk", "complaints"),
+    ("ai_inferences", "complaint_pk", "complaints"),
+    ("ai_inferences", "evidence_pk", "evidence"),
+    ("repair_assessments", "complaint_pk", "complaints"),
+    ("repair_assessments", "original_evidence_pk", "evidence"),
+    ("repair_assessments", "repair_evidence_pk", "evidence"),
+    ("repair_assessments", "work_order_pk", "work_orders"),
+    ("repair_assessment_inferences", "assessment_pk", "repair_assessments"),
+    ("repair_assessment_inferences", "inference_pk", "ai_inferences"),
 )
+# Columns that are JSON text in SQLite and JSONB in PostgreSQL. JSONB does not keep key order or
+# whitespace, so these are compared as parsed values.
+JSON_COLUMNS = {("ai_inferences", "predictions"), ("ai_inferences", "confidence_meta"), ("repair_assessments", "details")}
 _IMPORT_LOCK_ID = 7_201_027
 
 
@@ -92,8 +103,15 @@ def _pg_has_schema(conn) -> bool:
     return conn.execute("SELECT to_regclass('civiclens_schema') IS NOT NULL").fetchone()[0]
 
 
-def _norm(value):
+def _norm(value, json_column: bool = False):
+    if json_column and value is not None:
+        parsed = json.loads(value) if isinstance(value, str) else value
+        return json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return float(value) if isinstance(value, float) else value
+
+
+def _norm_row(table: str, cols: list[str], row) -> tuple:
+    return tuple(_norm(v, (table, c) in JSON_COLUMNS) for c, v in zip(cols, row))
 
 
 def migrate(sqlite_path: str | os.PathLike, postgres: PostgresDatabase, execute: bool = False) -> dict:
@@ -133,11 +151,11 @@ def migrate(sqlite_path: str | os.PathLike, postgres: PostgresDatabase, execute:
                         raise MigrationError(f"Column mismatch in table {table}: SQLite and PostgreSQL schemas differ.")
                     pk_at = cols.index("pk")
                     for r in conn.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall():
-                        existing[r[pk_at]] = tuple(_norm(v) for v in r)
+                        existing[r[pk_at]] = _norm_row(table, cols, r)
                 pk_index = cols.index("pk")
                 new, same, conflicts = [], 0, []
                 for row in rows:
-                    values = tuple(_norm(v) for v in row)
+                    values = _norm_row(table, cols, row)
                     current = existing.get(row[pk_index])
                     if current is None:
                         new.append(row)
@@ -191,8 +209,8 @@ def _validate(conn, source_rows) -> dict:
     for table, (cols, rows) in source_rows.items():
         target = {}
         for r in conn.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall():
-            target[r[cols.index("pk")]] = tuple(_norm(v) for v in r)
-        missing = [row[cols.index("pk")] for row in rows if target.get(row[cols.index("pk")]) != tuple(_norm(v) for v in row)]
+            target[r[cols.index("pk")]] = _norm_row(table, cols, r)
+        missing = [row[cols.index("pk")] for row in rows if target.get(row[cols.index("pk")]) != _norm_row(table, cols, row)]
         mismatched += [{"table": table, "pk": pk} for pk in missing]
         counts[table] = {"source": len(rows), "target": len(target)}
     orphans = {}

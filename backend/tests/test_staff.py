@@ -293,12 +293,38 @@ def test_complaint_without_evidence(api, token):
     assert api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence/access", headers=bearer(token)).json() == []
 
 
-def test_missing_file_returns_503_and_logs_nothing(api, token, isolated_db_path, evidence_dir):
+def test_missing_file_is_reported_as_unavailable_and_logs_nothing(api, token, isolated_db_path, evidence_dir):
+    """A file that is confirmed absent (e.g. uploaded to another machine's local disk) is a permanent
+    condition: 404 evidence_unavailable with an explanation, not 503 'try again'."""
     receipt = new_complaint(api)
     [(key,)] = rows(isolated_db_path, "SELECT storage_key FROM evidence")
     (evidence_dir / "objects" / key[:2] / key).unlink()
     response = api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token))
-    assert response.status_code == 503 and key not in response.text
+    assert response.status_code == 404 and response.json()["error"]["code"] == "evidence_unavailable"
+    assert "not in this server's storage" in response.json()["error"]["message"] and key not in response.text
+    assert rows(isolated_db_path, "SELECT COUNT(*) FROM evidence_access_log") == [(0,)]
+
+
+def test_evidence_in_an_unconfigured_backend_is_reported_as_unavailable(api, token, isolated_db_path):
+    receipt = new_complaint(api)
+    with closing(dbutil.connect(isolated_db_path)) as conn:
+        conn.execute("UPDATE evidence SET storage_backend = 'supabase'")  # this test server has no Supabase Storage
+        conn.commit()
+    response = api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token))
+    assert response.status_code == 404 and response.json()["error"]["code"] == "evidence_unavailable"
+    assert "Supabase Storage" in response.json()["error"]["message"]
+    assert rows(isolated_db_path, "SELECT COUNT(*) FROM evidence_access_log") == [(0,)]
+
+
+def test_unreadable_storage_that_cannot_confirm_absence_stays_503(api, token, isolated_db_path, monkeypatch):
+    """An outage (the storage cannot even say whether the file exists) is still 503 storage_unavailable."""
+    from app.store import StoreError
+    receipt = new_complaint(api)
+    storage = api.app.state.evidence_storages["local"]
+    monkeypatch.setattr(storage, "open_read", lambda key: (_ for _ in ()).throw(StoreError("disk offline")))
+    monkeypatch.setattr(storage, "exists", lambda key: (_ for _ in ()).throw(StoreError("disk offline")))
+    response = api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token))
+    assert response.status_code == 503 and response.json()["error"]["code"] == "storage_unavailable"
     assert rows(isolated_db_path, "SELECT COUNT(*) FROM evidence_access_log") == [(0,)]
 
 

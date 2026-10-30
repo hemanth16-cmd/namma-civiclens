@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .lifecycle import RuleViolation
 from .store import StoreError
 
 logger = logging.getLogger("civiclens.api")
@@ -73,6 +74,12 @@ async def _storage_error(request: Request, exc: StoreError) -> JSONResponse:
     )
 
 
+async def _rule_violation(request: Request, exc: RuleViolation) -> JSONResponse:
+    """A complaint-management rule refused the action (lifecycle.py). The message is written for the user."""
+    headers = {"WWW-Authenticate": "Bearer"} if exc.status == 401 else None
+    return JSONResponse(error_body(exc.code, exc.message), status_code=exc.status, headers=headers)
+
+
 async def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse(error_body("internal_error", "Something went wrong on the server."), status_code=500)
@@ -82,4 +89,5 @@ def install_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(StoreError, _storage_error)
+    app.add_exception_handler(RuleViolation, _rule_violation)
     app.add_exception_handler(Exception, _unexpected_error)

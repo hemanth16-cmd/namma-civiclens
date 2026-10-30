@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 48 48" role="img" aria-label="Namma CivicLens">
+  <!-- Current in-app Namma CivicLens mark (coral tile, navy pin), centralised so the official
+       logo can replace it in one place with the npm "brand" script (see README). -->
+  <rect width="48" height="48" rx="13" fill="#F07861"/>
+  <g transform="translate(9 9) scale(1.25)" fill="none" stroke="#18324A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 21s-6-5.4-6-10.5a6 6 0 0112 0C18 15.6 12 21 12 21z"/>
+    <circle cx="12" cy="10.5" r="2.2"/>
+  </g>
+</svg>
