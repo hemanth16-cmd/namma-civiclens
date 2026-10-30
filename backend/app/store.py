@@ -28,7 +28,7 @@ from collections.abc import Callable
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
-from .db import DB_ERRORS, DB_PATH_ENV, DEFAULT_DB_PATH, INTEGRITY_ERRORS, SQLiteDatabase, database_from_env, resolve_db_path  # noqa: F401
+from .db import DB_ERRORS, DB_PATH_ENV, DEFAULT_DB_PATH, INTEGRITY_ERRORS, Feature, SQLiteDatabase, database_from_env, resolve_db_path  # noqa: F401
 from .claims import hash_claim_code, hash_upload_token, new_claim_code, new_public_id, new_upload_token, upload_token_matches
 from . import lifecycle as lc
 from .lifecycle import RuleViolation
@@ -728,6 +728,12 @@ CREATE TRIGGER work_order_events_append_only BEFORE UPDATE OR DELETE ON work_ord
 
 # Tables in foreign-key order (parents first): used by the SQLite → PostgreSQL migration tool.
 # Staff accounts and departments come first because complaints (schema 7) reference them.
+# Named migrations (db.Feature), applied after the numbered ones and recorded by name in
+# civiclens_features. New schema changes go here, not into MIGRATIONS: origin/main and
+# origin/feature/core-platform-development each shipped a different MIGRATIONS[8], so a numbered
+# version above 7 no longer identifies a schema (docs/MIGRATION_RECONCILIATION.md).
+FEATURES: tuple[Feature, ...] = ()
+
 TABLES = ("staff_accounts", "departments", "staff_departments",
           "complaints", "complaint_timeline", "verification_log", "evidence", "idempotency_keys",
           "staff_sessions", "evidence_access_log",
@@ -825,9 +831,9 @@ class ComplaintStore:
         """Create the database (and schema) if missing and apply pending migrations. Safe to repeat."""
         try:
             if self.db.backend == "postgres":
-                self.db.apply_schema(POSTGRES_SCHEMA, POSTGRES_MIGRATIONS, POSTGRES_BASE_VERSION)
+                self.db.apply_schema(POSTGRES_SCHEMA, POSTGRES_MIGRATIONS, POSTGRES_BASE_VERSION, FEATURES)
             else:
-                self.db.apply_schema(SCHEMA, MIGRATIONS)
+                self.db.apply_schema(SCHEMA, MIGRATIONS, FEATURES)
         except (OSError, *DB_ERRORS) as exc:
             raise StoreError("Could not initialise the complaint database") from exc
 
