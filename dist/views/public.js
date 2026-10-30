@@ -15,7 +15,7 @@ export async function renderEntry(root) {
   // Server mode: the two cards lead to the real screens, not the demonstration workspaces.
   const server = await reportMode() === 'backend';
   const residentCard = server
-    ? `<a class="entry-card entry-link" href="#/my-reports" data-entry="my-reports">
+    ? `<a class="entry-card entry-link" href="#/resident" data-entry="my-reports">
           <span class="entry-icon">${icon('user')}</span>
           <div><p class="eyebrow">Residents · this device</p><h2>My reports</h2><p>Complaints you submitted from this browser and their current status on the CivicLens server.</p></div>
           <span class="entry-go">${icon('forward')}</span>
@@ -225,7 +225,7 @@ export async function renderLogin(root, role = 'resident', register = false) {
   </div>`;
   reportMode().then(mode => {
     if (mode !== 'backend') return;
-    root.querySelector('.auth-panel')?.insertAdjacentHTML('afterbegin', notice('<strong>Server mode:</strong> reports you sent to the CivicLens server are under <a class="inline-link" href="#/my-reports">My reports</a>. No sign-in is needed.', 'info', 'user'));
+    root.querySelector('.auth-panel')?.insertAdjacentHTML('afterbegin', notice('<strong>Server mode:</strong> reports you sent to the CivicLens server are in <a class="inline-link" href="#/resident">your reports</a>. No sign-in is needed.', 'info', 'user'));
   });
   root.querySelector('#login-form').onsubmit = async e => {
     e.preventDefault();

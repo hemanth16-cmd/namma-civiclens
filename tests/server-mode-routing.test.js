@@ -76,17 +76,18 @@ test('unavailable browser storage never breaks a submission', async () => {
   assert.equal(saved.id, 'NCL-2026-NOSTOR');
 });
 
-test('in server mode, the admin workspace stays (fed by server data) and residents go to My reports', () => {
-  for (const page of [undefined, 'complaints', 'map', 'workorders', 'intelligence', 'video-review']) {
+test('in server mode, the original workspaces stay: admin on server data, residents on this device', () => {
+  for (const page of [undefined, 'complaints', 'map', 'workorders', 'intelligence', 'video-review', 'notifications']) {
     assert.equal(serverModeRoute(page ? ['official', page] : ['official'], {staff: true}), null);
   }
-  assert.equal(serverModeRoute(['resident']), 'my-reports');
-  for (const page of ['complaints', 'community', 'map', 'claim', 'settings']) assert.equal(serverModeRoute(['resident', page]), 'my-reports');
-  assert.equal(serverModeRoute(['resident', 'notifications']), 'notifications');
-  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123'], {staff: true}), 'staff/NCL-2026-ABC123', 'staff open the case with its evidence');
+  for (const page of [undefined, 'complaints', 'community', 'map', 'claim', 'settings']) {
+    assert.equal(serverModeRoute(page ? ['resident', page] : ['resident']), null, 'the resident shell shows this device');
+  }
+  assert.equal(serverModeRoute(['resident', 'notifications']), 'notifications', 'the citizen inbox page');
+  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123'], {staff: true}), null, 'staff open the original case page');
   assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123']), 'track/NCL-2026-ABC123', 'everyone else gets public tracking');
-  assert.equal(serverModeRoute(['issue'], {staff: true}), 'staff');
-  assert.equal(serverModeRoute(['issue']), 'my-reports');
+  assert.equal(serverModeRoute(['issue'], {staff: true}), 'official/complaints');
+  assert.equal(serverModeRoute(['issue']), 'resident');
   for (const head of ['camera', 'track', 'staff', 'receipt', 'home', 'my-reports']) assert.equal(serverModeRoute([head, 'x']), null);
 });
 
@@ -136,4 +137,14 @@ test('reporting activity counts complaints per day', () => {
   assert.deepEqual(days.at(-1), {day: '2026-10-30', count: 2});
   assert.equal(days.find(d => d.day === '2026-10-28').count, 1);
   assert.equal(days.reduce((a, d) => a + d.count, 0), 3, 'older complaints are outside the window');
+});
+
+test('the staff case keeps its verification history (used by the restored case page)', async () => {
+  const {toStaffComplaint} = await import('../dist/api-client.js');
+  const r = toStaffComplaint({
+    id: 'NCL-2026-ABC123', category: 'Potholes', gps: {lat: 13, lng: 77}, timeline: [],
+    verificationLog: [{id: 'v1', date: '2026-10-31T00:00:00Z', type: 'response', response: 'Still Present', by: 'citizen', actor: 'Citizen', note: '', secret: 'x'}]
+  });
+  assert.deepEqual(r.verificationLog, [{id: 'v1', date: '2026-10-31T00:00:00Z', type: 'response', from: null, to: null, response: 'Still Present', by: 'citizen', actor: 'Citizen', note: ''}]);
+  assert.deepEqual(toStaffComplaint({id: 'NCL-2026-ABC124', gps: {lat: 13, lng: 77}, timeline: []}).verificationLog, []);
 });

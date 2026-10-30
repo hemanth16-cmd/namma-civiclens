@@ -6,6 +6,7 @@ import {api, assessPriority} from './services.js';
 import {loadApiConfig} from './api-config.js';
 import {createApiClient} from './api-client.js';
 import {staffSession} from './staff-session.js';
+import {rememberedServerReports, trackPublic} from './report-gateway.js';
 
 const PAGE = 100;        // the API's maximum page size
 const MAX_PAGES = 20;    // 2,000 complaints; more needs server-side filtering (see docs/INTEGRATION_AUDIT.md)
@@ -47,10 +48,36 @@ export async function loadServerRecords(http, token) {
   return rows;
 }
 
-/** Records for the workspace screens: server complaints for signed-in staff in server mode, else the local store. */
+/**
+ * The reports this browser submitted in server mode, with their public status. There are no resident
+ * accounts, so this is what "my reports" can honestly mean; nothing private (location, description,
+ * evidence) is in the public projection, so none of it is shown.
+ */
+export async function deviceRecords() {
+  const rows = await Promise.all(rememberedServerReports().map(async r => {
+    const {record} = await trackPublic(r.id);
+    if (!record) return null;
+    return {
+      id: record.id, title: `${record.category} reported by a citizen`, category: record.category, area: record.area,
+      status: record.status, verification: record.verification, department: record.department, team: null,
+      created: r.submittedAt || record.updated, updated: record.updated, mediaType: 'photo', gps: null,
+      sample: false, server: true, recurrence: 0, reviewCount: 0, shareEvidence: false, mine: true, following: false
+    };
+  }));
+  return rows.filter(Boolean);
+}
+
+/** Records for the workspace screens: server complaints for signed-in staff, this device's reports for residents
+ * in server mode, else the local demonstration store. */
 export async function workspaceRecords(viewer) {
-  if (await usesServerRecords()) return loadServerRecords(await serverClient(), staffSession.get().token);
+  if (viewer?.role === 'official' && await usesServerRecords()) return loadServerRecords(await serverClient(), staffSession.get().token);
+  if (viewer?.role === 'resident' && (await loadApiConfig()).mode === 'backend') return deviceRecords();
   return api.list(viewer);
+}
+
+/** True for a resident in server mode ("this device", no account). */
+export async function isDeviceResident(viewer) {
+  return viewer?.role === 'resident' && (await loadApiConfig()).mode === 'backend';
 }
 
 /** Reporting activity: complaints received on each of the last `days` days (UTC dates), oldest first. */

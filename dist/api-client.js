@@ -428,6 +428,7 @@ export function toStaffComplaint(d) {
     captureSource: d.captureSource ?? null, mediaType: d.mediaType === 'video' ? 'video' : 'photo', shareEvidence: d.shareEvidence === true,
     gps: {lat: g.lat, lng: g.lng, accuracy: g.accuracy ?? null, source: g.source ?? null, sourceType: g.sourceType ?? null, timestamp: g.timestamp ?? null, address: g.address ?? null},
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
+    verificationLog: toVerificationLog(d.verificationLog),
     evidence: e && typeof e === 'object' ? {evidenceId: String(e.evidenceId ?? ''), mediaType: e.mediaType === 'video' ? 'video' : 'photo',
       contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, sha256: String(e.sha256 ?? ''), capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null} : null,
     ...toManagement(d)
@@ -544,9 +545,14 @@ export function toPublicRecord(d) {
     id: d.id, category: String(d.category ?? ''), area: String(d.area ?? ''), status: String(d.status ?? ''),
     verification: String(d.verification ?? ''), department: String(d.department ?? ''), updated: d.updated ?? null,
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
-    verificationLog: (Array.isArray(d.verificationLog) ? d.verificationLog : []).map(e => ({
-      id: String(e?.id ?? ''), date: e?.date ?? null, type: String(e?.type ?? ''), from: e?.from ?? null, to: e?.to ?? null,
-      response: e?.response ?? null, by: String(e?.by ?? ''), actor: String(e?.actor ?? ''), note: String(e?.note ?? '')
-    }))
+    verificationLog: toVerificationLog(d.verificationLog)
   };
+}
+
+/** Verification history (citizen responses and verification changes): known fields only. */
+function toVerificationLog(list) {
+  return (Array.isArray(list) ? list : []).map(e => ({
+    id: String(e?.id ?? ''), date: e?.date ?? null, type: String(e?.type ?? ''), from: e?.from ?? null, to: e?.to ?? null,
+    response: e?.response ?? null, by: String(e?.by ?? ''), actor: String(e?.actor ?? ''), note: String(e?.note ?? '')
+  }));
 }

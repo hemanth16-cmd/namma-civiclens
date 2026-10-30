@@ -53,13 +53,13 @@ export function rerender() { return renderer?.(); }
 
 /**
  * Where a workspace route leads in server mode, or null to keep it. The admin workspace stays (its screens
- * read server complaints for signed-in staff); a case opens in the staff console, which streams the
- * private evidence. Resident screens hold only browser-local sample data, so residents go to My reports.
+ * read server complaints for signed-in staff) and a case opens in the original case page built from the
+ * server. Everyone else opening a case gets public tracking.
  */
 export function serverModeRoute(parts, {staff = false} = {}) {
   const [head, second] = parts;
   if (head === 'official') return null;
-  if (head === 'resident') return second === 'notifications' ? 'notifications' : 'my-reports';
-  if (head === 'issue') return second ? (staff ? 'staff/' : 'track/') + second : (staff ? 'staff' : 'my-reports');
+  if (head === 'resident') return second === 'notifications' ? 'notifications' : null;  // the shell shows this device's reports
+  if (head === 'issue') return staff ? (second ? null : 'official/complaints') : (second ? 'track/' + second : 'resident');
   return null;
 }

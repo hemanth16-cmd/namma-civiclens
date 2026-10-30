@@ -86,7 +86,11 @@ async function render({focus = true} = {}) {
   if (['official', 'resident', 'issue'].includes(head) && await reportMode() === 'backend') {
     if (seq !== renderSeq) return;
     const staff = staffSession.get();
-    if (head === 'official') {
+    if (head === 'issue' && !staff && state.session?.server && !state.session?.device) {
+      setSession(null);  // a staff member whose memory-only session ended (e.g. reload): sign in again
+      return navigate('login/official');
+    }
+    if (head === 'official' || (head === 'issue' && staff)) {
       if (!staff) {
         if (role === 'official') setSession(null);  // a demo or expired identity must not open the workspace
         return navigate('login/official');
@@ -95,6 +99,10 @@ async function render({focus = true} = {}) {
         setSession({role: 'official', name: staff.staff.displayName, email: staff.staff.username, server: true});
         role = 'official';
       }
+    }
+    if (head === 'resident' && role !== 'resident') {
+      setSession({role: 'resident', name: 'This device', email: '', server: true, device: true});
+      role = 'resident';
     }
     const target = serverModeRoute(parts, {staff: !!staff});
     if (target) return navigate(target);
