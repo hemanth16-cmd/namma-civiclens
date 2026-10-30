@@ -13,7 +13,7 @@ from .complaints import NOT_FOUND, PUBLIC_ID_PATTERN
 from .errors import ApiProblem
 from .models import EvidenceAccessEntry, StaffComplaint, StaffComplaintList, StaffIdentity, StaffSessionOut, StaffSignIn
 from .ratelimit import client_ip, enforce
-from .store import STAFF_LIST_MAX
+from .store import STAFF_LIST_MAX, StoreError
 
 router = APIRouter(prefix="/staff", tags=["staff"])
 CHUNK = 64 * 1024
@@ -78,7 +78,11 @@ def view_evidence(public_id: str, request: Request, staff: dict = Depends(curren
     evidence = _record_or_404(request, public_id)["evidence"]
     if evidence is None:
         raise ApiProblem(404, "evidence_not_found", "No evidence has been uploaded for this complaint.")
-    handle = request.app.state.evidence_storage.open_read(evidence["storageKey"])  # StoreError → 503
+    # Read from the backend that stored this file (local evidence stays readable after switching to Supabase Storage).
+    storage = request.app.state.evidence_storages.get(evidence["storageBackend"])
+    if storage is None:
+        raise StoreError(f"Evidence is in the {evidence['storageBackend']!r} backend, which is not configured")
+    handle = storage.open_read(evidence["storageKey"])  # StoreError → 503
     try:
         store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
     except BaseException:

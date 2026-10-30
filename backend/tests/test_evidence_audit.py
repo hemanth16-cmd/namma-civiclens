@@ -1,7 +1,6 @@
 import hashlib
 import json
 import os
-import sqlite3
 import time
 from contextlib import closing
 
@@ -10,7 +9,9 @@ from fastapi.testclient import TestClient
 
 from app import evidence_audit
 from app.evidence_audit import audit, main
+from app.db import database_from_env
 from app.main import create_app
+from tests import dbutil
 from tests.test_complaints import payload
 from tests.test_evidence import JPEG
 
@@ -38,8 +39,14 @@ def snapshot(root):
 
 
 def db_dump(db_path):
-    with closing(sqlite3.connect(db_path)) as conn:
+    with closing(dbutil.connect(db_path)) as conn:
         return {t: conn.execute(f"SELECT * FROM {t} ORDER BY pk").fetchall() for t in ("complaints", "evidence", "idempotency_keys")}
+
+
+@pytest.fixture
+def db(isolated_db_path):
+    """What audit() takes: the SQLite file, or the PostgreSQL database when the suite runs on PostgreSQL."""
+    return database_from_env() if dbutil.POSTGRES_MODE else isolated_db_path
 
 
 @pytest.fixture
@@ -51,7 +58,7 @@ def scene(isolated_db_path, evidence_dir):
             receipt = api.post("/api/v1/complaints", json=payload()).json()
             assert api.post(f"/api/v1/complaints/{receipt['id']}/evidence", files={"file": ("e.jpg", content, "image/jpeg")},
                             headers={"Authorization": f"Bearer {receipt['uploadToken']}"}).status_code == 201
-    with closing(sqlite3.connect(isolated_db_path)) as conn:
+    with closing(dbutil.connect(isolated_db_path)) as conn:
         keys = [k for (k,) in conn.execute("SELECT storage_key FROM evidence ORDER BY pk")]
     for key in keys:  # referenced files are old enough to be candidates if they were orphans
         os.utime(key_path(evidence_dir, key), (OLD, OLD))
@@ -72,9 +79,9 @@ def scene(isolated_db_path, evidence_dir):
             "stale_tmp": stale_tmp, "fresh_tmp": fresh_tmp, "outside": outside}
 
 
-def test_dry_run_reports_everything_and_changes_nothing(scene, isolated_db_path, evidence_dir):
+def test_dry_run_reports_everything_and_changes_nothing(scene, isolated_db_path, db, evidence_dir):
     files_before, db_before = snapshot(evidence_dir.parent), db_dump(isolated_db_path)
-    report = audit(isolated_db_path, evidence_dir)
+    report = audit(db, evidence_dir)
     assert report["mode"] == "dry-run"
     assert report["recordedFiles"] == 2 and report["filesOnDisk"] == 3
     assert {o["key"] for o in report["orphans"]} == {"a" * 32, "b" * 32}
@@ -86,9 +93,9 @@ def test_dry_run_reports_everything_and_changes_nothing(scene, isolated_db_path,
     assert db_dump(isolated_db_path) == db_before
 
 
-def test_delete_mode_removes_only_old_unreferenced_key_files(scene, isolated_db_path, evidence_dir):
+def test_delete_mode_removes_only_old_unreferenced_key_files(scene, isolated_db_path, db, evidence_dir):
     db_before = db_dump(isolated_db_path)
-    report = audit(isolated_db_path, evidence_dir, delete_orphans=True, min_age_seconds=3600)
+    report = audit(db, evidence_dir, delete_orphans=True, min_age_seconds=3600)
     assert report["deletedOrphans"] == ["a" * 32]
     assert report["keptRecentOrphans"] == ["b" * 32]
     assert not scene["old_orphan"].exists()
@@ -97,18 +104,18 @@ def test_delete_mode_removes_only_old_unreferenced_key_files(scene, isolated_db_
     assert scene["unexpected"].exists() and scene["outside"].exists()
     assert scene["stale_tmp"].exists(), "temp files need their own flag"
     assert db_dump(isolated_db_path) == db_before, "database rows are never changed"
-    assert audit(isolated_db_path, evidence_dir)["missingFiles"] == [scene["keys"][1]], "missing files are reported, not fixed"
+    assert audit(db, evidence_dir)["missingFiles"] == [scene["keys"][1]], "missing files are reported, not fixed"
 
 
-def test_database_is_rechecked_before_each_deletion(scene, isolated_db_path, evidence_dir, monkeypatch):
+def test_database_is_rechecked_before_each_deletion(scene, isolated_db_path, db, evidence_dir, monkeypatch):
     monkeypatch.setattr(evidence_audit, "_still_unreferenced", lambda db, key: False)  # an upload just recorded it
-    report = audit(isolated_db_path, evidence_dir, delete_orphans=True, min_age_seconds=0)
+    report = audit(db, evidence_dir, delete_orphans=True, min_age_seconds=0)
     assert report["deletedOrphans"] == []
     assert scene["old_orphan"].exists() and scene["recent_orphan"].exists()
 
 
-def test_stale_temp_files_are_removed_only_when_requested(scene, isolated_db_path, evidence_dir):
-    report = audit(isolated_db_path, evidence_dir, delete_stale_temp=True, min_age_seconds=3600)
+def test_stale_temp_files_are_removed_only_when_requested(scene, isolated_db_path, db, evidence_dir):
+    report = audit(db, evidence_dir, delete_stale_temp=True, min_age_seconds=3600)
     assert report["deletedTempFiles"] == ["old.part"]
     assert not scene["stale_tmp"].exists() and scene["fresh_tmp"].exists()
     assert scene["old_orphan"].exists(), "orphans need --delete-orphans"
@@ -134,13 +141,14 @@ def test_cli_delete_requires_the_explicit_flag(scene, isolated_db_path, evidence
 
 
 def test_report_contains_no_secrets(scene, isolated_db_path, evidence_dir, capsys):
-    with closing(sqlite3.connect(isolated_db_path)) as conn:
+    with closing(dbutil.connect(isolated_db_path)) as conn:
         hashes = [h for row in conn.execute("SELECT claim_hash, upload_token_hash FROM complaints") for h in row]
     main(["--db", str(isolated_db_path), "--evidence-dir", str(evidence_dir), "--json"])
     out = capsys.readouterr().out
     assert not any(h in out for h in hashes) and "scrypt" not in out and "13.100712" not in out
 
 
+@pytest.mark.sqlite_only
 def test_missing_database_fails_without_changes(tmp_path, evidence_dir, capsys):
     place(evidence_dir, "d" * 32)
     assert main(["--db", str(tmp_path / "nope.sqlite3"), "--evidence-dir", str(evidence_dir), "--delete-orphans", "--min-age-minutes", "0"]) == 2

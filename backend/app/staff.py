@@ -8,8 +8,9 @@
 
 Passwords are prompted twice without echo, or read from one line of standard input with
 --password-stdin (for scripts). They are never accepted as command-line arguments, never printed,
-and stored only as scrypt hashes. The database comes from --db, else CIVICLENS_DB_PATH, else
-backend/data/civiclens.sqlite3 (created and migrated if missing).
+and stored only as scrypt hashes. The database follows DATABASE_BACKEND like the API: SQLite (--db,
+else CIVICLENS_DB_PATH, else backend/data/civiclens.sqlite3) or PostgreSQL (DATABASE_URL). It is
+created and migrated if missing.
 """
 
 import argparse
@@ -18,7 +19,7 @@ import sys
 from pathlib import Path
 
 from .auth import USERNAME_PATTERN, hash_password, normalise_username, password_problem
-from .store import ComplaintStore, StaffExists, StoreError, resolve_db_path
+from .store import ComplaintStore, StaffExists, StoreError
 
 
 def _read_password(from_stdin: bool) -> str:
@@ -32,7 +33,7 @@ def _read_password(from_stdin: bool) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.staff", description="Manage CivicLens staff accounts.")
-    parser.add_argument("--db", type=Path, default=None, help="SQLite database (default: CIVICLENS_DB_PATH or backend/data/civiclens.sqlite3)")
+    parser.add_argument("--db", type=Path, default=None, help="SQLite database (default: CIVICLENS_DB_PATH or backend/data/civiclens.sqlite3); ignored when DATABASE_BACKEND=postgres")
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("create", help="Create a staff account")
     create.add_argument("--username", required=True)
@@ -46,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     setpw.add_argument("--password-stdin", action="store_true")
     args = parser.parse_args(argv)
 
-    store = ComplaintStore(resolve_db_path(args.db))
+    store = ComplaintStore(args.db)  # DATABASE_BACKEND decides; --db is the SQLite file (ignored for postgres)
     try:
         store.initialize()
         if args.command == "list":
@@ -94,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
     except StoreError as exc:
         print(f"Database error: {exc}", file=sys.stderr)
         return 3
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

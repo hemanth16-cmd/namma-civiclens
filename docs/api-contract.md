@@ -2,7 +2,7 @@
 
 **Status: mostly proposed.** This document describes the HTTP API a FastAPI backend would expose so that the browser prototype's rules move to the server without changing the screens. In local mode (the default) the same operations run in `dist/services.js` against `localStorage` and IndexedDB, and the functions are named to match these endpoints.
 
-**Implemented in `backend/` so far** (see `backend/README.md` for exact request and response shapes): `GET /api/v1/health`, `POST /api/v1/complaints`, `GET /api/v1/complaints/{publicId}`, `POST /api/v1/complaints/{publicId}/upload-token` `POST /api/v1/complaints/{publicId}/evidence` (section 5) and the staff console endpoints under `/api/v1/staff` (section 3.1), with per-IP/per-complaint rate limits (`429 rate_limited` + `Retry-After`), an evidence storage quota (`507 storage_quota_exceeded`) and `Idempotency-Key` support on complaint creation (section 2.1). Everything else below is still proposed. Resident accounts, staff case updates, shared (multi-process) rate limiting and object storage are not built.
+**Implemented in `backend/` so far** (see `backend/README.md` for exact request and response shapes): `GET /api/v1/health`, `POST /api/v1/complaints`, `GET /api/v1/complaints/{publicId}`, `POST /api/v1/complaints/{publicId}/upload-token` `POST /api/v1/complaints/{publicId}/evidence` (section 5) and the staff console endpoints under `/api/v1/staff` (section 3.1), with per-IP/per-complaint rate limits (`429 rate_limited` + `Retry-After`), an evidence storage quota (`507 storage_quota_exceeded`) and `Idempotency-Key` support on complaint creation (section 2.1). Everything else below is still proposed. Evidence files can be stored on local disk (default) or in a private Supabase Storage bucket (`EVIDENCE_STORAGE_BACKEND=supabase`), and complaint data in SQLite (default) or PostgreSQL / Supabase Postgres (`DATABASE_BACKEND=postgres`); the API contract is identical in every combination. Resident accounts, staff case updates and shared (multi-process) rate limiting are not built.
 
 Conventions: JSON over HTTPS under `/api/v1`. Times are ISO 8601 in UTC; the UI displays Asia/Kolkata. Errors use `{ "error": { "code": "...", "message": "..." } }`. Every mutation is authorised on the server, never by the client's role guard.
 
@@ -107,7 +107,7 @@ Rules enforced by the server:
 | Method and path | Caller | Purpose |
 | --- | --- | --- |
 | `POST /api/v1/complaints/{id}/repairs` media | Official (repair) | Repair photos as a separate evidence role, after staff authentication exists. |
-| `GET /api/v1/media/{mediaId}/url` | Owner, community (when shared) | Short-lived signed URLs once object storage exists, or authenticated streaming for owners after resident accounts exist. Never a permanent public link. Staff streaming is implemented (section 3.1). |
+| `GET /api/v1/media/{mediaId}/url` | Owner, community (when shared) | Authenticated streaming for owners after resident accounts exist (as for staff, including with Supabase Storage). Supabase signed URLs are deliberately not used: they are bearer links that bypass the staff session and the view-level audit log. Never a permanent public link. Staff streaming is implemented (section 3.1). |
 | Server-side EXIF re-parsing | — | Re-read GPS and capture time from uploaded JPEGs and compare with the submitted metadata. |
 
 Video uploads: no location inference from the container. The API returns `geoTagged: false` unless a validated metadata source is added later.
