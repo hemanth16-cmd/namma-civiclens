@@ -177,6 +177,7 @@ class _UploadReader:
             raise ApiProblem(415, "unsupported_media_type", "Only JPEG photos and WebM or MP4 videos are accepted.")
         self._check_declared()
         self.pending = self.storage.begin()
+        self.pending.content_type = self.kind.content_type  # detected from the signature, not the client
         self._write(head)
 
     def _check_declared(self):
@@ -319,7 +320,7 @@ async def upload_evidence(public_id: str, request: Request, response: Response) 
         meta = {
             "evidenceId": "ev_" + secrets.token_urlsafe(16), "storageKey": key, "mediaType": kind.media_type,
             "contentType": kind.content_type, "byteSize": pending.size, "sha256": pending.sha256,
-            "capturedAt": captured_at, "uploadedAt": utc_now(),
+            "capturedAt": captured_at, "uploadedAt": utc_now(), "storageBackend": storage.name,
         }
         try:
             outcome, row = await run_in_threadpool(store.add_evidence, auth["pk"], meta)

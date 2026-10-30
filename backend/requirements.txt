@@ -3,3 +3,8 @@ fastapi==0.162.0
 uvicorn==0.54.0
 # Streaming multipart parser for evidence uploads (the same parser FastAPI uses for forms).
 python-multipart==0.0.32
+# Official Supabase Storage client (part of supabase-py), used only when EVIDENCE_STORAGE_BACKEND=supabase.
+storage3==2.33.0
+# PostgreSQL driver and connection pool, used only when DATABASE_BACKEND=postgres (e.g. Supabase).
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3

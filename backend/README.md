@@ -1,6 +1,6 @@
 # Namma CivicLens — Backend
 
-**Status (Phase 3.6):** a FastAPI service backed by SQLite and private local file storage, with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged). The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. Owners and the public cannot view uploaded evidence. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
+**Status (Phase 3.6 + Supabase migration):** a FastAPI service backed by SQLite (default) or **PostgreSQL / Supabase Postgres**, and private evidence storage — local files (default) or a private **Supabase Storage** bucket — with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged). The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. Owners and the public cannot view uploaded evidence. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
 
 > **No user authentication; development-grade abuse protection only.** Anyone who can reach the server can create complaints and look them up by ID. Phase 3.5 added per-IP/per-complaint rate limits, an evidence storage quota and idempotent creation, but the limits live in one process's memory (reset on restart, not shared between workers). Before any public deployment it still needs shared rate limiting, HTTPS, abuse/spam controls and server-side authentication for anything beyond anonymous submit and public tracking.
 
@@ -13,11 +13,14 @@ backend/
     main.py            create_app() factory, lifespan (creates the schema), /api/v1 router, health
     complaints.py      POST /complaints, GET /complaints/{publicId}
     models.py          Pydantic request/response schemas (camelCase, matching dist/services.js)
-    store.py           SQLite data-access layer: the only module that runs SQL
+    store.py           Data-access layer: the only module with SQL (SQLite and PostgreSQL schemas)
+    db.py              Database backends: SQLiteDatabase, PostgresDatabase (pool), selection by DATABASE_BACKEND
+    db_migrate.py      SQLite → PostgreSQL copy tool (python -m app.db_migrate; dry run by default)
     claims.py          Public ID and claim-code generation, scrypt hashing/verification
     cors.py            Explicit browser-origin allowlist (default http://localhost:4173)
     evidence.py        POST /complaints/{id}/evidence: streamed multipart parsing, signature checks, limits
     evidence_storage.py EvidenceStorage interface + LocalEvidenceStorage (private disk storage)
+    supabase_storage.py SupabaseEvidenceStorage (private Supabase Storage bucket, server-side only) + configuration
     ratelimit.py       RateLimiter interface, in-memory sliding window, client-IP / trusted-proxy rules
     quota.py           Total evidence storage quota with reservations
     evidence_audit.py  Read-only-by-default audit: orphan files, missing files (python -m app.evidence_audit)
@@ -37,11 +40,15 @@ backend/
     test_idempotency.py Replay, conflict, concurrency, failed transactions, credential re-issue rules
     test_evidence_audit.py Dry run, deletion safety, recheck, temp files, CLI
     test_staff.py      CLI, sign-in, sessions, revocation, projections, evidence streaming, audit log, login limits
+    test_postgres.py   PostgreSQL schema, constraints, rollback, concurrency, pool, migration (real PostgreSQL)
+    dbutil.py          test helper: direct SQL on whichever backend the run uses
+    test_supabase_storage.py Supabase config, startup checks, adapter, failures, full API flow (fake HTTP; no real Supabase)
   data/                Default database and evidence location (created on first start; git-ignored)
     civiclens.sqlite3  complaints, timeline, verification log, evidence metadata
     evidence/objects/  stored files, named by random key (objects/<first 2 hex>/<32 hex>)
     evidence/tmp/      in-progress uploads (*.part), removed on failure; stale ones removed at startup
-  requirements.txt     Runtime: fastapi, uvicorn, python-multipart (pinned)
+  requirements.txt     Runtime: fastapi, uvicorn, python-multipart, storage3, psycopg, psycopg-pool (pinned)
+  .env.example         Environment template (no real values; .env files are git-ignored)
   requirements-dev.txt Adds pytest, httpx2 (FastAPI TestClient)
   pyproject.toml       pytest settings only
 ```
@@ -62,12 +69,58 @@ On macOS/Linux use `python3 -m venv .venv` and `.venv/bin/python`.
 
 ## Database
 
+Two engines, chosen with `DATABASE_BACKEND`. SQLite is the default and needs nothing; PostgreSQL (for example Supabase) is for deployments. The API, schema, constraints and behaviour are the same on both.
+
+| | `sqlite` (default) | `postgres` |
+| --- | --- | --- |
+| Configuration | `CIVICLENS_DB_PATH` (optional) | `DATABASE_URL` (required), `CIVICLENS_DB_POOL_MAX` (optional, default 10) |
+| Driver | standard-library `sqlite3` | `psycopg` 3 with `psycopg-pool` (thread-safe pool) |
+| Schema version | `PRAGMA user_version` | `civiclens_schema` table |
+| Concurrency | one writer at a time (`BEGIN IMMEDIATE` where a read-modify-write must be serialised) | row locks (`SELECT … FOR UPDATE`) and unique constraints |
+
+How it is built (`app/db.py`, `app/store.py`): all SQL lives once in `store.py` with `?` placeholders. `db.py` supplies what differs: connections, placeholder translation for psycopg, inserts that return the new key (`lastrowid` vs `RETURNING pk`), transactions, schema bootstrap, and one set of exception classes. PostgreSQL types: `BIGINT` identity keys (BY DEFAULT, so imports keep their keys), `DOUBLE PRECISION` for GPS (PostgreSQL `REAL` is 4-byte and would lose precision), `BIGINT` foreign keys. Timestamps stay ISO 8601 UTC text (`…Z`) on both engines, so comparisons and API output are identical. PostgreSQL schema creation runs in one transaction under an advisory lock, so several app instances starting together cannot race.
+
+### Supabase PostgreSQL setup
+
+1. In the Supabase dashboard open your project → **Connect** (or Project Settings → Database) and copy a **connection string** (URI form): `postgresql://postgres.<project-ref>:<password>@<host>:<port>/postgres`.
+   - **Session pooler** (port 5432) or **direct connection**: recommended for this long-running API.
+   - **Transaction pooler** (port 6543) also works: CivicLens disables server-side prepared statements (`prepare_threshold=None`), which that pooler does not support.
+2. Add `?sslmode=require` to the URL so the connection is always encrypted.
+3. Set, in the server environment only (never in frontend files or a committed `.env`):
+
+```sh
+DATABASE_BACKEND=postgres
+DATABASE_URL=postgresql://postgres.<project-ref>:<password>@<host>:5432/postgres?sslmode=require
+```
+
+4. Start the API (`.venv/Scripts/python -m app`). The schema is created on first start. The staff CLI (`python -m app.staff`) and the audit tool follow the same variables.
+
+The database password is never printed: error messages and reports name the host and database only. Use a dedicated database password for the API, and keep Supabase's Row Level Security in mind if you also expose these tables through Supabase's own APIs (CivicLens does not; it connects as a database role and enforces access itself).
+
+### Moving existing SQLite data to PostgreSQL
+
+`app/db_migrate.py` copies a SQLite database into PostgreSQL. It is a **dry run unless you pass `--execute`**:
+
+```sh
+cd backend
+DATABASE_URL=postgresql://… .venv/Scripts/python -m app.db_migrate --sqlite data/civiclens.sqlite3            # plan: counts per table
+DATABASE_URL=postgresql://… .venv/Scripts/python -m app.db_migrate --sqlite data/civiclens.sqlite3 --execute  # copy
+```
+
+- The source file is **never modified**: it is read through a read-only connection with SQLite's backup API into a temporary copy (a consistent snapshot including any WAL data); an older schema is upgraded on the copy only. SQLite may create empty `-wal`/`-shm` helper files next to a WAL-mode database while reading; the data file is unchanged. Stop the API first so the snapshot is current.
+- `--execute` creates the PostgreSQL schema if needed and inserts every row **with its original primary key** in one transaction, so complaint IDs, timelines, evidence, sessions, idempotency keys and audit entries keep their relationships; identity sequences are then advanced past the imported keys. Any failure rolls everything back.
+- **Re-running is safe:** rows already present with identical values are skipped. A key that exists with different values is reported as a conflict (table and key only) and nothing is written.
+- Afterwards every source row is compared column by column with PostgreSQL, counts are reported, and every foreign key is verified. Exit code 0 means the copy is complete and valid.
+- Evidence **files** are not moved: rows keep pointing at the backend that holds each file (for local files, keep the same `CIVICLENS_EVIDENCE_DIR`).
+
+### SQLite details
+
 - **Engine:** SQLite through Python's standard-library `sqlite3`. No ORM.
 - **Default file:** `backend/data/civiclens.sqlite3`. The folder and schema are created automatically when the server starts. Restarting keeps all data.
 - **Choose another file:** set `CIVICLENS_DB_PATH`, for example `CIVICLENS_DB_PATH=/tmp/dev.sqlite3`. Code can also pass `create_app(db_path=...)`.
 - **Reset local data:** stop the server and delete the database file and its `-wal`/`-shm` companions. (This erases every stored complaint.)
 - **Git:** `data/`, `*.sqlite3`, `*.sqlite3-*`, `*.db` and journal files are ignored.
-- Journal mode is WAL; foreign keys are on; schema version is stored in `PRAGMA user_version` (currently 4). Older databases are migrated in place at startup (1 → 2 adds the upload-token columns and the `evidence` table; 2 → 3 adds `complaints.credentials_used_at` and the `idempotency_keys` table; 3 → 4 adds `staff_accounts`, `staff_sessions` and `evidence_access_log`; existing complaints are kept).
+- Journal mode is WAL; foreign keys are on; schema version is stored in `PRAGMA user_version` (currently 5). Older databases are migrated in place at startup (1 → 2 adds the upload-token columns and the `evidence` table; 2 → 3 adds `complaints.credentials_used_at` and the `idempotency_keys` table; 3 → 4 adds `staff_accounts`, `staff_sessions` and `evidence_access_log`; 4 → 5 adds `evidence.storage_backend` (`local`/`supabase`, existing rows become `local`); existing complaints are kept).
 
 Tables:
 
@@ -82,7 +135,8 @@ Tables:
 
 ## Evidence storage
 
-- **Interface:** `EvidenceStorage` (`begin` → write chunks → `commit` returns a key, or `abort`; `delete`; `exists`). `LocalEvidenceStorage` is the development implementation; an S3-compatible one can replace it without changing routes.
+- **Interface:** `EvidenceStorage` (`begin` → write chunks → `commit` returns a key, or `abort`; `delete`; `exists`; `open_read`; `stored_bytes`). Two implementations: `LocalEvidenceStorage` (default, described in the rest of this list) and `SupabaseEvidenceStorage` (see "Supabase Storage evidence storage" below). Routes depend only on the interface.
+- **Backend per file:** every `evidence` row records `storage_backend` (`local` or `supabase`). New uploads go to the backend chosen by `EVIDENCE_STORAGE_BACKEND`; each file is always read and deleted from the backend recorded on its row, so local evidence stays readable after Supabase Storage is enabled. Existing files are never moved automatically.
 - **Location:** `backend/data/evidence/` by default; set `CIVICLENS_EVIDENCE_DIR` to change it. The server refuses to start if the folder is inside the publicly served `dist/` directory. Nothing serves this folder over HTTP.
 - **Names:** files are named by a random 128-bit hex key generated on the server, never by the uploaded filename. Keys are validated against `^[0-9a-f]{32}$` before use, so they cannot point outside the folder.
 - **Writes:** each upload goes to an exclusively created `tmp/*.part` file, is fsynced, then renamed into `objects/` atomically. If anything fails (bad type, too large, interrupted, disk or database error) the partial file is deleted and no database row is written; if the database write fails after the rename, the stored file is deleted.
@@ -191,6 +245,76 @@ Limits of this design: one role only; no MFA, password-reset flow or lockout bey
 
 The frontend's staff console is `#/staff` in backend mode (see `docs/IMPLEMENTATION_PROGRESS.md`); it keeps the token in page memory only, so reloading signs the tab out.
 
+## Supabase Storage evidence storage
+
+**Why Supabase Storage.** Local files live on one machine: they are lost with the disk, cannot be shared between servers and are awkward to back up. A private Supabase Storage bucket keeps evidence durable and off the API machine, next to the Supabase Postgres database. The API, validation, authorisation, quota, idempotency and audit logging are identical in both modes.
+
+| | `local` (default) | `supabase` |
+| --- | --- | --- |
+| Where files live | `backend/data/evidence/objects/` on the API machine | private Supabase bucket, objects `evidence/<2 hex>/<32 hex>` |
+| How an upload is stored | temp file → fsync → atomic rename | staged to a private temp file → uploaded with `upsert: false`, content type, `cache-control: no-store` and the SHA-256 in metadata → size confirmed with an `info` call |
+| Needs | nothing | a Supabase project, a private bucket and the service-role key |
+| Startup check | folder exists, outside `dist/` | key, URL and bucket checked; startup stops if the bucket is **public**, its file size limit is below the upload limit, or its allowed MIME types exclude JPEG/WebM/MP4 |
+
+The client is the official `storage3` package (the storage part of the Supabase Python SDK, without the realtime and auth extras). Downloads are streamed with the SDK's HTTP client because `storage3`'s `download()` reads whole files into memory.
+
+### Create the project, bucket and key (Supabase dashboard)
+
+1. **Project:** create one (or use the project whose Postgres you use for `DATABASE_URL`).
+2. **Bucket:** Storage → New bucket. Name it, for example, `civiclens-evidence`. Leave **Public bucket off**. Optionally set allowed MIME types (`image/jpeg, video/webm, video/mp4`) and a file size limit; the limit must be at least the upload limits (`CIVICLENS_MAX_PHOTO_BYTES` / `CIVICLENS_MAX_VIDEO_BYTES`). The free plan caps single files at 50 MB, so keep the video limit at or below that there. Add **no storage policies**: the backend uses the service-role key, which bypasses RLS, and nothing else should be able to read the bucket.
+3. **Project URL:** Project Settings → Data API (or the Connect dialog): `https://<project-ref>.supabase.co`.
+4. **Service-role key:** Project Settings → API keys → the `service_role` key (legacy JWT) or a **secret** key (`sb_secret_…`). Never the anon/publishable key (the app refuses it). Treat it like a database password: server environment only, never in `dist/`, the browser, logs or Git.
+
+### Enable Supabase mode
+
+Set these in the server's environment (see `backend/.env.example`; never commit real values, never put them in frontend files):
+
+```sh
+EVIDENCE_STORAGE_BACKEND=supabase
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service-role or secret key>
+SUPABASE_STORAGE_BUCKET=civiclens-evidence
+```
+
+Then start the API as usual (`.venv/Scripts/python -m app`). A missing or malformed setting stops the app before it starts, naming the variable (the key is never printed: it is excluded from the settings' `repr` and from error messages). `https://` is required except for `localhost` (a local Supabase CLI stack).
+
+**Back to local mode:** unset `EVIDENCE_STORAGE_BACKEND` (or set it to `local`). Evidence already stored in Supabase then cannot be viewed (staff get `503` and nothing is logged) until Supabase is configured again; local evidence is always readable.
+
+### Private retrieval: streaming, not signed URLs
+
+Staff evidence is streamed through `GET /api/v1/staff/complaints/{id}/evidence` in both modes: the API checks the staff session, writes the access-log row, then copies the object from Supabase to the browser in 64 KB chunks with `Cache-Control: no-store`. No public URL and no signed URL is ever created.
+
+Signed URLs were considered and deliberately not used: a signed URL is a bearer link that anyone who obtains it can use until it expires, the audit log could only record that a link was issued (not that the file was viewed), and the browser would talk to Supabase directly. The cost of streaming is bandwidth on the API server, which is acceptable for photos and short videos at civic-pilot scale. If that becomes a bottleneck, short-lived (≤ 60 s) single-object signed URLs issued only after the same authorisation and audit step would be the next option.
+
+### Failure handling
+
+| Situation | Behaviour |
+| --- | --- |
+| Invalid configuration (missing variable, anon key, bad URL or bucket name) | app refuses to build: `StorageConfigError` naming the variable |
+| Wrong key, missing bucket, unreachable project, public bucket, too-small size limit, MIME list excluding our types | startup stops with a specific message |
+| Supabase outage or network error during an upload | `503 storage_unavailable`; no evidence row; quota reservation released; failed connections are retried twice |
+| Upload stored but size confirmation fails | object deleted, `503` |
+| Object stored but the database insert fails (SQLite or PostgreSQL) | object deleted (compensation), `503` (if that delete also fails, the object is left unreferenced and logged; there is no Supabase orphan audit yet) |
+| Object missing or Supabase unreachable when staff view | `503`, nothing logged, no bytes |
+| Identical retry / different file | `200 already_uploaded` / `409 evidence_exists`, unchanged |
+
+Error messages and logs carry HTTP status or error codes only: never the key, auth headers or object names. The `httpx` request logger is set to WARNING so request URLs are not logged.
+
+### Testing without Supabase
+
+`tests/test_supabase_storage.py` runs configuration, startup checks, the adapter and the full API flow (upload, staff view, audit log, outages, compensation after a database failure, local-to-Supabase switch, local mode never contacting Supabase) against an in-process fake of the Supabase Storage HTTP API (`httpx.MockTransport`). No real project, credentials, network calls or charges:
+
+```sh
+cd backend
+.venv/Scripts/python -m pytest tests/test_supabase_storage.py -v
+```
+
+**A real Supabase project has not been tested yet.** To check one manually after setting the variables: start the API, create a staff account, enable backend mode in the frontend, submit a report with a photo, confirm the object appears in the bucket (Storage → bucket → `evidence/`), and view it in the staff console.
+
+### Not included
+
+No automatic migration of existing local evidence to Supabase (a future, separately reviewed task: copy each file, verify the checksum, then update `storage_backend` row by row). The `evidence_audit` command covers local files only. Startup lists the bucket's `evidence/` folders once to measure quota usage, which is slow for very large buckets.
+
 ## Evidence storage audit
 
 Dry run (read-only, the default):
@@ -202,7 +326,7 @@ cd backend
 .venv/Scripts/python -m app.evidence_audit --db <path.sqlite3> --evidence-dir <evidence folder>
 ```
 
-It reports recorded and on-disk files and bytes, **orphans** (files with no `evidence` row), **missing files** (rows whose file is gone), size mismatches, unexpected files (names that are not storage keys) and temporary uploads. Exit code 0 when consistent, 1 when files are missing or mismatched, 2 when the database cannot be read.
+It covers **local** evidence only (rows with `storage_backend = 'local'`); Supabase Storage objects are not audited by this command. With `DATABASE_BACKEND=postgres` it reads the PostgreSQL database (in a read-only transaction) instead of the SQLite file. It reports recorded and on-disk files and bytes, **orphans** (files with no `evidence` row), **missing files** (rows whose file is gone), size mismatches, unexpected files (names that are not storage keys) and temporary uploads. Exit code 0 when consistent, 1 when files are missing or mismatched, 2 when the database cannot be read.
 
 Deliberate cleanup (destructive, explicit flags required):
 
@@ -247,6 +371,18 @@ cd backend
 ```
 
 Every test runs against its own temporary database (see `tests/conftest.py`); the development database is never touched.
+
+PostgreSQL tests need a real, disposable PostgreSQL. With Docker:
+
+```sh
+docker run -d --rm --name civiclens-pgtest -e POSTGRES_PASSWORD=civiclens_test -e POSTGRES_DB=civiclens_test -p 127.0.0.1:55432:5432 postgres:15-alpine
+export CIVICLENS_TEST_POSTGRES_URL=postgresql://postgres:civiclens_test@127.0.0.1:55432/civiclens_test
+.venv/Scripts/python -m pytest -v                                   # SQLite suite + dedicated PostgreSQL tests
+CIVICLENS_TEST_DATABASE=postgres .venv/Scripts/python -m pytest -v  # the whole suite on PostgreSQL
+docker stop civiclens-pgtest
+```
+
+Without `CIVICLENS_TEST_POSTGRES_URL` the PostgreSQL tests are skipped. In PostgreSQL mode each test gets its own schema, and tests marked `sqlite_only` (SQLite files, PRAGMA, SQLite triggers) are skipped; their PostgreSQL equivalents are in `tests/test_postgres.py`. Never point these variables at a real Supabase project: tests create and drop schemas.
 
 ## Endpoints
 
@@ -405,4 +541,4 @@ A failed create rolls back completely: no half-written complaint is left behind.
 
 ## Not included yet
 
-Authentication and sessions, shared (multi-process) rate limiting, claiming complaints, staff operations, repairs, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; future object storage would use short-lived signed URLs, never permanent public links), staff case updates and work orders on the server, more staff roles, MFA, object storage, server-side EXIF re-parsing, malware scanning, transcoding, PostgreSQL/PostGIS, AI models, notifications. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.
+Authentication and sessions, shared (multi-process) rate limiting, claiming complaints, staff operations, repairs, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), staff case updates and work orders on the server, more staff roles, MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.
