@@ -102,7 +102,7 @@ def test_app_uses_postgres_when_configured(pg_url, monkeypatch, evidence_dir):
 
 def test_schema_initialisation(pg_store, pg_url):
     tables = {r[0] for r in pg_query(pg_url, "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()")}
-    assert set(TABLES) | {"civiclens_schema"} == tables
+    assert set(TABLES) | {"civiclens_schema", "civiclens_features"} == tables
     assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)]
     types = dict(pg_query(pg_url, "SELECT column_name, data_type FROM information_schema.columns "
                                   "WHERE table_schema = current_schema() AND table_name = 'complaints'"))
@@ -291,6 +291,13 @@ def populated_sqlite(isolated_db_path, evidence_dir):
         order = client.post(f"/api/v1/staff/complaints/{cid}/work-orders", json={"team": "crew"}, headers=staff).json()["workOrders"][0]["id"]
         assert client.post(f"/api/v1/staff/work-orders/{order}/evidence", files={"file": ("a.jpg", JPEG, "image/jpeg")},
                            headers=staff).status_code == 201
+        # Resident accounts: an account, its session and preferences, and a claimed complaint.
+        resident = client.post("/api/v1/residents", json={"email": "bina@example.org", "password": "resident passphrase 1",
+                                                          "displayName": "Bina"}).json()["token"]
+        res = {"Authorization": f"Bearer {resident}"}
+        assert client.put("/api/v1/residents/me/preferences", json={"updates": False}, headers=res).status_code == 200
+        assert client.post("/api/v1/residents/me/claims", json={"id": receipts[1]["id"], "claim": receipts[1]["claim"]},
+                           headers=res).status_code == 200
     with closing(sqlite3.connect(isolated_db_path)) as conn:
         counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
     assert all(counts[t] > 0 for t in TABLES if t != "verification_log"), counts

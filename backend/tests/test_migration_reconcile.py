@@ -29,11 +29,14 @@ PG_URL = os.environ.get("CIVICLENS_TEST_POSTGRES_URL", "")
 AI_TABLES = {"ai_inferences", "repair_assessments", "repair_assessment_inferences"}
 DUP_TABLES = {"complaint_merges", "duplicate_dismissals"}
 
-# The merge recipe: each branch's version 8 becomes a named feature that is adopted where it exists.
+# The merge recipe: each branch's version 8 becomes a named feature that is adopted where it exists,
+# followed by this branch's own named migrations (resident_accounts).
 RECIPE = (
     Feature("ai_analysis", AI_V8_SQLITE, AI_V8_POSTGRES, adopt_if="ai_inferences"),
     Feature("duplicate_detection", DUPLICATES_V8_SQLITE, DUPLICATES_V8_POSTGRES, adopt_if="complaint_merges"),
+    *store_mod.FEATURES,
 )
+RESIDENT_TABLES = {"resident_accounts", "resident_sessions", "resident_preferences"}
 
 STATES = {
     "v7 (integration/v52-fullstack, develop)": ({}, 7),
@@ -91,6 +94,14 @@ def _check_preserved(db, refs: dict) -> None:
     assert verify_claim_code(refs["claim"], refs["claim_hash"]), "the existing claim code still verifies"
 
 
+def _check_unowned(db, refs: dict) -> None:
+    """Existing (passerby) complaints are never assigned to a resident by a migration."""
+    with closing(db.connect()) as conn:
+        row = conn.execute("SELECT owner_resident_pk, owned_via, owned_at FROM complaints WHERE pk = ?", (refs["pk"],)).fetchone()
+        assert tuple(row) == (None, None, None)
+        assert conn.execute("SELECT COUNT(*) FROM complaints WHERE owner_resident_pk IS NOT NULL").fetchone()[0] == 0
+
+
 @pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.postgres)])
 def engine_target(request, tmp_path):
     if request.param == "sqlite":
@@ -111,7 +122,10 @@ def test_this_branch_starts_on_every_known_state_without_changing_it(engine_targ
         ComplaintStore(database=db).initialize()
         assert db.schema_version() == version, "the numbered version is never lowered or bumped"
         assert before <= _tables(db), "no table is dropped"
+        assert RESIDENT_TABLES <= _tables(db)
+        assert db.features() == {"resident_accounts": "applied"}
         _check_preserved(db, refs)
+        _check_unowned(db, refs)
     finally:
         if engine == "postgres":
             db.close()
@@ -129,13 +143,15 @@ def test_reconciliation_recipe_converges_every_state(engine_target, state, monke
         tables = _tables(db)
         assert AI_TABLES <= tables and DUP_TABLES <= tables, "both branches' tables exist afterwards"
         expected = {"ai_analysis": "adopted" if extra.get(8) == "ai" else "applied",
-                    "duplicate_detection": "adopted" if extra.get(8) == "dup" else "applied"}
+                    "duplicate_detection": "adopted" if extra.get(8) == "dup" else "applied",
+                    "resident_accounts": "applied"}
         assert db.features() == expected
         assert db.schema_version() == version
         with closing(db.connect()) as conn:
             assert conn.execute("SELECT merged_into_pk FROM complaints WHERE pk = ?", (refs["pk"],)).fetchone()[0] is None
             assert conn.execute("SELECT COUNT(*) FROM ai_inferences").fetchone()[0] == 0
         _check_preserved(db, refs)
+        _check_unowned(db, refs)
         ComplaintStore(database=db).initialize()  # a repeat run is a no-op
         assert db.features() == expected
     finally:
@@ -147,7 +163,7 @@ def test_a_fresh_database_gets_every_named_feature(tmp_path, monkeypatch):
     monkeypatch.setattr(store_mod, "FEATURES", RECIPE)
     db = SQLiteDatabase(tmp_path / "fresh.sqlite3")
     ComplaintStore(database=db).initialize()
-    assert db.features() == {"ai_analysis": "applied", "duplicate_detection": "applied"}
+    assert db.features() == {"ai_analysis": "applied", "duplicate_detection": "applied", "resident_accounts": "applied"}
     assert db.schema_version() == 7
 
 
