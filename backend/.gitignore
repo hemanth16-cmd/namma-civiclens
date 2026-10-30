@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Local SQLite database and its journal/WAL files
+data/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-journal
+.env
+.env.*

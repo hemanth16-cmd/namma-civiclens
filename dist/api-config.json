@@ -1,0 +1,1 @@
+{"mode":"local","baseUrl":"http://localhost:8000/api/v1","usage":"mode is \"local\" (default: browser storage only) or \"backend\" (complaint details go to the CivicLens API at baseUrl; photos and videos stay in this browser). Anything else blocks reporting and tracking with an error instead of guessing."}

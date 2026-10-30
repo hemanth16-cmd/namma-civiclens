@@ -5,6 +5,7 @@ import {renderOverview, renderComplaints, renderClaim, renderNotifications, rend
 import {renderIssue} from './views/issue.js';
 import {renderIntelligence} from './views/intelligence.js';
 import {renderMapPage} from './views/map-page.js';
+import {renderStaff} from './views/staff.js';
 import {mountVideoReview} from './video-review.js';
 import {api} from './services.js';
 import {state, viewer, setSession, runCleanups, addCleanup} from './state.js';
@@ -14,7 +15,7 @@ import {toast, workspaceShell, notice, esc, btn} from './ui.js';
 const app = document.querySelector('#app');
 const TITLES = {
   camera: 'Report an issue', review: 'Review evidence', home: 'Choose an option', track: 'Track a problem',
-  login: 'Sign in', register: 'Create a demo profile', receipt: 'Receipt', issue: 'Case'
+  login: 'Sign in', register: 'Create a demo profile', receipt: 'Receipt', issue: 'Case', staff: 'Staff console'
 };
 
 function fallbackPath(name) {
@@ -41,6 +42,7 @@ async function dispatch(path, parts, root) {
   if (head === 'login') return renderLogin(root, second === 'official' ? 'official' : 'resident');
   if (head === 'register') return renderLogin(root, 'resident', true);
   if (head === 'issue') return renderIssue(root, parts[1]);
+  if (head === 'staff') return renderStaff(root, parts[1]);  // server mode only; authorisation is enforced by the API
   if (head === 'official' || head === 'resident') {
     if (!second) return renderOverview(root);
     switch (second) {

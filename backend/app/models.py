@@ -1,0 +1,262 @@
+"""Request and response schemas for the complaint API.
+
+Field names are camelCase to match dist/services.js, so the browser data contract
+does not change when the frontend is connected later.
+"""
+
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Literal
+
+from pydantic import AliasChoices, AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+
+# Exactly the categories in dist/services.js.
+CATEGORIES = (
+    "Potholes", "Road cracks and damage", "Garbage accumulation", "Illegal dumping",
+    "Drainage or waterlogging", "Broken streetlights", "Damaged footpaths", "Water leakage", "Other civic issues",
+)
+Category = Literal[CATEGORIES]
+
+# Allow for small clock differences between a phone and the server.
+MAX_CLOCK_SKEW = timedelta(minutes=10)
+# Earliest accepted GPS fix time (2000-01-01T00:00:00Z) in epoch milliseconds.
+MIN_FIX_EPOCH_MS = 946_684_800_000
+
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+ShortText = Annotated[str, Field(max_length=120)]
+
+
+def _not_in_future(dt: datetime) -> datetime:
+    if dt > datetime.now(timezone.utc) + MAX_CLOCK_SKEW:
+        raise ValueError("must not be in the future")
+    return dt
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+class GpsIn(_Strict):
+    """Location evidence as the capture screen builds it (location-service.js toFix(),
+    exif.js, plus fixAgeSeconds and the optional address lookup)."""
+
+    lat: Annotated[FiniteFloat, Field(ge=-90, le=90)]
+    lng: Annotated[FiniteFloat, Field(ge=-180, le=180)]
+    accuracy: Annotated[FiniteFloat, Field(ge=0)] | None = None
+    sourceType: Literal["gps", "exif", "manual"]
+    source: Annotated[str, Field(max_length=80)] | None = None
+    # Browser fix time in epoch milliseconds (Geolocation API). Stored as ISO 8601.
+    timestamp: Annotated[FiniteFloat, Field(ge=MIN_FIX_EPOCH_MS)] | None = None
+    fixAgeSeconds: Annotated[int, Field(ge=0, le=86_400)] | None = None
+    neighbourhood: ShortText | None = None
+    address: Annotated[str, Field(max_length=300)] | None = None
+
+    @field_validator("timestamp")
+    @classmethod
+    def _fix_time_not_in_future(cls, v: float | None) -> float | None:
+        if v is not None:
+            _not_in_future(datetime.fromtimestamp(v / 1000, timezone.utc))
+        return v
+
+
+class ComplaintCreate(_Strict):
+    """Complaint metadata only. Media upload is a separate, later endpoint.
+
+    Not accepted from the client: `owner` (no authentication yet, so an owner name
+    sent by the client cannot be trusted) and `uploadedAt` (set by the server).
+    """
+
+    category: Category
+    mediaType: Literal["photo", "video"] = "photo"
+    description: Annotated[str, Field(max_length=1000)] = ""
+    shareEvidence: bool = False
+    neighbourhood: ShortText | None = None
+    gps: GpsIn
+    # services.js receives this as `created`; both names are accepted.
+    capturedAt: AwareDatetime | None = Field(default=None, validation_alias=AliasChoices("capturedAt", "created"))
+    captureSource: Annotated[str, Field(max_length=80)] | None = None
+
+    @field_validator("capturedAt")
+    @classmethod
+    def _captured_not_in_future(cls, v: datetime | None) -> datetime | None:
+        return _not_in_future(v) if v is not None else v
+
+
+class TimelineEntry(BaseModel):
+    status: str
+    text: str
+    date: str
+
+
+class VerificationEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    date: str
+    type: str
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None = None
+    response: str | None = None
+    by: str
+    actor: str
+    note: str = ""
+
+
+class PublicComplaint(BaseModel):
+    """Public tracking projection: the same allowlist as api.publicRecord() in dist/services.js.
+    No claim code or hash, owner, precise GPS, media, description or internal fields."""
+
+    id: str
+    category: str
+    area: str
+    status: str
+    verification: str
+    department: str
+    updated: str
+    timeline: list[TimelineEntry]
+    verificationLog: list[VerificationEntry]
+
+
+class ReceiptGps(BaseModel):
+    lat: float
+    lng: float
+    accuracy: float | None
+    source: str | None
+    sourceType: str
+    timestamp: str | None
+    address: str | None
+
+
+class ComplaintReceipt(BaseModel):
+    """Returned once, to the submitter, by POST /complaints. The only response that
+    contains the plaintext claim code. Mirrors api.receipt() in dist/services.js."""
+
+    id: str
+    claim: str
+    category: str
+    area: str
+    created: str
+    capturedAt: str | None
+    uploadedAt: str
+    captureSource: str | None
+    gps: ReceiptGps
+    mediaType: str
+    shareEvidence: bool
+    status: str
+    verification: str
+    # Short-lived bearer token for POST /complaints/{id}/evidence. Shown only here and by the
+    # upload-token endpoint; only its hash is stored.
+    uploadToken: str
+    uploadTokenExpiresAt: str
+    # True when this is an idempotent replay: the same complaint, with a newly issued claim code and
+    # upload token (any earlier ones for this complaint no longer work).
+    replayed: bool = False
+
+
+class UploadTokenRequest(_Strict):
+    claim: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class UploadTokenResponse(BaseModel):
+    uploadToken: str
+    uploadTokenExpiresAt: str
+
+
+class StaffSignIn(_Strict):
+    username: Annotated[str, Field(min_length=1, max_length=64)]
+    password: Annotated[str, Field(min_length=1, max_length=256)]
+
+
+class StaffIdentity(BaseModel):
+    username: str
+    displayName: str
+    role: str
+
+
+class StaffSessionOut(BaseModel):
+    token: str
+    expiresAt: str
+    staff: StaffIdentity
+
+
+class StaffEvidenceSummary(BaseModel):
+    """Evidence metadata for staff. Never a storage key, path or URL: the file is fetched through
+    GET /staff/complaints/{id}/evidence with the staff session."""
+    evidenceId: str
+    mediaType: str
+    contentType: str
+    byteSize: int
+    sha256: str
+    capturedAt: str | None
+    uploadedAt: str
+
+
+class StaffGps(BaseModel):
+    lat: float
+    lng: float
+    accuracy: float | None
+    source: str | None
+    sourceType: str
+    timestamp: str | None
+    address: str | None
+
+
+class StaffComplaintSummary(BaseModel):
+    id: str
+    category: str
+    area: str
+    status: str
+    verification: str
+    created: str
+    updated: str
+    mediaType: str
+    hasEvidence: bool
+
+
+class StaffComplaintList(BaseModel):
+    items: list[StaffComplaintSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+class StaffComplaint(BaseModel):
+    """Operational projection for signed-in staff: includes precise location and description,
+    never the claim code or its hash, upload-token data or storage keys."""
+    id: str
+    category: str
+    area: str
+    description: str
+    status: str
+    verification: str
+    department: str
+    created: str
+    capturedAt: str | None
+    uploadedAt: str
+    updated: str
+    captureSource: str | None
+    mediaType: str
+    shareEvidence: bool
+    gps: StaffGps
+    timeline: list[TimelineEntry]
+    verificationLog: list[VerificationEntry]
+    evidence: StaffEvidenceSummary | None
+
+
+class EvidenceAccessEntry(BaseModel):
+    username: str
+    displayName: str
+    action: str
+    accessedAt: str
+
+
+class EvidenceReceipt(BaseModel):
+    """Result of an evidence upload. No storage key, path or URL is ever included."""
+
+    evidenceId: str
+    status: Literal["uploaded", "already_uploaded"]
+    mediaType: Literal["photo", "video"]
+    contentType: str
+    byteSize: int
+    sha256: str
+    capturedAt: str | None
+    uploadedAt: str
