@@ -844,15 +844,26 @@ class ComplaintStore:
     # ---------- Staff views of complaints ----------
 
     def list_complaints(self, limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
-        """Newest first. Returns (records, total). Records come from _load plus an evidence summary."""
+        """Newest first. Returns (summaries, total) in two queries whatever the page size: the list
+        must not cost a round trip per complaint (the database can be far from the API)."""
         limit = max(1, min(int(limit), STAFF_LIST_MAX))
         try:
             with closing(self._connect()) as conn:
                 total = conn.execute("SELECT COUNT(*) FROM complaints").fetchone()[0]
-                ids = [r[0] for r in conn.execute("SELECT public_id FROM complaints ORDER BY pk DESC LIMIT ? OFFSET ?", (limit, max(0, int(offset))))]
-                return [self._staff_record(conn, i) for i in ids], total
+                rows = conn.execute(
+                    "SELECT c.public_id, c.title, c.category, c.area, c.status, c.verification, c.department, c.created_at, "
+                    "c.updated_at, c.media_type, c.gps_lat, c.gps_lng, c.gps_accuracy, c.gps_source_type, "
+                    "EXISTS (SELECT 1 FROM evidence e WHERE e.complaint_pk = c.pk AND e.role = 'original') AS has_evidence "
+                    "FROM complaints c ORDER BY c.pk DESC LIMIT ? OFFSET ?",
+                    (limit, max(0, int(offset)))).fetchall()
         except DB_ERRORS as exc:
             raise StoreError("Complaints could not be listed") from exc
+        return [{
+            "id": r["public_id"], "title": r["title"], "category": r["category"], "area": r["area"], "status": r["status"],
+            "verification": r["verification"], "department": r["department"], "created": r["created_at"],
+            "updated": r["updated_at"], "mediaType": r["media_type"], "hasEvidence": bool(r["has_evidence"]),
+            "gps": {"lat": r["gps_lat"], "lng": r["gps_lng"], "accuracy": r["gps_accuracy"], "sourceType": r["gps_source_type"]},
+        } for r in rows], total
 
     def get_staff_complaint(self, public_id: str) -> dict | None:
         try:

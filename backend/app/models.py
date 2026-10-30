@@ -200,16 +200,27 @@ class StaffGps(BaseModel):
     address: str | None
 
 
+class StaffListGps(BaseModel):
+    """Location for the staff map. Staff may see precise coordinates (as in StaffComplaint)."""
+    lat: float
+    lng: float
+    accuracy: float | None
+    sourceType: str
+
+
 class StaffComplaintSummary(BaseModel):
     id: str
+    title: str
     category: str
     area: str
     status: str
     verification: str
+    department: str
     created: str
     updated: str
     mediaType: str
     hasEvidence: bool
+    gps: StaffListGps
 
 
 class StaffComplaintList(BaseModel):

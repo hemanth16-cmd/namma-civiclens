@@ -62,16 +62,12 @@ def who_am_i(staff: dict = Depends(current_staff)) -> dict:
     return staff
 
 
-def _summary(record: dict) -> dict:
-    return {k: record[k] for k in ("id", "category", "area", "status", "verification", "created", "updated", "mediaType")} | {"hasEvidence": record["evidence"] is not None}
-
-
 @router.get("/complaints", response_model=StaffComplaintList)
 def list_complaints(request: Request, response: Response, staff: dict = Depends(current_staff),
                     limit: int = Query(50, ge=1, le=STAFF_LIST_MAX), offset: int = Query(0, ge=0)) -> dict:
     records, total = request.app.state.store.list_complaints(limit, offset)
     response.headers["Cache-Control"] = "no-store"
-    return {"items": [_summary(r) for r in records], "total": total, "limit": limit, "offset": offset}
+    return {"items": records, "total": total, "limit": limit, "offset": offset}
 
 
 def _record_or_404(request: Request, public_id: str) -> dict:
