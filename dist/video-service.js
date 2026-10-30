@@ -1,6 +1,6 @@
 // Admin-only video review service. Footage stays private. Linking a case never publishes footage,
 // changes complaint status or creates location evidence. Every observation is human-recorded.
-import {mediaDB, MAX_VIDEO_BYTES} from './services.js';
+import {mediaDB, MAX_REVIEW_VIDEO_BYTES} from './services.js';
 
 const KEY = 'ncl-video-reviews-v1';
 export const findings = ['Suspected dumping', 'Waste present', 'No dumping observed', 'Inconclusive'];
@@ -42,7 +42,7 @@ export const videoReviewService = {
     admin(actor);
     if (!file || !(file.type?.startsWith('video/') || SUPPORTED.test(file.name || ''))) throw new Error('Choose a supported video file, such as MP4, WebM or MOV.');
     if (file.size === 0) throw new Error('This video file is empty.');
-    if (file.size > MAX_VIDEO_BYTES) throw new Error('Use a clip under 200 MB. Trim larger recordings first.');
+    if (file.size > MAX_REVIEW_VIDEO_BYTES) throw new Error('Use a clip under 200 MB. Trim larger recordings first.');
     const clip = {
       id: newId(), name: file.name || 'Review clip', size: file.size, type: file.type || 'video/unknown', caseId,
       duration: null, finding: 'Not reviewed', notes: '', created: new Date().toISOString(), observations: [],

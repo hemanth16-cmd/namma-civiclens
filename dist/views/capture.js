@@ -684,7 +684,7 @@ function startRecording() {
     if (cam.holdRecording) cam.mode = 'photo';
     cam.holdRecording = false;
     if (!blob.size) return toast('No video was recorded. Try again.');
-    if (blob.size > MAX_VIDEO_BYTES) return toast('This clip is too large (over 200 MB). Record a shorter clip.');
+    if (blob.size > MAX_VIDEO_BYTES) return toast('This clip is too large (over 50 MB). Record a shorter clip.');
     state.capture = {blob, type: 'video', mimeType: type, gps: evidenceLocation(fix, startedAt), capturedAt: new Date(startedAt).toISOString(), captureSource: 'Live camera', duration: Math.round((Date.now() - startedAt) / 1000)};
     return navigate('review');
   };
