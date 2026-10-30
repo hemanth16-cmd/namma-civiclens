@@ -101,6 +101,20 @@ that complaints, claim hashes (the old claim code still verifies), evidence refe
 accounts are unchanged. It also checks that a repeat run changes nothing, and that a failing feature
 leaves nothing behind.
 
+## Resident accounts (named migration `resident_accounts`)
+
+The migration adds `resident_accounts`, `resident_sessions` and `resident_preferences`. It also adds
+three **nullable** columns to `complaints`: `owner_resident_pk` (FK), `owned_via` (`submitted` |
+`claimed`) and `owned_at`, plus the index `complaints_by_owner`. It changes no existing column,
+constraint or row:
+
+- every existing complaint keeps `owner_resident_pk = NULL`. A passerby complaint is never
+  reassigned, and only a later claim with the claim code links it;
+- `claim_hash`, `public_id` and the evidence rows and storage keys are untouched, so existing claim
+  codes and evidence references keep working;
+- `TABLES` and the SQLite-to-PostgreSQL import (`app/db_migrate.py`) include the new tables, and the
+  import checks their foreign keys.
+
 ## Production rollout (needs approval; not done)
 
 1. Back up first: take a Supabase backup or PITR snapshot, or `pg_dump --schema-only` plus a data dump.

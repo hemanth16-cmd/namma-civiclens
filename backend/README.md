@@ -254,6 +254,57 @@ Limits of this design: one role only; no MFA, password-reset flow or lockout bey
 
 The frontend's staff console is `#/staff` in backend mode (see `docs/IMPLEMENTATION_PROGRESS.md`); it keeps the token in page memory only, so reloading signs the tab out.
 
+## Resident accounts API
+
+Three separate identities use the API. A **passerby** reports and tracks with no account. A
+**resident** has a server account. **Staff** use the staff console API above. Resident accounts are
+their own authentication domain (`app/resident_auth.py`, tables `resident_accounts`,
+`resident_sessions`, `resident_preferences`), built like staff sign-in: scrypt passwords (12+
+characters), 256-bit bearer tokens stored only as SHA-256 hashes, an 8-hour expiry
+(`CIVICLENS_RESIDENT_SESSION_SECONDS`), and revocation on sign-out, password change or disable.
+**A resident token is refused by every `/staff` endpoint, and a staff token by every `/residents`
+endpoint.**
+
+| Method and path | Auth | Result |
+| --- | --- | --- |
+| `POST /api/v1/residents` `{"email", "password", "displayName"}` | none | `201` + a session (`{"token", "expiresAt", "resident"}`). `409 email_taken`; `422` for a bad email or short password. 5 per hour per IP. |
+| `POST /api/v1/residents/sessions` `{"email", "password"}` | none | `200` session. Wrong password and unknown email give the same `401`. Rate-limited per IP and per account before the password check. |
+| `DELETE /api/v1/residents/sessions/current` | resident | `204`; revoked on the server |
+| `GET /api/v1/residents/me`, `PATCH` `{"displayName"}` | resident | `{"residentId", "email", "displayName", "demo", "createdAt"}` |
+| `GET /api/v1/residents/me/complaints?limit&offset` | resident | Only this resident's complaints, newest first: public fields plus their own description and location, `ownedVia` (`submitted` / `claimed`) and `ownedAt`. Never the claim code or hash, tokens, staff notes or storage keys. |
+| `GET /api/v1/residents/me/complaints/{id}` | resident | One owned complaint. Any other ID is `404`, whether or not it exists. |
+| `POST /api/v1/residents/me/claims` `{"id", "claim"}` | resident | Links an **unowned** complaint after checking the private claim code: `200 {"outcome": "claimed" \| "already_yours", "complaint"}`. A wrong ID or code gives one generic `403 invalid_claim`, always after one scrypt check. If another resident owns it: `409 already_claimed` (names nobody). Only the ownership columns change. The claim hash, public timeline, evidence and dates stay as they were, and the claim is written to `audit_log`. 10 per 15 min per IP, 10 per hour per complaint. |
+| `GET` / `PUT /api/v1/residents/me/preferences` `{"updates", "verification", "hotspots"}` | resident | Per-account preferences (booleans only) |
+
+**Ownership.** `POST /api/v1/complaints` stays open to everyone. With no `Authorization` header the
+complaint is anonymous: `owner_resident_pk` stays `NULL` until a claim. With a valid resident token
+the owner is taken **from the session** (`owned_via = 'submitted'`). An `owner` or `role` field in
+the body is rejected (`422`). Any other bearer token (expired, revoked, or a staff token) is refused
+with `401`, not quietly treated as anonymous. The owner is part of the idempotency fingerprint, so
+nobody else can replay a resident's key. Public tracking (`GET /complaints/{id}`) never shows an
+owner.
+
+### Demonstration accounts (local or isolated test databases only)
+
+```sh
+cd backend
+python -m app.demo seed --confirm-demo                    # SQLite (--db, else CIVICLENS_DB_PATH)
+python -m app.demo seed --confirm-demo --allow-postgres   # an isolated PostgreSQL test database only
+python -m app.demo remove --confirm-demo                  # disables both and signs them out
+```
+
+| Role | Sign in with | Password |
+| --- | --- | --- |
+| Resident | `resident@civiclens.demo` | `CivicDemo2026!` |
+| Administrator (staff role `admin`) | `demo_admin` | `CivicDemo2026!` |
+
+**These credentials are public and not production-safe.** The command does nothing without
+`--confirm-demo`. It needs `--allow-postgres` for PostgreSQL and refuses when `CIVICLENS_ENV` is
+`production`. It never prints the password and is idempotent: a rerun leaves working accounts and
+their sessions alone, and repairs a changed password, role or disabled flag. The API never creates
+these accounts, and the frontend never contains the credentials. The admin is made with the same
+store methods as `python -m app.staff`, so the role lives only on the server.
+
 ## Web Push notifications
 
 System notifications (Windows notification centre, Android notification shade, macOS) about complaints, delivered with the standard **Web Push API**, a **service worker** (`dist/sw.js`) and **VAPID** keys, also when CivicLens is closed (where the browser keeps running in the background; see "Platform notes"). Every notification is stored first, so there is a persistent **history** with read/unread state; push is only the delivery channel. There is no separate in-app pop-up or toast channel and no Telegram integration.
