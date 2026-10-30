@@ -10,7 +10,7 @@ import json
 import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 
 from .claims import verify_claim_code
 from .errors import ApiProblem
@@ -46,7 +46,7 @@ def request_fingerprint(data: dict) -> str:
 
 
 @router.post("", status_code=201, response_model=ComplaintReceipt, dependencies=[Depends(_limit_create)])
-def create_complaint(payload: ComplaintCreate, request: Request, response: Response) -> dict:
+def create_complaint(payload: ComplaintCreate, request: Request, response: Response, background: BackgroundTasks) -> dict:
     data = payload.model_dump()
     if payload.capturedAt is not None:
         data["capturedAt"] = iso(payload.capturedAt)
@@ -75,6 +75,8 @@ def create_complaint(payload: ComplaintCreate, request: Request, response: Respo
         if replayed:
             response.status_code = 200
             response.headers["Idempotent-Replayed"] = "true"
+    if not replayed:  # staff are told once, after the response (see notifications.py)
+        background.add_task(request.app.state.notifier.complaint_created, record["id"], record["category"])
     response.headers["Location"] = f"{request.url.path}/{record['id']}"
     return {**record, "claim": claim, "replayed": replayed}
 

@@ -7,7 +7,7 @@ import {navigate, currentPath, previousRoute} from '../router.js';
 import {lookupAddress} from './geo.js';
 import {camera} from '../camera-service.js';
 import {locator, fixQuality, fixAgeMs, GEO} from '../location-service.js';
-import {submitReport as saveReport, takeServerReceipt, reportMode, serverEvidenceKey, uploadEvidence, uploadState, forgetUpload} from '../report-gateway.js';
+import {submitReport as saveReport, takeServerReceipt, reportMode, serverEvidenceKey, uploadEvidence, uploadState, forgetUpload, notifyAboutReport} from '../report-gateway.js';
 import {ApiError, newIdempotencyKey} from '../api-client.js';
 
 const cam = state.camera; // recorder, timer, seconds, mode, holdRecording
@@ -860,7 +860,7 @@ export async function renderReceipt(root, id) {
 
 // Server-mode receipt. The claim code arrives in memory from report-gateway.js and is shown on this
 // render only: it is not stored anywhere in the browser, so reloading this page cannot show it again.
-async function renderServerReceipt(root, {receipt: r, evidenceKept}) {
+async function renderServerReceipt(root, {receipt: r, evidenceKept, following = false}) {
   const blob = evidenceKept ? await mediaDB.get(serverEvidenceKey(r.id)).catch(() => null) : null;
   const url = blob ? URL.createObjectURL(blob) : null;
   if (url) addCleanup(() => URL.revokeObjectURL(url));
@@ -884,6 +884,14 @@ async function renderServerReceipt(root, {receipt: r, evidenceKept}) {
           <div><dt>${what === 'video' ? 'Video' : 'Photo'}</dt><dd id="evidence-upload-status" role="status" aria-live="polite"></dd></div>
         </dl>
         <div id="evidence-upload-actions" class="row-actions"></div>
+      </section>
+      <section class="card" aria-labelledby="notify-title" id="receipt-notifications">
+        <h2 id="notify-title">Updates about this report</h2>
+        <div id="notify-status" role="status" aria-live="polite">${following
+          ? `<p>${icon('bell', 'mini-icon')} You will get a notification on this device when something happens to this report. <a class="inline-link" href="#/notifications">Notification history</a></p>`
+          : `<p>Get a system notification on this phone or computer when the evidence is stored and when staff review it, even after you close CivicLens.</p>
+             <div class="row-actions">${btn(icon('bell') + '<span>Notify me about this report</span>', 'id="notify-me"', 'secondary')}</div>
+             <div id="notify-feedback"></div>`}</div>
       </section>
       <div class="receipt-grid">
         <section class="card reference-card" aria-labelledby="ref-title">
@@ -931,6 +939,22 @@ async function renderServerReceipt(root, {receipt: r, evidenceKept}) {
   root.querySelector('[data-receipt]')?.addEventListener('click', () => downloadReceipt(r, uploadState(r.id) === 'uploaded'
     ? `The complaint details and the ${what} were stored privately by the CivicLens server. A copy of the ${what} also remains in the browser that captured it.`
     : `The complaint details were stored by the CivicLens server. The ${what} was NOT confirmed as uploaded; a copy is kept in the browser that captured it.`));
+  $('notify-me')?.addEventListener('click', async e => {
+    const button = e.currentTarget;
+    button.disabled = true;
+    const result = await notifyAboutReport(r.id);  // asks for notification permission (this click)
+    const slot = $('notify-status');
+    if (!slot) return;
+    if (!result.following) {
+      button.disabled = false;
+      $('notify-feedback').innerHTML = notice(esc(result.message || 'Notifications could not be turned on.'), 'warn', 'alert');
+      return;
+    }
+    slot.innerHTML = `${result.push === 'enabled'
+        ? `<p>${icon('bell', 'mini-icon')} Done. This device will show a notification when something happens to this report.</p>`
+        : notice(`<strong>Following, but this device will not show system notifications.</strong> ${esc(result.message || '')} Updates are kept in your notification history.`, 'warn', 'alert')}
+      <p><a class="inline-link" href="#/notifications">Notification history</a></p>`;
+  });
   addCleanup(() => forgetUpload(r.id));
   runEvidenceUpload(r.id, what);
 }

@@ -8,3 +8,5 @@ storage3==2.33.0
 # PostgreSQL driver and connection pool, used only when DATABASE_BACKEND=postgres (e.g. Supabase).
 psycopg[binary]==3.3.6
 psycopg-pool==3.3.3
+# Web Push (VAPID signing and aes128gcm payload encryption), used only when VAPID_* keys are set.
+pywebpush==2.5.0

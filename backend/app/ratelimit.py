@@ -58,6 +58,11 @@ class RateLimitSettings:
     evidence_per_complaint: Rule = Rule(10, 3600)   # authorised upload attempts per complaint
     staff_login_per_ip: Rule = Rule(5, 900)         # POST /staff/sessions
     staff_login_per_account: Rule = Rule(10, 3600)
+    inbox_per_ip: Rule = Rule(10, 3600)             # POST /notifications/inboxes
+    follow_per_ip: Rule = Rule(10, 900)             # POST /notifications/follows (claim-code check)
+    follow_per_complaint: Rule = Rule(10, 3600)
+    push_register_per_ip: Rule = Rule(30, 3600)     # POST /notifications/subscriptions
+    push_test_per_recipient: Rule = Rule(5, 3600)   # POST /notifications/test
     trusted_proxies: tuple = field(default_factory=tuple)
 
     ENV_RULES = {
@@ -69,6 +74,11 @@ class RateLimitSettings:
         "evidence_per_complaint": "CIVICLENS_RATE_EVIDENCE_COMPLAINT",
         "staff_login_per_ip": "CIVICLENS_RATE_STAFF_LOGIN_IP",
         "staff_login_per_account": "CIVICLENS_RATE_STAFF_LOGIN_ACCOUNT",
+        "inbox_per_ip": "CIVICLENS_RATE_INBOX_IP",
+        "follow_per_ip": "CIVICLENS_RATE_FOLLOW_IP",
+        "follow_per_complaint": "CIVICLENS_RATE_FOLLOW_COMPLAINT",
+        "push_register_per_ip": "CIVICLENS_RATE_PUSH_REGISTER_IP",
+        "push_test_per_recipient": "CIVICLENS_RATE_PUSH_TEST",
     }
 
     @classmethod

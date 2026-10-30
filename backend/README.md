@@ -1,6 +1,6 @@
 # Namma CivicLens — Backend
 
-**Status (Phase 3.6 + Supabase migration):** a FastAPI service backed by SQLite (default) or **PostgreSQL / Supabase Postgres**, and private evidence storage — local files (default) or a private **Supabase Storage** bucket — with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged). The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. Owners and the public cannot view uploaded evidence. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
+**Status (Phase 3.6 + Supabase migration + Web Push):** a FastAPI service backed by SQLite (default) or **PostgreSQL / Supabase Postgres**, and private evidence storage — local files (default) or a private **Supabase Storage** bucket — with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged), and sends **Web Push notifications** about complaints to citizens who follow them and to staff, with a persistent notification history. The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. Owners and the public cannot view uploaded evidence. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
 
 > **No user authentication; development-grade abuse protection only.** Anyone who can reach the server can create complaints and look them up by ID. Phase 3.5 added per-IP/per-complaint rate limits, an evidence storage quota and idempotent creation, but the limits live in one process's memory (reset on restart, not shared between workers). Before any public deployment it still needs shared rate limiting, HTTPS, abuse/spam controls and server-side authentication for anything beyond anonymous submit and public tracking.
 
@@ -28,6 +28,9 @@ backend/
     auth.py            Staff passwords (scrypt), bearer sessions, current_staff dependency
     staff.py           Staff account CLI (python -m app.staff create|list|disable|enable|set-password)
     staff_api.py       /staff routes: sign-in/out, complaint list/detail, evidence streaming, access log
+    push.py            Web Push: VAPID settings, WebPushSender (pywebpush), key generator (python -m app.push)
+    notifications.py   Notification events, history storage and push delivery/failure handling (Notifier)
+    notifications_api.py /notifications routes: config, inboxes, follows, devices, history, read state, test
     errors.py          Error envelope {"error": {"code", "message"[, "details"]}}
   tests/
     conftest.py        Gives every test its own temporary database
@@ -42,12 +45,13 @@ backend/
     test_staff.py      CLI, sign-in, sessions, revocation, projections, evidence streaming, audit log, login limits
     test_postgres.py   PostgreSQL schema, constraints, rollback, concurrency, pool, migration (real PostgreSQL)
     dbutil.py          test helper: direct SQL on whichever backend the run uses
+    test_notifications.py Web Push: ownership, follows, devices, events, history, delivery, real encryption/VAPID
     test_supabase_storage.py Supabase config, startup checks, adapter, failures, full API flow (fake HTTP; no real Supabase)
   data/                Default database and evidence location (created on first start; git-ignored)
     civiclens.sqlite3  complaints, timeline, verification log, evidence metadata
     evidence/objects/  stored files, named by random key (objects/<first 2 hex>/<32 hex>)
     evidence/tmp/      in-progress uploads (*.part), removed on failure; stale ones removed at startup
-  requirements.txt     Runtime: fastapi, uvicorn, python-multipart, storage3, psycopg, psycopg-pool (pinned)
+  requirements.txt     Runtime: fastapi, uvicorn, python-multipart, storage3, psycopg, psycopg-pool, pywebpush (pinned)
   .env.example         Environment template (no real values; .env files are git-ignored)
   requirements-dev.txt Adds pytest, httpx2 (FastAPI TestClient)
   pyproject.toml       pytest settings only
@@ -120,7 +124,7 @@ DATABASE_URL=postgresql://… .venv/Scripts/python -m app.db_migrate --sqlite da
 - **Choose another file:** set `CIVICLENS_DB_PATH`, for example `CIVICLENS_DB_PATH=/tmp/dev.sqlite3`. Code can also pass `create_app(db_path=...)`.
 - **Reset local data:** stop the server and delete the database file and its `-wal`/`-shm` companions. (This erases every stored complaint.)
 - **Git:** `data/`, `*.sqlite3`, `*.sqlite3-*`, `*.db` and journal files are ignored.
-- Journal mode is WAL; foreign keys are on; schema version is stored in `PRAGMA user_version` (currently 5). Older databases are migrated in place at startup (1 → 2 adds the upload-token columns and the `evidence` table; 2 → 3 adds `complaints.credentials_used_at` and the `idempotency_keys` table; 3 → 4 adds `staff_accounts`, `staff_sessions` and `evidence_access_log`; 4 → 5 adds `evidence.storage_backend` (`local`/`supabase`, existing rows become `local`); existing complaints are kept).
+- Journal mode is WAL; foreign keys are on; schema version is stored in `PRAGMA user_version` (currently 6). Older databases are migrated in place at startup (1 → 2 adds the upload-token columns and the `evidence` table; 2 → 3 adds `complaints.credentials_used_at` and the `idempotency_keys` table; 3 → 4 adds `staff_accounts`, `staff_sessions` and `evidence_access_log`; 4 → 5 adds `evidence.storage_backend` (`local`/`supabase`, existing rows become `local`); 5 → 6 adds the notification tables (see "Web Push notifications"); existing complaints are kept).
 
 Tables:
 
@@ -177,6 +181,7 @@ It listens on `127.0.0.1` only. The frontend keeps running separately with `npm 
 | `POST /complaints` | 5 per 10 minutes per client IP | before the handler runs (replays and refusals count too) | `CIVICLENS_RATE_CREATE=5/600` |
 | `GET /complaints/{id}` | 60 per minute per client IP | before the lookup | `CIVICLENS_RATE_TRACK=60/60` |
 | `POST /complaints/{id}/upload-token` | 5 per 15 minutes per client IP **and** 10 per hour per complaint | before the database lookup and the scrypt check | `CIVICLENS_RATE_TOKEN_IP=5/900`, `CIVICLENS_RATE_TOKEN_COMPLAINT=10/3600` |
+| Notification endpoints | see "Web Push notifications" | | `CIVICLENS_RATE_INBOX_IP`, `CIVICLENS_RATE_FOLLOW_IP`, `CIVICLENS_RATE_FOLLOW_COMPLAINT`, `CIVICLENS_RATE_PUSH_REGISTER_IP`, `CIVICLENS_RATE_PUSH_TEST` |
 | `POST /complaints/{id}/evidence` | 30 per hour per client IP (before authorisation) and 10 authorised attempts per hour per complaint | per-IP before any database or body work; per-complaint after the token is accepted, so strangers cannot use up a complaint's allowance | `CIVICLENS_RATE_EVIDENCE_IP=30/3600`, `CIVICLENS_RATE_EVIDENCE_COMPLAINT=10/3600` |
 
 Exceeding a limit returns `429` with `{"error": {"code": "rate_limited", ...}}` and a `Retry-After` header (whole seconds until the oldest counted request leaves the window). Refused requests do not extend the window. `CIVICLENS_RATE_LIMITS=off` disables all limits (used by the test suites; never in a deployment).
@@ -244,6 +249,104 @@ Sessions: `Authorization: Bearer <token>`. The token is 256-bit random; only its
 Limits of this design: one role only; no MFA, password-reset flow or lockout beyond rate limits; the access log stores the client IP (personal data, kept indefinitely for now); evidence is still not available to owners or the public; `http://` only in development, so tokens travel unencrypted on anything but localhost.
 
 The frontend's staff console is `#/staff` in backend mode (see `docs/IMPLEMENTATION_PROGRESS.md`); it keeps the token in page memory only, so reloading signs the tab out.
+
+## Web Push notifications
+
+System notifications (Windows notification centre, Android notification shade, macOS) about complaints, delivered with the standard **Web Push API**, a **service worker** (`dist/sw.js`) and **VAPID** keys, also when CivicLens is closed (where the browser keeps running in the background; see "Platform notes"). Every notification is stored first, so there is a persistent **history** with read/unread state; push is only the delivery channel. There is no separate in-app pop-up or toast channel and no Telegram integration.
+
+| Who | Receives | Link in the notification |
+| --- | --- | --- |
+| Citizens, for reports they follow | "Updates turned on" (follow confirmed), "Evidence received", "Report under review" (first time staff open the evidence) | `#/track/<id>` |
+| Every active staff account | "New complaint", "New evidence" | `#/staff/<id>` |
+| The caller | "Test notification" (button on the inbox page) | the inbox |
+
+Each event has a dedupe key, so a recipient gets it at most once (for example only the first staff view triggers "Report under review"). An idempotent replay of a complaint creation does not notify again. Notifications are created in FastAPI background tasks after the response: a notification or push failure never fails or delays the request that caused it. Bodies contain the public complaint ID and category only: never descriptions, locations, claim codes, tokens or names.
+
+### Recipients, ownership and devices
+
+- **Staff** use their normal staff session token. Disabled accounts receive nothing.
+- **Citizens** have no accounts. `POST /notifications/inboxes` creates a **notification inbox**: a random 256-bit bearer token kept in the browser's `localStorage` (only its SHA-256 hash is stored on the server). It can read and manage that inbox's notifications only; it opens no complaint or staff data. Following a complaint requires the complaint's **private claim code** (scrypt check, rate-limited like upload-token renewal), so nobody can follow someone else's report.
+- **Multiple devices:** each recipient can register up to 10 push subscriptions (`push_subscriptions`, one row per device). Registering the same browser again updates its keys instead of creating a duplicate. A staff member's phone and computer both receive staff notifications. A citizen follows a report on each device with the claim code (each device has its own inbox).
+- **Ownership:** every query is scoped to the caller's recipient; another recipient's notification or device IDs answer `404`, exactly like unknown IDs. Endpoints and keys of subscriptions are never returned by the API.
+- **Signing out** of the staff console removes that browser's staff device, so a shared computer stops receiving staff notifications.
+
+### Delivery and failure handling
+
+| Push service answer | Effect |
+| --- | --- |
+| `201` | `push_status = sent`; the device's failure count resets |
+| `404` / `410` (subscription expired or revoked) | the device is deleted immediately |
+| `429`, `5xx`, network error | counted as a failure; the device is deleted after 5 failures in a row |
+| other `4xx`, malformed keys | counted as a failure (same rule) |
+
+Per notification, `push_status` is `sent`, `partial` (some devices failed), `failed`, `no_devices` or `disabled` (no VAPID keys configured). Devices whose `expirationTime` has passed, or that reached the failure limit, are also removed at every startup. There is no retry queue: a failed delivery is not re-sent, but the notification stays in the history. Logs contain HTTP status codes only, never endpoints, keys or the push service's response body.
+
+**Endpoint allowlist (SSRF protection).** The server sends HTTP requests to subscription endpoints, so it accepts only `https` endpoints on port 443 at known push services: `fcm.googleapis.com` (Chrome, Edge on Android, Samsung Internet), `updates.push.services.mozilla.com` / `push.services.mozilla.com` (Firefox), `*.notify.windows.com` (Edge on Windows) and `*.push.apple.com` (Safari). Override with `CIVICLENS_PUSH_ENDPOINT_HOSTS` (comma-separated) if a browser uses another service.
+
+### Setup
+
+1. Generate a key pair once per deployment (keep the private key secret; changing it invalidates every existing subscription):
+
+   ```sh
+   cd backend
+   .venv/Scripts/python -m app.push generate-vapid-keys
+   ```
+
+2. Put the three values into the server environment (see `backend/.env.example`; never in Git or frontend files):
+
+   ```sh
+   VAPID_PUBLIC_KEY=<base64url, 65-byte public key>
+   VAPID_PRIVATE_KEY=<base64url, 32-byte private key>   # SECRET
+   VAPID_SUBJECT=mailto:civic-ops@example.org            # or an https:// URL; push services use it to contact you
+   # optional: CIVICLENS_PUSH_TTL_SECONDS=86400  (how long a push service keeps an undelivered message)
+   ```
+
+3. Start the API. A half-configured or mismatched key pair stops startup with a message naming the variable (the private key is never printed). Without keys, push is disabled: `GET /notifications/config` reports `pushEnabled: false`, the inbox page says so, and notifications are still stored in history.
+4. Serve the frontend over **HTTPS** (or `http://localhost` on the same computer): browsers allow service workers and push only in secure contexts. Phones on the LAN need an HTTPS address.
+
+The database tables (schema version 6: `notification_recipients`, `notification_follows`, `push_subscriptions`, `notifications`) are created automatically on SQLite and PostgreSQL / Supabase, and `python -m app.db_migrate` copies them too.
+
+### Endpoints
+
+All under `/api/v1/notifications`. Authorization: `Bearer <staff session token or citizen inbox token>` except where noted.
+
+| Method and path | Result |
+| --- | --- |
+| `GET /config` (public) | `{"pushEnabled", "vapidPublicKey"}` |
+| `POST /inboxes` (public, 10 per hour per IP) | `201 {"inboxToken"}` (shown once, `Cache-Control: no-store`) |
+| `GET ?limit=30&before=<id>&unread=true` | `{"items": [{"id", "kind", "title", "body", "url", "complaintId", "createdAt", "readAt", "read", "pushStatus"}], "unreadCount", "nextBefore"}`, newest first |
+| `GET /unread-count` | `{"unreadCount"}` |
+| `POST /{id}/read`, `POST /{id}/unread` | the updated notification (the first read time is kept); `404` if not the caller's |
+| `POST /read-all` | `{"updated", "unreadCount": 0}` |
+| `POST /subscriptions` `{"endpoint", "keys": {"p256dh", "auth"}, "expirationTime", "label"}` | `201` new device, `200` same browser registered again; `422 invalid_subscription` / `unsupported_push_service`; `409 too_many_devices` |
+| `GET /subscriptions` | `[{"subscriptionId", "label", "createdAt", "updatedAt", "lastSuccessAt", "lastFailureAt", "failureCount"}]` |
+| `DELETE /subscriptions/{subscriptionId}` | `204`; `404` if not the caller's |
+| `POST /follows` `{"complaintId", "claim"}` (citizens) | `201` and a confirmation notification; `200` if already followed; `401` wrong claim code; `403` for staff; `409 too_many_follows` (50) |
+| `GET /follows`, `DELETE /follows/{publicId}` (citizens) | follow list / `204` |
+| `POST /test` (5 per hour per recipient) | `202`; stores a test notification and pushes it to the caller's devices |
+
+New rate limits: `CIVICLENS_RATE_INBOX_IP=10/3600`, `CIVICLENS_RATE_FOLLOW_IP=10/900`, `CIVICLENS_RATE_FOLLOW_COMPLAINT=10/3600`, `CIVICLENS_RATE_PUSH_REGISTER_IP=30/3600`, `CIVICLENS_RATE_PUSH_TEST=5/3600`.
+
+### Frontend
+
+- `#/notifications` (server mode): turn push on or off for this device, send a test, follow reports with ID and claim code, history with unread count, mark read/unread and "mark all as read", registered devices. The server receipt page offers **Notify me about this report**, and the tracking page links to the follow form. A device that already has notifications on follows its new reports automatically.
+- `#/staff/notifications`: the same inbox for the signed-in staff member; the staff header shows the unread count.
+- Permission is requested only after a click, never on page load. Blocked permission, unsupported browsers and an unconfigured server each get an explanation.
+- Clicking a notification focuses an open CivicLens window and routes it (without reloading, so a staff session survives), or opens a new window; the notification is then marked read. Links outside the app are refused by the service worker and the API client.
+- The service worker handles push only: it does not cache pages or intercept requests.
+
+### Platform notes
+
+- **Windows:** Edge and Chrome show notifications in the Windows notification centre. Background delivery while all windows are closed needs the browser to keep running in the background (Edge: "Continue running background extensions and apps when Microsoft Edge is closed"; Chrome: "Continue running background apps"); otherwise notifications arrive the next time the browser starts (within the TTL).
+- **Android:** Chrome, Edge and Samsung Internet deliver push when the browser is closed; Android may delay delivery in battery-saving modes.
+- **iPhone/iPad:** Web Push works only after "Add to Home Screen" (iOS 16.4+); there is no web app manifest yet, so this is untested.
+- Push requires HTTPS for phones (a plain `http://` LAN address will not work).
+
+### Testing
+
+- `tests/test_notifications.py` (51): configuration, ownership and authorisation, follows, devices, validation and the endpoint allowlist, events and dedupe, history paging and read state, delivery outcomes, cleanup and failure isolation, against a fake push sender. `WebPushSender` itself is tested against a fake push service: the captured request is **decrypted with the subscriber's private key** and its **VAPID signature verified**, so real encryption and signing run. The whole file also runs on PostgreSQL (`CIVICLENS_TEST_DATABASE=postgres`).
+- `tests/notifications.test.js`, `tests/notification-gateway.test.js` (frontend, Node): the API client, `push-client.js` (permission, subscribe, VAPID key change, disable, click handling) and `sw.js` loaded in a sandbox (push display, hostile payloads, click focus/open).
+- `scripts/notifications-e2e.mjs`: a real browser (Edge by default) with temporary profiles, a real push subscription and **real delivery through the browser vendor's push service** to the service worker, history UI, read/unread, click navigation, two staff devices and sign-out cleanup. Needs the dev server, the API with VAPID keys and a staff account; see the file header.
 
 ## Supabase Storage evidence storage
 
@@ -541,4 +644,4 @@ A failed create rolls back completely: no half-written complaint is left behind.
 
 ## Not included yet
 
-Authentication and sessions, shared (multi-process) rate limiting, claiming complaints, staff operations, repairs, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), staff case updates and work orders on the server, more staff roles, MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.
+Authentication and sessions, shared (multi-process) rate limiting, claiming complaints, staff operations, repairs, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), staff case updates and work orders on the server, more staff roles, MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (staff case updates do not exist yet), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.

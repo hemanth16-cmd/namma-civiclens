@@ -4,7 +4,7 @@ Persistent handoff document across Claude Code sessions. Update it at the end of
 
 Labels: **[verified]** = observed directly in this workspace with the evidence noted; **[unverified]** = claimed by docs or assumed, not yet checked; **[proposed]** = designed or documented only, not built.
 
-Last updated: 2026-10-30 (database: SQLite → PostgreSQL / Supabase Postgres; storage: Cloudflare R2 → private Supabase Storage; branch `s3-integration`).
+Last updated: 2026-10-30 (Web Push notifications on branch `web-notifications`, created from `s3-integration` at `f49d30f`; earlier the same day: SQLite → PostgreSQL and Cloudflare R2 → Supabase Storage on `s3-integration`).
 
 ## 1. Project objective and current architecture
 
@@ -23,6 +23,7 @@ Current architecture **[verified by inspection]**:
 - **Abuse protection (Phase 3.5) [verified]**: in-process sliding-window rate limits on all anonymous endpoints (429 + Retry-After), forwarded headers trusted only from configured proxies, 2 GB evidence quota with reservations (507), `Idempotency-Key` on complaint creation (schema version 3), and a read-only-by-default evidence audit command. The API is started with `python -m app` (uvicorn proxy headers off).
 - **Staff console (Phase 3.6) [verified]**: server staff accounts (CLI, scrypt, no default account), bearer sessions held in page memory (8 h, hash stored), `/api/v1/staff` list/detail, evidence streamed only to signed-in staff with every view logged (schema version 4), and a `#/staff` console in backend mode. Local-mode workspaces are unchanged; owners and the public still cannot view uploaded evidence.
 - **PostgreSQL database (branch `s3-integration`) [verified against a real local PostgreSQL 15; Supabase Postgres unverified]**: `DATABASE_BACKEND=sqlite|postgres` with `DATABASE_URL`. `app/db.py` hides the driver differences (psycopg 3 connection pool, `?` placeholders translated, `RETURNING` ids, row locks instead of `BEGIN IMMEDIATE`, schema version table plus advisory lock). Same tables, constraints and foreign keys as SQLite schema 5. `python -m app.db_migrate` copies an existing SQLite database into PostgreSQL (dry run by default, source never modified, validated, rerun-safe). SQLite stays the default.
+- **Web Push notifications (branch `web-notifications`) [verified: automated suites, plus real push delivery through Windows Push Notification Services to Microsoft Edge on this Windows PC; Android and on-screen Windows toasts not observed]**: VAPID Web Push with a service worker (`dist/sw.js`), persistent notification history with read/unread and unread counts, multiple devices per recipient, citizen inboxes (device token) that follow complaints with the claim code, staff notifications for new complaints and evidence, delivery-failure handling and expired-subscription cleanup, click navigation. Schema version 6. See `backend/README.md` → "Web Push notifications".
 - **Supabase Storage evidence storage (branch `s3-integration`) [verified with a fake Supabase HTTP API only]**: `EVIDENCE_STORAGE_BACKEND=local|supabase`. `SupabaseEvidenceStorage` (official `storage3` client, service-role key in the backend only) implements the existing `EvidenceStorage` interface against a private bucket; startup refuses a public bucket. Each evidence row records its backend (schema version 5), so local evidence stays readable after switching. Evidence is still streamed through the staff-only API (no public or signed URLs). The earlier Cloudflare R2 adapter was removed. **Not yet tested against a real Supabase project.**
 
 Future architecture **[proposed]**: the rest of the FastAPI complaint API, PostGIS, background workers (`docs/ARCHITECTURE.md` §5, `docs/api-contract.md`). None of that exists yet beyond the three endpoints above.
@@ -32,7 +33,9 @@ Future architecture **[proposed]**: the rest of the FastAPI complaint API, PostG
 | Item | Value | Status |
 | --- | --- | --- |
 | Remote | `https://github.com/hemanth16-cmd/namma-civiclens.git` | [verified] |
-| Current branch | `s3-integration` (created by the user; work happens only here) | [verified] |
+| Current branch | `web-notifications`, created by Claude (with the user's authorisation) from `s3-integration` at `f49d30f` ("feat: integrate Supabase database and S3 evidence storage", committed and pushed by the user). No upstream set; nothing committed or pushed on it | [verified] |
+| `develop` | Still at `29e5bbc`: the infrastructure merge into `develop` had not happened; the user said to skip that prerequisite and start notifications | [verified] |
+| Earlier branch | `s3-integration` (database and storage migrations) | [verified] |
 | History | `a40afe6` initial commit → `043a0cf` Phase 3.6 handoff → `29e5bbc` merge of PR #1 into `main`; `s3-integration` starts at `29e5bbc` | [verified] |
 | Working tree at start of the R2 task | Clean | [verified] |
 | Commits/pushes by Claude | None. The user reviews and commits. | [verified] |
@@ -87,6 +90,16 @@ backend/               FastAPI service; see backend/README.md
   tests/test_evidence.py 52 tests
   tests/test_ratelimit.py 16, test_quota.py 10, test_idempotency.py 18, test_evidence_audit.py 8, test_staff.py 30, test_supabase_storage.py 40, test_postgres.py 16 (real PostgreSQL; skipped without one)
   tests/dbutil.py      direct SQL helper for SQLite or the PostgreSQL test schema
+  app/push.py          PushSettings (VAPID env), WebPushSender (pywebpush), python -m app.push generate-vapid-keys
+  app/notifications.py Notifier: events, dedupe, history storage, push delivery and failure handling
+  app/notifications_api.py /notifications: config, inboxes, follows, subscriptions, history, read state, test
+  tests/test_notifications.py 51 tests (fake sender; real encryption + VAPID signature checked against a fake push service)
+dist/ (Web Push)
+  sw.js                service worker: push → system notification, notificationclick → focus/route or open
+  push-client.js       permission, subscribe/unsubscribe, citizen inbox token, launch/click handling
+  views/notifications.js inbox UI (#/notifications, #/staff/notifications)
+  icons/               notification icon and Android badge
+tests/notifications.test.js, tests/notification-gateway.test.js (17 + 4); scripts/notifications-e2e.mjs (real browser, real push service)
   requirements.txt, requirements-dev.txt, pyproject.toml, .gitignore, README.md
   data/                default SQLite location (git-ignored; created on first server start)
   .env.example         environment template (tracked; real .env files are git-ignored)
@@ -151,6 +164,12 @@ Verified in this workspace means "unit tests pass" or "observed in the running a
 | Supabase adapter: upload with `upsert: false`, content type, `no-store`, SHA-256 metadata; size confirmation (mismatch → object deleted); streamed reads; exists/delete; usage by paged listing; staged temp files always removed | pytest (fake Supabase HTTP API) | [verified — simulated] |
 | Supabase through the API: upload 201 with `storage_backend = 'supabase'` and nothing on local disk; staff view streams identical bytes and writes the audit log; anonymous 401, no log; responses expose no key, bucket or object name; idempotent retry 200 / different file 409; outage → 503, no row, quota released; **database failure after upload → object deleted** (compensation); missing object → 503, no log; local evidence readable after switching; local mode never contacts Supabase | pytest (full app, fake Supabase HTTP API) | [verified — simulated] |
 | Real Supabase project (Postgres connection, Storage uploads and retrievals) | — | **[unverified]** — no real project or credentials were used |
+| Web Push API: config, citizen inboxes (hashed tokens), follows with claim code, devices (validated keys, endpoint allowlist, no duplicates, limit 10), history with cursor paging, read/unread/read-all, unread count, test notification, per-recipient ownership (404 for others) | `tests/test_notifications.py` on SQLite and PostgreSQL | [verified] |
+| Web Push events: staff get new complaint / new evidence (disabled staff excluded); followers get follow confirmed / evidence received / first staff evidence view (deduplicated); idempotent replay does not notify again; payloads carry no private data | pytest | [verified] |
+| Web Push delivery: 201 → sent; 404/410 → device deleted; 429/5xx/network/other 4xx → failure counted, device deleted after 5 in a row; partial/failed/no_devices/disabled status; expired subscriptions pruned at startup; notification or sender failures never break the triggering request | pytest | [verified] |
+| WebPushSender: aes128gcm payload decrypts with the subscriber's private key; VAPID JWT signature verifies with the public key (aud, sub, exp checked); status mapping | pytest against a fake push service | [verified] |
+| Frontend Web Push: permission only on click (denied/dismissed/unsupported/unconfigured explained), subscribe with VAPID key, key change re-subscribes, disable keeps the browser subscription while another audience uses it, click handling and launch URL, unsafe links refused (API client and service worker) | `tests/notifications.test.js`, `tests/notification-gateway.test.js` | [verified] |
+| Real browser + real push service (Windows): Edge 'new headless' with temporary profiles: SW registered, real WNS subscription (`*.notify.windows.com`), pushes delivered via WNS and shown by the service worker (follow confirmation, evidence received, test, new complaint to two staff devices), history refreshes on arrival, read/unread, notificationclick routes the open window and marks read, launch URL marks read, turn-off removes server device and browser subscription, staff sign-out removes that device | `scripts/notifications-e2e.mjs` 36/36 | [verified — Windows, Edge; notifications read back with `getNotifications()`, toasts on screen not observed] |
 | Backend OpenAPI schema and Swagger UI at `/api/v1/openapi.json`, `/api/v1/docs` | pytest + browser pane listed `/api/v1/health` | [verified] |
 | Camera/location journeys with Chromium's synthetic camera: auto-start, visible preview, track release, capture at 1920×1080, video record, denial + retry, switching, location timeout/refinement, insecure-HTTP messaging (via LAN address), 375 px and 320 px layouts | `npm run e2e:camera` 48/48 | [verified — synthetic camera and injected positions only] |
 
@@ -165,7 +184,9 @@ Verified in this workspace means "unit tests pass" or "observed in the running a
 | Priority queue, knowledge graph, Fuzzy Cognitive Map, Monte Carlo scenario lab | Illustrative demo (per docs; not measurement) |
 | Hotspot prediction, road-damage / waste detection AI | [proposed] — adapters report unavailable |
 | Duplicate/recurrence suggestions | [proposed] — only recurrence counters exist |
-| Telegram / push notifications | [proposed] — no integration in code |
+| Web Push on Android phones; Windows toasts actually appearing in the notification centre; background delivery with every browser window closed; Chrome and Firefox desktop | **[unverified]** — no physical phone used; Windows delivery verified to the service worker in headless Edge only (see §4) |
+| Telegram | [proposed] — not built (excluded from the Web Push task by the user) |
+| Notifications for case status changes | [proposed] — staff case updates do not exist on the server yet |
 | Claim/ownership, staff operations, repairs, citizen responses, reviews, map queries, media upload endpoints | [proposed] — not built |
 | Rate limiting, abuse protection, request-size limits for anonymous create/tracking | [proposed] — **not built; required before any public deployment** |
 | Evidence viewing for owners or the public | [proposed] — only signed-in staff can view (Phase 3.6) |
@@ -214,13 +235,14 @@ Test results (2026-10-30):
 - **Phase 3.6 (final run)**: backend pytest **200 passed** (170 + 30 staff); `npm test` **100/100** (91 + 9 in `tests/staff.test.js`); `npm run check` **38 files**; `npm run e2e` **56/56**; `npm run e2e:camera` **48/48**; `node scripts/backend-e2e.mjs` **66/66** with a CLI-created staff account (scratch DB + evidence dir, API via `python -m app`). The staff password did not appear in the e2e or server logs. [verified]
 - **R2 task baseline (start, branch `s3-integration`)**: backend 200, `npm test` 100/100, `npm run check` 38 files. [verified]
 - **R2 task (final run)**: backend pytest **242 passed** (200 + 42 in `tests/test_r2_storage.py`); `npm test` **100/100**; `npm run check` **38 files**; `npm run e2e` **56/56**; `npm run e2e:camera` **48/48**; `node scripts/backend-e2e.mjs` **66/66** (API in local mode, scratch DB migrated to schema 5, all rows `local`). `pip check` clean. No real Cloudflare calls. [verified]
+- **Web Push task (final run, branch `web-notifications`)**: backend pytest with a real local PostgreSQL **308 passed**; whole suite on PostgreSQL **302 passed, 6 skipped**; without PostgreSQL **291 passed, 17 skipped**; `npm test` **121/121** (100 + 17 + 4); `npm run check` **44 files**; `npm run e2e` **56/56**; `npm run e2e:camera` **48/48**; `node scripts/backend-e2e.mjs` **66/66**; `node scripts/notifications-e2e.mjs` **36/36** (Edge, real WNS delivery). Mutations caught: endpoint allowlist off, read state ignoring the owner, dedupe removed, 410 not deleting, review event removed, pushing to every recipient's devices, unsafe links in the client, service worker using another site's window, permission never requested. [verified]
 - **Supabase Storage + PostgreSQL tasks (final run, branch `s3-integration`)**: backend pytest with a real local PostgreSQL **256 passed** (SQLite suite + 16 PostgreSQL tests); whole suite on PostgreSQL (`CIVICLENS_TEST_DATABASE=postgres`) **250 passed, 6 skipped** (SQLite-only mechanics); without PostgreSQL **240 passed, 16 skipped**; `npm test` **100/100**; `npm run check` **38 files**; `npm run e2e` **56/56**; `npm run e2e:camera` **48/48**; `node scripts/backend-e2e.mjs` **66/66** against the API on PostgreSQL. No real Supabase calls. [verified]
 - **Phase 3.2 frontend re-run**: `npm test` 41/41, `npm run check` 28 files, `npm run e2e` 56/56, `npm run e2e:camera` 48/48 — all exit 0. The e2e run printed one browser console error (MapLibre: OpenFreeMap sprite request aborted); see §9. [verified]
 - No failures in either suite. One log line ("This photo does not contain GPS location data, ") is the multi-line detail text of a passing gallery-rejection check, not an error.
 
 ## 7. Current implementation phase
 
-Step 3 — backend implementation. **Phase 3.1 (FastAPI foundation): complete. Phase 3.2 (persistent complaint API on SQLite): complete. Phase 3.3 (opt-in frontend integration): complete. Phase 3.4 (secure evidence upload): complete. Phase 3.5 (rate limiting, quota, idempotency, orphan audit): complete. Phase 3.6 (staff accounts, staff console, private evidence viewing): complete.** On branch `s3-integration`: **SQLite → PostgreSQL (Supabase Postgres) implemented and verified against a real local PostgreSQL; Cloudflare R2 replaced by private Supabase Storage, verified against a fake Supabase HTTP API. Real Supabase project verification pending (needs the user's credentials).** Next: §10.
+Step 3 — backend implementation. **Phase 3.1 (FastAPI foundation): complete. Phase 3.2 (persistent complaint API on SQLite): complete. Phase 3.3 (opt-in frontend integration): complete. Phase 3.4 (secure evidence upload): complete. Phase 3.5 (rate limiting, quota, idempotency, orphan audit): complete. Phase 3.6 (staff accounts, staff console, private evidence viewing): complete.** On branch `s3-integration`: **SQLite → PostgreSQL (Supabase Postgres) implemented and verified against a real local PostgreSQL; Cloudflare R2 replaced by private Supabase Storage, verified against a fake Supabase HTTP API. Real Supabase project verification pending (needs the user's credentials).** On branch `web-notifications`: **Web Push notifications implemented and tested (automated, plus real push delivery on Windows/Edge); Android and on-screen Windows verification pending.** Next: §10.
 
 Step 2 — environment verification and baseline testing: complete.
 
@@ -374,6 +396,17 @@ The user replaced the R2 target with Supabase Storage. Nothing from R2 was commi
 
 Files created (both tasks): `backend/app/db.py`, `backend/app/db_migrate.py`, `backend/app/supabase_storage.py`, `backend/tests/dbutil.py`, `backend/tests/test_postgres.py`, `backend/tests/test_supabase_storage.py`. Modified: `backend/app/evidence.py`, `backend/app/evidence_audit.py`, `backend/app/evidence_storage.py`, `backend/app/main.py`, `backend/app/staff.py`, `backend/app/staff_api.py`, `backend/app/store.py`, `backend/requirements.txt`, `backend/requirements-dev.txt`, `backend/tests/conftest.py`, `backend/tests/test_complaints.py`, `backend/tests/test_evidence.py`, `backend/tests/test_evidence_audit.py`, `backend/tests/test_idempotency.py`, `backend/tests/test_staff.py`, `backend/.env.example`, `backend/.gitignore`, `backend/README.md`, `docs/api-contract.md`, this file. Removed: `backend/app/r2_storage.py`, `backend/tests/test_r2_storage.py`. Frontend, `package.json` and the lockfile unchanged.
 
+**Web Push task (branch `web-notifications`)**
+
+Prerequisites: the user committed and pushed `s3-integration` (`f49d30f`); `develop` was not updated, and the user said to skip that merge. Claude created `web-notifications` from `s3-integration` (no upstream; nothing pushed).
+
+1. **Schema 6** (SQLite migration 6, `POSTGRES_MIGRATIONS[6]`; PostgreSQL base schema stays 5): `notification_recipients` (staff account or hashed citizen inbox token, CHECK enforces exactly one), `notification_follows`, `push_subscriptions` (unique per recipient and endpoint), `notifications` (unique dedupe key per recipient). Added to the migration tool's table and foreign-key lists (nullable references are not orphans). [verified]
+2. **Backend**: `push.py` (VAPID settings validated at startup, key generator, `WebPushSender` with status mapping, logs without endpoints or response bodies), `notifications.py` (events, dedupe, delivery, failure counting), `notifications_api.py` (routes; bearer = staff session or citizen inbox). Events from `complaints.py`, `evidence.py`, `staff_api.py` run as background tasks. Five new rate limits. [verified]
+3. **Frontend**: `sw.js`, `push-client.js`, `views/notifications.js`, receipt "Notify me about this report", auto-follow on devices with notifications on, track-page link, staff inbox and unread badge, staff sign-out removes the device, click handling in `app.js`, styles, icons. [verified]
+4. **Found while testing**: Playwright's ephemeral contexts and open-source Chromium cannot register for push (no push service credentials / incognito), so the e2e uses Edge with persistent temporary profiles; the service worker now posts the click message before focusing (focus can be refused). Earlier PostgreSQL migration fixture needed the new tables populated. [verified]
+
+Files created: `backend/app/push.py`, `backend/app/notifications.py`, `backend/app/notifications_api.py`, `backend/tests/test_notifications.py`, `dist/sw.js`, `dist/push-client.js`, `dist/views/notifications.js`, `dist/icons/notification-192.png`, `dist/icons/notification-badge-96.png`, `tests/notifications.test.js`, `tests/notification-gateway.test.js`, `scripts/notifications-e2e.mjs`. Modified: `backend/app/store.py`, `backend/app/main.py`, `backend/app/models.py`, `backend/app/ratelimit.py`, `backend/app/complaints.py`, `backend/app/evidence.py`, `backend/app/staff_api.py`, `backend/app/db_migrate.py`, `backend/requirements.txt` (pywebpush 2.5.0), `backend/tests/conftest.py`, `backend/tests/test_evidence.py`, `backend/tests/test_postgres.py`, `backend/.env.example`, `backend/README.md`, `dist/api-client.js`, `dist/app.js`, `dist/report-gateway.js`, `dist/style.css`, `dist/views/capture.js`, `dist/views/public.js`, `dist/views/staff.js`, `docs/api-contract.md`, this file. `package.json` and the lockfile unchanged.
+
 ## 9. Known issues and blockers
 
 1. **Playwright is not part of the project (by decision, see §11).** Each session that runs e2e must install it outside the repo first. Steps (Git Bash; any folder outside the repo works):
@@ -416,6 +449,11 @@ Files created (both tasks): `backend/app/db.py`, `backend/app/db_migrate.py`, `b
 33. **Free-plan file size cap (50 MB)** is below the default 200 MB video limit; set `CIVICLENS_MAX_VIDEO_BYTES` accordingly or startup refuses a bucket whose limit is lower.
 34. **Timestamps stay ISO text in PostgreSQL** (not `timestamptz`) to keep API output identical to SQLite; date queries on the server would need a later migration.
 35. **The migration tool copies data only**: it does not move evidence files, and it expects the PostgreSQL target to be empty or contain only matching rows (conflicts stop it).
+36. **Web Push real-device status**: delivery through WNS to Edge on this Windows PC was verified (headless, read back from the service worker); toasts in the Windows notification centre, background delivery with Edge fully closed, Chrome/Firefox desktop and Android phones were not tested. Phones need the frontend over HTTPS.
+37. **Citizen inbox token in localStorage**: needed so history and push survive closing the browser; it grants access to that device's notifications only (complaint IDs and short texts), but any script running on the page could read it. Clearing site data loses the inbox (follow again with the claim code).
+38. **No push retry queue**: a failed delivery is not re-sent (history keeps it). Subscriptions the browser rotates (`pushsubscriptionchange`) are re-registered only when a CivicLens page is open.
+39. **No notification preferences and no case-status events yet**; staff receive every new complaint and evidence notification (fine for a pilot, noisy at scale). Disabled staff are excluded, but a staff browser keeps its device until sign-out, a failed delivery or removal.
+40. **Open-source Chromium (and Playwright's ephemeral contexts) cannot subscribe**; use Edge, Chrome, Firefox or Samsung Internet. A browser on an unlisted push service is refused until its host is added to `CIVICLENS_PUSH_ENDPOINT_HOSTS`.
 18. **Evidence lifetime in the browser:** the upload context (token, claim code, Blob) lives only in memory while the receipt is open. After a reload or leaving the page, a failed upload cannot be retried from the UI (the complaint and local copy remain; a "retry with claim code" form is not built).
 19. **No malware scanning, transcoding or server-side EXIF re-parsing.** Only the leading signature is checked; a file with a valid header and arbitrary content is stored as-is (never executed or served).
 20. **Orphan files after a crash:** a crash between the atomic rename and the database insert can leave an unreferenced file in `objects/`; no reconciliation job exists. No backups of the database or evidence folder.
@@ -424,14 +462,17 @@ Files created (both tasks): `backend/app/db.py`, `backend/app/db_migrate.py`, `b
 
 ## 10. Next actions (priority order)
 
-**Next exact step: connect a real Supabase project and verify both migrations manually** (needs the user's Supabase project; see `backend/README.md` → "Database" and "Supabase Storage evidence storage"):
+**Next exact step: review and commit `web-notifications` (the user handles Git), then verify Web Push on real devices** (see `backend/README.md` → "Web Push notifications"):
 
-1. Create a private bucket; copy the project URL, the service-role (secret) key and the Postgres connection string (add `?sslmode=require`).
-2. Set `DATABASE_BACKEND=postgres`, `DATABASE_URL`, `EVIDENCE_STORAGE_BACKEND=supabase`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET` in the server environment (never in a committed file) and start `python -m app`.
-3. Submit a report with a photo and a short video in backend mode; confirm rows in the Supabase table editor and objects under `evidence/` in the bucket; view both in `#/staff`; check the access log; record the result here.
-4. Only with the user's approval: run `python -m app.db_migrate --sqlite <file>` (dry run), review, then `--execute`.
+1. Generate VAPID keys (`python -m app.push generate-vapid-keys`) and set them in the API environment; serve the frontend over HTTPS for phones.
+2. Windows: in Edge or Chrome, open `#/notifications`, turn notifications on, send a test; confirm the toast in the notification centre; close every browser window and trigger an event (e.g. staff open a followed report's evidence); confirm delivery and that clicking opens the report.
+3. Android: the same in Chrome over HTTPS, with the browser closed and the screen off.
+4. Staff: sign in on a phone and a computer, turn on notifications on both, submit a report, confirm both receive "New complaint"; sign out on one and confirm it stops.
+5. Record results here, separately from the automated results.
 
-After that: Phase 3.7 server-side case management (status, team, public updates, work orders with audit) as previously proposed; Web Push notifications (deliberately not started until both migrations are verified); optional Supabase orphan audit and a reviewed local → Supabase evidence migration; resident accounts; retention policies; shared rate limiting; PostGIS; HTTPS deployment.
+Still pending from the infrastructure work: merge `s3-integration` into `develop` (the user skipped it for now) and connect a real Supabase project (database URL, private bucket, service-role key), then run the migration tool only with the user's approval.
+
+After that: Phase 3.7 server-side case management (which also enables case-status notifications), notification preferences, resident accounts, retention policies, shared rate limiting, PostGIS, HTTPS deployment.
 
 Still outstanding (not blocking): physical-device camera/GPS/upload testing over HTTPS (including Safari MP4); Node 20 / Windows glob check.
 
@@ -494,6 +535,11 @@ Still outstanding (not blocking): physical-device camera/GPS/upload testing over
 - **Service-role key, no storage policies, private bucket enforced at startup.** Reason: only the backend touches the bucket; staff authorisation and audit stay in FastAPI.
 - **psycopg 3 with a thin `db.py` layer, no ORM.** Reason: keeps the existing hand-written SQL and behaviour; one place handles placeholder and transaction differences.
 - **Timestamps kept as ISO text in PostgreSQL.** Reason: byte-identical API output and a trivial data migration; native timestamps can come later.
+- **Web Push with VAPID via pywebpush, no Firebase SDK.** Reason: standards-based, works with every browser push service (FCM, Mozilla, WNS, Apple) and needs no third-party account; payloads are end-to-end encrypted.
+- **History first, push second; events in background tasks.** Reason: a notification is never lost because a device is offline, and a push or database problem never fails the citizen's or staff member's request.
+- **Citizen inbox tokens + claim-code follows instead of accounts.** Reason: there are no resident accounts on the server yet; the claim code already proves ownership of a report, and the inbox token grants nothing beyond notifications.
+- **Endpoint allowlist.** Reason: the server makes HTTP requests to client-supplied URLs; limiting them to known push services prevents server-side request forgery.
+- **Service worker does push only (no caching).** Reason: avoids changing the app's loading behaviour and stale-cache risks; offline support is a separate decision.
 - **Migration tool: dry run default, read-only source, one transaction, validation, conflicts stop.** Reason: the user must approve any real migration, and a partial or silent overwrite must be impossible.
 - **Backend recorded per evidence row (schema 5) rather than one global setting.** Reason: switching backends must not strand existing evidence; no automatic migration.
 - **Streaming retrieval kept; no presigned URLs.** Reason: preserves staff-only access and view-level audit logging, and avoids shareable bearer links and bucket CORS; cost is API bandwidth.
@@ -614,4 +660,15 @@ Still outstanding (not blocking): physical-device camera/GPS/upload testing over
 | `DATABASE_BACKEND=postgres … python -m app --port 8010` + `backend-e2e.mjs` | 66/66; port 8000 was taken by another local project, left alone |
 | `npm test`; `npm run check`; `npm run e2e`; `npm run e2e:camera` | 100/100; 38 files; 56/56; 48/48 |
 
-Working tree now (branch `s3-integration`): modified `backend/.gitignore`, `backend/README.md`, `backend/app/evidence.py`, `backend/app/evidence_audit.py`, `backend/app/evidence_storage.py`, `backend/app/main.py`, `backend/app/staff.py`, `backend/app/staff_api.py`, `backend/app/store.py`, `backend/requirements.txt`, `backend/requirements-dev.txt`, `backend/tests/conftest.py`, `backend/tests/test_complaints.py`, `backend/tests/test_evidence.py`, `backend/tests/test_evidence_audit.py`, `backend/tests/test_idempotency.py`, `backend/tests/test_staff.py`, `docs/api-contract.md`, `docs/IMPLEMENTATION_PROGRESS.md`; untracked `backend/.env.example`, `backend/app/db.py`, `backend/app/db_migrate.py`, `backend/app/supabase_storage.py`, `backend/tests/dbutil.py`, `backend/tests/test_postgres.py`, `backend/tests/test_supabase_storage.py`. No commits or pushes by Claude. `package.json` and the lockfile unchanged.
+| **Web Push task (branch `web-notifications`)** | |
+| `git fetch --all --prune`; `git branch -a -vv`; `git merge-base --is-ancestor f49d30f origin/develop` | `s3-integration` = `origin/s3-integration` = `f49d30f`; `develop` = `29e5bbc` (does NOT contain it); tree clean |
+| `git switch -c web-notifications s3-integration` (user authorised; told to skip the develop merge) | branch created at `f49d30f`; no upstream |
+| `pip install pywebpush` (venv) | pywebpush 2.5.0 (py-vapid 1.9.6, http-ece 1.2.1, aiohttp 3.14.5 …); `pip check` clean |
+| `pytest tests/test_notifications.py` | 51 passed (after fixing 3 test/mapping issues: CLI flag, idempotent body reuse, key errors → rejected) |
+| `test_postgres.py` after schema 6 | 4 errors: the migration fixture requires every table populated → fixture now follows and registers a device → 17 passed (incl. new 5 → 6 upgrade test) |
+| Push probes: headless shell / Chromium / Edge, ephemeral vs persistent profile | ephemeral: "Registration failed - permission denied" everywhere; persistent: Chromium `jmt17.google.com`, Edge `wns2-pn1p.notify.windows.com` |
+| `node scripts/notifications-e2e.mjs` (API on 8010 with throwaway VAPID keys, SQLite scratch DB, Edge headless) | 36/36; API log contains no VAPID private key, staff password, endpoints, keys or bearer tokens |
+| `npm run e2e`; `npm run e2e:camera`; `backend-e2e.mjs` (same API) | 56/56; 48/48; 66/66 |
+| Full backend (3 modes); `npm test`; `npm run check` | 308; 302 + 6 skipped; 291 + 17 skipped; 121/121; 44 files |
+
+Working tree now (branch `web-notifications`): see the Web Push task file list in §8 (modified and new files, all uncommitted). No commits or pushes by Claude. `package.json` and the lockfile unchanged.

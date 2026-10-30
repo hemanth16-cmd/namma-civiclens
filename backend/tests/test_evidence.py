@@ -469,13 +469,14 @@ def test_version_1_database_is_migrated_in_place(tmp_path):
     store.initialize()
     store.initialize()  # idempotent
     with closing(dbutil.connect(db)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
         columns = {r[1] for r in conn.execute("PRAGMA table_info(complaints)")}
         assert {"upload_token_hash", "upload_token_expires_at", "credentials_used_at"} <= columns
         assert conn.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == 0
         evidence_columns = {r[1]: r for r in conn.execute("PRAGMA table_info(evidence)")}
         assert evidence_columns["storage_backend"][4] == "'local'", "existing evidence defaults to local storage"
-        for table in ("staff_accounts", "staff_sessions", "evidence_access_log"):
+        for table in ("staff_accounts", "staff_sessions", "evidence_access_log", "notification_recipients", "notification_follows",
+                      "push_subscriptions", "notifications"):
             assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
     assert store.get("NCL-2026-OLD001")["category"] == "Potholes"

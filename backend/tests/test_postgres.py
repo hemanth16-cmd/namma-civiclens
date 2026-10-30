@@ -20,9 +20,10 @@ from app.db import DatabaseConfigError, PostgresDatabase, SQLiteDatabase, databa
 from app.db_migrate import main as migrate_cli
 from app.db_migrate import migrate
 from app.main import create_app
-from app.store import SCHEMA, SCHEMA_VERSION, TABLES, ComplaintStore, StoreError
+from app.store import POSTGRES_BASE_VERSION, POSTGRES_SCHEMA, SCHEMA, SCHEMA_VERSION, TABLES, ComplaintStore, StoreError
 from tests.test_complaints import payload
 from tests.test_evidence import JPEG
+from tests.test_notifications import subscription
 
 pytestmark = pytest.mark.postgres
 PASSWORD = "correct horse battery"
@@ -112,6 +113,30 @@ def test_schema_initialisation(pg_store, pg_url):
     assert identity == [("YES", "BY DEFAULT")]
     indexes = {r[0] for r in pg_query(pg_url, "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()")}
     assert {"complaint_timeline_by_complaint", "verification_log_by_complaint", "evidence_access_by_evidence"} <= indexes
+
+    identity = pg_query(pg_url, "SELECT table_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() "
+                                "AND column_name IN ('pk', 'recipient_pk', 'complaint_pk') AND table_name IN "
+                                "('notification_recipients', 'notification_follows', 'push_subscriptions', 'notifications')")
+    assert identity and all(t == "bigint" for _, t in identity)
+
+
+def test_version_5_postgres_database_is_upgraded_in_place(pg_url):
+    """A database created before notifications (schema 5) gains the notification tables and keeps its data."""
+    db = PostgresDatabase(pg_url)
+    try:
+        db.apply_schema(POSTGRES_SCHEMA, {}, POSTGRES_BASE_VERSION)
+        old = ComplaintStore(database=db)
+        record, _ = old.create(payload(capturedAt=None))
+        assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(5,)]
+        ComplaintStore(database=db).initialize()
+        assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)] == [(6,)]
+        assert old.get(record["id"])["id"] == record["id"]
+        for table in ("notification_recipients", "notification_follows", "push_subscriptions", "notifications"):
+            assert pg_query(pg_url, f"SELECT COUNT(*) FROM {table}") == [(0,)]
+        with pytest.raises(psycopg.errors.CheckViolation):
+            pg_query(pg_url, "INSERT INTO notification_recipients (kind, created_at) VALUES ('citizen', 'z')")
+    finally:
+        db.close()
 
 
 def test_initialisation_is_idempotent_and_safe_concurrently(pg_url):
@@ -244,6 +269,11 @@ def populated_sqlite(isolated_db_path, evidence_dir):
         store.create_staff("asha", "Asha", auth.hash_password(PASSWORD))
         receipts = [client.post("/api/v1/complaints", json=payload(), headers={"Idempotency-Key": "k" * 40}).json(),
                     client.post("/api/v1/complaints", json=payload(category="Water leakage")).json()]
+        inbox = client.post("/api/v1/notifications/inboxes").json()["inboxToken"]
+        citizen = {"Authorization": f"Bearer {inbox}"}
+        assert client.post("/api/v1/notifications/follows", json={"complaintId": receipts[0]["id"], "claim": receipts[0]["claim"]},
+                           headers=citizen).status_code == 201
+        assert client.post("/api/v1/notifications/subscriptions", json=subscription(), headers=citizen).status_code == 201
         upload = client.post(f"/api/v1/complaints/{receipts[0]['id']}/evidence", files={"file": ("e.jpg", JPEG, "image/jpeg")},
                              headers={"Authorization": f"Bearer {receipts[0]['uploadToken']}"})
         assert upload.status_code == 201

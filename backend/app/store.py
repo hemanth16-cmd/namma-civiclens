@@ -22,6 +22,7 @@ POSTGRES_MIGRATIONS.
 
 import logging
 import os
+import secrets
 from collections.abc import Callable
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -32,7 +33,7 @@ from .claims import hash_claim_code, hash_upload_token, new_claim_code, new_publ
 logger = logging.getLogger("civiclens.store")
 
 MAX_ID_ATTEMPTS = 5
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_UPLOAD_TOKEN_TTL = timedelta(hours=1)
 
 INITIAL_STATUS = "Submitted"
@@ -178,9 +179,69 @@ CREATE INDEX evidence_access_by_evidence ON evidence_access_log (evidence_pk, pk
 -- default keeps it readable after Supabase Storage is enabled; new uploads record the backend that stored them.
 ALTER TABLE evidence ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'local' CHECK (storage_backend IN ('local', 'supabase'));
 """,
+    6: """
+-- Web Push notifications. A recipient is a staff account or a citizen inbox (a device-held bearer
+-- token; only its SHA-256 hash is stored). Citizens receive notifications for complaints they follow,
+-- proven with the claim code. Each recipient may register several devices (push subscriptions).
+CREATE TABLE notification_recipients (
+    pk          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL CHECK (kind IN ('citizen', 'staff')),
+    staff_pk    INTEGER UNIQUE REFERENCES staff_accounts(pk) ON DELETE CASCADE,
+    token_hash  TEXT UNIQUE CHECK (token_hash IS NULL OR length(token_hash) = 64),
+    created_at  TEXT NOT NULL,
+    CHECK ((kind = 'staff' AND staff_pk IS NOT NULL AND token_hash IS NULL)
+        OR (kind = 'citizen' AND staff_pk IS NULL AND token_hash IS NOT NULL))
+);
+
+CREATE TABLE notification_follows (
+    pk            INTEGER PRIMARY KEY,
+    recipient_pk  INTEGER NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    complaint_pk  INTEGER NOT NULL REFERENCES complaints(pk) ON DELETE CASCADE,
+    created_at    TEXT NOT NULL,
+    UNIQUE (recipient_pk, complaint_pk)
+);
+CREATE INDEX notification_follows_by_complaint ON notification_follows (complaint_pk);
+
+-- One row per device and recipient. The endpoint is a capability URL at the browser's push service;
+-- it and the keys are never returned by the API.
+CREATE TABLE push_subscriptions (
+    pk               INTEGER PRIMARY KEY,
+    subscription_id  TEXT NOT NULL UNIQUE,
+    recipient_pk     INTEGER NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    endpoint         TEXT NOT NULL,
+    p256dh           TEXT NOT NULL,
+    auth             TEXT NOT NULL,
+    label            TEXT NOT NULL DEFAULT '',
+    expires_at       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    last_success_at  TEXT,
+    last_failure_at  TEXT,
+    failure_count    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (recipient_pk, endpoint)
+);
+
+-- Persistent history. dedupe_key makes each event notify a recipient at most once.
+CREATE TABLE notifications (
+    pk               INTEGER PRIMARY KEY,
+    notification_id  TEXT NOT NULL UNIQUE,
+    recipient_pk     INTEGER NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    complaint_pk     INTEGER REFERENCES complaints(pk) ON DELETE CASCADE,
+    kind             TEXT NOT NULL CHECK (kind IN ('follow_confirmed', 'evidence_received', 'evidence_reviewed', 'new_complaint', 'new_evidence', 'test')),
+    title            TEXT NOT NULL,
+    body             TEXT NOT NULL,
+    url              TEXT NOT NULL,
+    dedupe_key       TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    read_at          TEXT,
+    push_status      TEXT NOT NULL DEFAULT 'pending' CHECK (push_status IN ('pending', 'sent', 'partial', 'failed', 'no_devices', 'disabled')),
+    UNIQUE (recipient_pk, dedupe_key)
+);
+CREATE INDEX notifications_by_recipient ON notifications (recipient_pk, pk);
+""",
 }
 
-# PostgreSQL schema at SCHEMA_VERSION (version 5): the same tables, columns, constraints and indexes
+# PostgreSQL schema at version 5 (later versions: POSTGRES_MIGRATIONS): the same tables, columns, constraints and indexes
 # as SQLite's SCHEMA plus MIGRATIONS 2–5, in PostgreSQL types:
 #   INTEGER PRIMARY KEY → BIGINT identity (BY DEFAULT, so the SQLite import can keep its keys)
 #   REAL                → DOUBLE PRECISION (PostgreSQL REAL is 4-byte and would lose GPS precision)
@@ -301,12 +362,76 @@ CREATE TABLE evidence_access_log (
 CREATE INDEX evidence_access_by_evidence ON evidence_access_log (evidence_pk, pk);
 """
 
-# Later PostgreSQL migrations, keyed by the same version numbers as MIGRATIONS.
-POSTGRES_MIGRATIONS: dict[int, str] = {}
+# Later PostgreSQL migrations, keyed by the same version numbers as MIGRATIONS (same tables and
+# constraints in PostgreSQL types). POSTGRES_SCHEMA is version 5; these bring it to SCHEMA_VERSION.
+POSTGRES_BASE_VERSION = 5
+POSTGRES_MIGRATIONS: dict[int, str] = {
+    6: """
+-- Web Push notifications. A recipient is a staff account or a citizen inbox (a device-held bearer
+-- token; only its SHA-256 hash is stored). Citizens receive notifications for complaints they follow,
+-- proven with the claim code. Each recipient may register several devices (push subscriptions).
+CREATE TABLE notification_recipients (
+    pk          BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    kind        TEXT NOT NULL CHECK (kind IN ('citizen', 'staff')),
+    staff_pk    BIGINT UNIQUE REFERENCES staff_accounts(pk) ON DELETE CASCADE,
+    token_hash  TEXT UNIQUE CHECK (token_hash IS NULL OR length(token_hash) = 64),
+    created_at  TEXT NOT NULL,
+    CHECK ((kind = 'staff' AND staff_pk IS NOT NULL AND token_hash IS NULL)
+        OR (kind = 'citizen' AND staff_pk IS NULL AND token_hash IS NOT NULL))
+);
+
+CREATE TABLE notification_follows (
+    pk            BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    recipient_pk  BIGINT NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    complaint_pk  BIGINT NOT NULL REFERENCES complaints(pk) ON DELETE CASCADE,
+    created_at    TEXT NOT NULL,
+    UNIQUE (recipient_pk, complaint_pk)
+);
+CREATE INDEX notification_follows_by_complaint ON notification_follows (complaint_pk);
+
+-- One row per device and recipient. The endpoint is a capability URL at the browser's push service;
+-- it and the keys are never returned by the API.
+CREATE TABLE push_subscriptions (
+    pk               BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    subscription_id  TEXT NOT NULL UNIQUE,
+    recipient_pk     BIGINT NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    endpoint         TEXT NOT NULL,
+    p256dh           TEXT NOT NULL,
+    auth             TEXT NOT NULL,
+    label            TEXT NOT NULL DEFAULT '',
+    expires_at       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    last_success_at  TEXT,
+    last_failure_at  TEXT,
+    failure_count    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (recipient_pk, endpoint)
+);
+
+-- Persistent history. dedupe_key makes each event notify a recipient at most once.
+CREATE TABLE notifications (
+    pk               BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    notification_id  TEXT NOT NULL UNIQUE,
+    recipient_pk     BIGINT NOT NULL REFERENCES notification_recipients(pk) ON DELETE CASCADE,
+    complaint_pk     BIGINT REFERENCES complaints(pk) ON DELETE CASCADE,
+    kind             TEXT NOT NULL CHECK (kind IN ('follow_confirmed', 'evidence_received', 'evidence_reviewed', 'new_complaint', 'new_evidence', 'test')),
+    title            TEXT NOT NULL,
+    body             TEXT NOT NULL,
+    url              TEXT NOT NULL,
+    dedupe_key       TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    read_at          TEXT,
+    push_status      TEXT NOT NULL DEFAULT 'pending' CHECK (push_status IN ('pending', 'sent', 'partial', 'failed', 'no_devices', 'disabled')),
+    UNIQUE (recipient_pk, dedupe_key)
+);
+CREATE INDEX notifications_by_recipient ON notifications (recipient_pk, pk);
+""",
+}
 
 # Tables in foreign-key order (parents first): used by the SQLite → PostgreSQL migration tool.
 TABLES = ("complaints", "complaint_timeline", "verification_log", "evidence", "idempotency_keys",
-          "staff_accounts", "staff_sessions", "evidence_access_log")
+          "staff_accounts", "staff_sessions", "evidence_access_log",
+          "notification_recipients", "notification_follows", "push_subscriptions", "notifications")
 
 CREATE_SCOPE = "create_complaint"
 DEFAULT_REPLAY_WINDOW = timedelta(hours=24)
@@ -333,6 +458,24 @@ class StaffExists(Exception):
 
 
 STAFF_LIST_MAX = 100
+NOTIFICATION_PAGE_MAX = 100
+
+# Device fields the API may show: never the endpoint or keys.
+_DEVICE_COLUMNS = "subscription_id, label, created_at, updated_at, last_success_at, last_failure_at, failure_count"
+_NOTIFICATION_COLUMNS = ("n.notification_id, n.kind, n.title, n.body, n.url, n.created_at, n.read_at, n.push_status, "
+                         "c.public_id AS complaint_public_id")
+
+
+def _device_dict(row) -> dict:
+    return {"subscriptionId": row["subscription_id"], "label": row["label"], "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"], "lastSuccessAt": row["last_success_at"], "lastFailureAt": row["last_failure_at"],
+            "failureCount": row["failure_count"]}
+
+
+def _notification_dict(row) -> dict:
+    return {"id": row["notification_id"], "kind": row["kind"], "title": row["title"], "body": row["body"], "url": row["url"],
+            "complaintId": row["complaint_public_id"], "createdAt": row["created_at"], "readAt": row["read_at"],
+            "read": row["read_at"] is not None, "pushStatus": row["push_status"]}
 
 
 def _evidence_dict(row) -> dict:
@@ -381,7 +524,7 @@ class ComplaintStore:
         """Create the database (and schema) if missing and apply pending migrations. Safe to repeat."""
         try:
             if self.db.backend == "postgres":
-                self.db.apply_schema(POSTGRES_SCHEMA, POSTGRES_MIGRATIONS, SCHEMA_VERSION)
+                self.db.apply_schema(POSTGRES_SCHEMA, POSTGRES_MIGRATIONS, POSTGRES_BASE_VERSION)
             else:
                 self.db.apply_schema(SCHEMA, MIGRATIONS)
         except (OSError, *DB_ERRORS) as exc:
@@ -743,6 +886,228 @@ class ComplaintStore:
                     (evidence_pk,))]
         except DB_ERRORS as exc:
             raise StoreError("Evidence access log could not be read") from exc
+
+    # ---------- Notifications: recipients, follows, push subscriptions, history ----------
+
+    def complaint_ref(self, public_id: str) -> dict | None:
+        """{"pk", "claimHash"} for a complaint, or None."""
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute("SELECT pk, claim_hash FROM complaints WHERE public_id = ?", (public_id,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Complaint could not be read") from exc
+        return {"pk": row["pk"], "claimHash": row["claim_hash"]} if row else None
+
+    def staff_recipient(self, staff_pk: int) -> dict:
+        """The staff account's notification recipient, created on first use."""
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                conn.execute("INSERT INTO notification_recipients (kind, staff_pk, created_at) VALUES ('staff', ?, ?) "
+                             "ON CONFLICT (staff_pk) DO NOTHING", (staff_pk, utc_now()))
+                row = conn.execute("SELECT pk, kind FROM notification_recipients WHERE staff_pk = ?", (staff_pk,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Notification recipient could not be read") from exc
+        return dict(row)
+
+    def create_citizen_recipient(self, token_hash: str) -> dict:
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                pk = conn.insert("INSERT INTO notification_recipients (kind, token_hash, created_at) VALUES ('citizen', ?, ?)",
+                                 (token_hash, utc_now()))
+        except DB_ERRORS as exc:
+            raise StoreError("Notification inbox could not be created") from exc
+        return {"pk": pk, "kind": "citizen"}
+
+    def citizen_recipient(self, token_hash: str) -> dict | None:
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute("SELECT pk, kind FROM notification_recipients WHERE token_hash = ? AND kind = 'citizen'",
+                                   (token_hash,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Notification inbox could not be read") from exc
+        return dict(row) if row else None
+
+    def follow_complaint(self, recipient_pk: int, complaint_pk: int, max_follows: int) -> str:
+        """Returns "created", "exists" or "limit"."""
+        try:
+            with closing(self._connect()) as conn, conn.transaction(immediate=True):
+                if conn.execute("SELECT 1 FROM notification_follows WHERE recipient_pk = ? AND complaint_pk = ?",
+                                (recipient_pk, complaint_pk)).fetchone():
+                    return "exists"
+                # Lock the recipient so concurrent follows cannot pass the limit together.
+                conn.execute("SELECT pk FROM notification_recipients WHERE pk = ?" + self.db.for_update, (recipient_pk,)).fetchone()
+                if conn.execute("SELECT COUNT(*) FROM notification_follows WHERE recipient_pk = ?", (recipient_pk,)).fetchone()[0] >= max_follows:
+                    return "limit"
+                cur = conn.execute("INSERT INTO notification_follows (recipient_pk, complaint_pk, created_at) VALUES (?, ?, ?) "
+                                   "ON CONFLICT (recipient_pk, complaint_pk) DO NOTHING", (recipient_pk, complaint_pk, utc_now()))
+                return "created" if cur.rowcount == 1 else "exists"
+        except DB_ERRORS as exc:
+            raise StoreError("Follow could not be saved") from exc
+
+    def unfollow_complaint(self, recipient_pk: int, public_id: str) -> bool:
+        return self._write("DELETE FROM notification_follows WHERE recipient_pk = ? AND complaint_pk = "
+                           "(SELECT pk FROM complaints WHERE public_id = ?)", (recipient_pk, public_id), "Unfollow") == 1
+
+    def list_follows(self, recipient_pk: int) -> list[dict]:
+        try:
+            with closing(self._connect()) as conn:
+                return [{"complaintId": r["public_id"], "followedAt": r["created_at"]} for r in conn.execute(
+                    "SELECT c.public_id, f.created_at FROM notification_follows f JOIN complaints c ON c.pk = f.complaint_pk "
+                    "WHERE f.recipient_pk = ? ORDER BY f.pk DESC", (recipient_pk,))]
+        except DB_ERRORS as exc:
+            raise StoreError("Follows could not be read") from exc
+
+    def save_push_subscription(self, recipient_pk: int, sub: dict, max_devices: int) -> tuple[str, dict | None]:
+        """Register a device, or refresh its keys if this recipient already registered the endpoint.
+        Returns ("created" | "updated", row) or ("limit", None)."""
+        now = utc_now()
+        try:
+            with closing(self._connect()) as conn, conn.transaction(immediate=True):
+                conn.execute("SELECT pk FROM notification_recipients WHERE pk = ?" + self.db.for_update, (recipient_pk,)).fetchone()
+                existing = conn.execute("SELECT subscription_id FROM push_subscriptions WHERE recipient_pk = ? AND endpoint = ?",
+                                        (recipient_pk, sub["endpoint"])).fetchone()
+                if existing:
+                    conn.execute("UPDATE push_subscriptions SET p256dh = ?, auth = ?, label = ?, expires_at = ?, updated_at = ?, "
+                                 "failure_count = 0 WHERE recipient_pk = ? AND endpoint = ?",
+                                 (sub["p256dh"], sub["auth"], sub["label"], sub["expiresAt"], now, recipient_pk, sub["endpoint"]))
+                    outcome, subscription_id = "updated", existing["subscription_id"]
+                else:
+                    if conn.execute("SELECT COUNT(*) FROM push_subscriptions WHERE recipient_pk = ?", (recipient_pk,)).fetchone()[0] >= max_devices:
+                        return "limit", None
+                    subscription_id = "ps_" + secrets.token_urlsafe(16)
+                    conn.execute("INSERT INTO push_subscriptions (subscription_id, recipient_pk, endpoint, p256dh, auth, label, expires_at, "
+                                 "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                 (subscription_id, recipient_pk, sub["endpoint"], sub["p256dh"], sub["auth"], sub["label"], sub["expiresAt"], now, now))
+                    outcome = "created"
+                row = conn.execute(f"SELECT {_DEVICE_COLUMNS} FROM push_subscriptions WHERE subscription_id = ?", (subscription_id,)).fetchone()
+                return outcome, _device_dict(row)
+        except DB_ERRORS as exc:
+            raise StoreError("Push subscription could not be saved") from exc
+
+    def list_push_subscriptions(self, recipient_pk: int) -> list[dict]:
+        try:
+            with closing(self._connect()) as conn:
+                return [_device_dict(r) for r in conn.execute(
+                    f"SELECT {_DEVICE_COLUMNS} FROM push_subscriptions WHERE recipient_pk = ? ORDER BY pk", (recipient_pk,))]
+        except DB_ERRORS as exc:
+            raise StoreError("Push subscriptions could not be read") from exc
+
+    def delete_push_subscription(self, recipient_pk: int, subscription_id: str) -> bool:
+        """Only the owning recipient can delete a device."""
+        return self._write("DELETE FROM push_subscriptions WHERE recipient_pk = ? AND subscription_id = ?",
+                           (recipient_pk, subscription_id), "Push subscription removal") == 1
+
+    def prune_push_subscriptions(self, max_failures: int) -> int:
+        """Delete devices whose subscription has expired or that failed `max_failures` times in a row."""
+        return self._write("DELETE FROM push_subscriptions WHERE (expires_at IS NOT NULL AND expires_at <= ?) OR failure_count >= ?",
+                           (utc_now(), max_failures), "Push subscription cleanup")
+
+    def _staff_recipient_pks(self, conn) -> list[int]:
+        """Every active staff account's recipient (created here for accounts that have none yet)."""
+        now = utc_now()
+        for (staff_pk,) in conn.execute("SELECT a.pk FROM staff_accounts a LEFT JOIN notification_recipients r ON r.staff_pk = a.pk "
+                                        "WHERE a.disabled_at IS NULL AND r.pk IS NULL").fetchall():
+            conn.execute("INSERT INTO notification_recipients (kind, staff_pk, created_at) VALUES ('staff', ?, ?) "
+                         "ON CONFLICT (staff_pk) DO NOTHING", (staff_pk, now))
+        return [r[0] for r in conn.execute("SELECT r.pk FROM notification_recipients r JOIN staff_accounts a ON a.pk = r.staff_pk "
+                                          "WHERE a.disabled_at IS NULL ORDER BY r.pk")]
+
+    def add_notifications(self, audience: str, event: dict) -> list[dict]:
+        """Store one notification per recipient in `audience` ("followers" of event["complaintPk"],
+        "staff" = every active staff account, or "recipient" = event["recipientPk"]). A recipient that
+        already has event["dedupeKey"] is skipped. Returns the new rows, each with its devices."""
+        now = utc_now()
+        created = []
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                if audience == "followers":
+                    targets = [r[0] for r in conn.execute("SELECT recipient_pk FROM notification_follows WHERE complaint_pk = ? ORDER BY pk",
+                                                          (event["complaintPk"],))]
+                elif audience == "staff":
+                    targets = self._staff_recipient_pks(conn)
+                else:
+                    targets = [event["recipientPk"]]
+                for recipient_pk in targets:
+                    notification_id = "nt_" + secrets.token_urlsafe(16)
+                    cur = conn.execute(
+                        "INSERT INTO notifications (notification_id, recipient_pk, complaint_pk, kind, title, body, url, dedupe_key, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (recipient_pk, dedupe_key) DO NOTHING",
+                        (notification_id, recipient_pk, event.get("complaintPk"), event["kind"], event["title"], event["body"],
+                         event["url"], event["dedupeKey"], now))
+                    if cur.rowcount != 1:
+                        continue
+                    devices = [dict(d) for d in conn.execute(
+                        "SELECT pk, endpoint, p256dh, auth FROM push_subscriptions WHERE recipient_pk = ? ORDER BY pk", (recipient_pk,))]
+                    created.append({"id": notification_id, "recipientPk": recipient_pk, "kind": event["kind"], "title": event["title"],
+                                    "body": event["body"], "url": event["url"], "audience": event["audience"], "createdAt": now, "devices": devices})
+        except DB_ERRORS as exc:
+            raise StoreError("Notifications could not be saved") from exc
+        return created
+
+    def record_push_result(self, subscription_pk: int, outcome: str, max_failures: int) -> None:
+        """outcome: "sent" resets the failure count; "gone" deletes the device (expired or unsubscribed);
+        anything else counts a failure, and the device is deleted after `max_failures` in a row."""
+        now = utc_now()
+        if outcome == "sent":
+            self._write("UPDATE push_subscriptions SET last_success_at = ?, failure_count = 0 WHERE pk = ?", (now, subscription_pk), "Push result")
+        elif outcome == "gone":
+            self._write("DELETE FROM push_subscriptions WHERE pk = ?", (subscription_pk,), "Push subscription removal")
+        else:
+            self._write("UPDATE push_subscriptions SET last_failure_at = ?, failure_count = failure_count + 1 WHERE pk = ?",
+                        (now, subscription_pk), "Push result")
+            self._write("DELETE FROM push_subscriptions WHERE pk = ? AND failure_count >= ?", (subscription_pk, max_failures),
+                        "Push subscription removal")
+
+    def set_push_status(self, notification_id: str, status: str) -> None:
+        self._write("UPDATE notifications SET push_status = ? WHERE notification_id = ?", (status, notification_id), "Push status")
+
+    def list_notifications(self, recipient_pk: int, limit: int = 50, before: str | None = None, unread_only: bool = False) -> dict:
+        """Newest first. `before` is the id of the last notification already shown (cursor paging)."""
+        limit = max(1, min(int(limit), NOTIFICATION_PAGE_MAX))
+        try:
+            with closing(self._connect()) as conn:
+                where, params = ["n.recipient_pk = ?"], [recipient_pk]
+                if before:
+                    where.append("n.pk < (SELECT pk FROM notifications WHERE notification_id = ? AND recipient_pk = ?)")
+                    params += [before, recipient_pk]
+                if unread_only:
+                    where.append("n.read_at IS NULL")
+                rows = conn.execute(
+                    f"SELECT {_NOTIFICATION_COLUMNS} FROM notifications n LEFT JOIN complaints c ON c.pk = n.complaint_pk "
+                    f"WHERE {' AND '.join(where)} ORDER BY n.pk DESC LIMIT ?", (*params, limit + 1)).fetchall()
+                unread = conn.execute("SELECT COUNT(*) FROM notifications WHERE recipient_pk = ? AND read_at IS NULL", (recipient_pk,)).fetchone()[0]
+        except DB_ERRORS as exc:
+            raise StoreError("Notifications could not be read") from exc
+        items = [_notification_dict(r) for r in rows[:limit]]
+        return {"items": items, "unreadCount": int(unread), "nextBefore": items[-1]["id"] if len(rows) > limit else None}
+
+    def unread_count(self, recipient_pk: int) -> int:
+        try:
+            with closing(self._connect()) as conn:
+                return int(conn.execute("SELECT COUNT(*) FROM notifications WHERE recipient_pk = ? AND read_at IS NULL",
+                                        (recipient_pk,)).fetchone()[0])
+        except DB_ERRORS as exc:
+            raise StoreError("Notifications could not be read") from exc
+
+    def mark_notification(self, recipient_pk: int, notification_id: str, read: bool) -> dict | None:
+        """Mark one of the recipient's notifications read (keeping the first read time) or unread."""
+        try:
+            with closing(self._connect()) as conn:
+                with conn.transaction():
+                    sql = ("UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE recipient_pk = ? AND notification_id = ?" if read
+                           else "UPDATE notifications SET read_at = NULL WHERE recipient_pk = ? AND notification_id = ?")
+                    cur = conn.execute(sql, ((utc_now(),) if read else ()) + (recipient_pk, notification_id))
+                if cur.rowcount != 1:
+                    return None
+                row = conn.execute(f"SELECT {_NOTIFICATION_COLUMNS} FROM notifications n LEFT JOIN complaints c ON c.pk = n.complaint_pk "
+                                   "WHERE n.notification_id = ?", (notification_id,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Notification could not be updated") from exc
+        return _notification_dict(row)
+
+    def mark_all_notifications_read(self, recipient_pk: int) -> int:
+        return self._write("UPDATE notifications SET read_at = ? WHERE recipient_pk = ? AND read_at IS NULL",
+                           (utc_now(), recipient_pk), "Notifications update")
 
     def get(self, public_id: str) -> dict | None:
         try:

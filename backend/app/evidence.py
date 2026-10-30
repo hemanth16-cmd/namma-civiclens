@@ -15,7 +15,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Request, Response
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
 from starlette.concurrency import run_in_threadpool
@@ -276,7 +276,7 @@ def _receipt(row: dict, status: str) -> dict:
 
 
 @router.post("/{public_id}/evidence", status_code=201, response_model=EvidenceReceipt)
-async def upload_evidence(public_id: str, request: Request, response: Response) -> dict:
+async def upload_evidence(public_id: str, request: Request, response: Response, background: BackgroundTasks) -> dict:
     store: ComplaintStore = request.app.state.store
     storage: EvidenceStorage = request.app.state.evidence_storage
     settings: UploadSettings = request.app.state.upload_settings
@@ -331,6 +331,7 @@ async def upload_evidence(public_id: str, request: Request, response: Response) 
             await run_in_threadpool(storage.delete, key)
             return _same_or_conflict(row, meta["sha256"], response)
         reservation.commit(pending.size)
+        background.add_task(request.app.state.notifier.evidence_uploaded, public_id, kind.media_type)
         return _receipt(row, "uploaded")
 
 
