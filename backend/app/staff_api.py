@@ -63,7 +63,7 @@ def who_am_i(staff: dict = Depends(current_staff)) -> dict:
 
 
 def _summary(record: dict) -> dict:
-    return {k: record[k] for k in ("id", "category", "area", "status", "verification", "created", "updated", "mediaType")} | {"hasEvidence": record["evidence"] is not None}
+    return {k: record[k] for k in ("id", "category", "area", "status", "verification", "created", "updated", "mediaType", "mergedInto")} | {"hasEvidence": record["evidence"] is not None}
 
 
 @router.get("/complaints", response_model=StaffComplaintList)
