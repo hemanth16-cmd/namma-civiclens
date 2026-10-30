@@ -150,6 +150,15 @@ def test_full_lifecycle_journey_with_audit(api, staff):
     pub = public(api, cid)
     assert pub["status"] == "Marked Resolved" and pub["verification"] == "Citizen Confirmed"
     assert [e["type"] for e in pub["verificationLog"]] == ["response"] and pub["verificationLog"][0]["actor"] == "Citizen"
+    assert [(t["status"], t["text"]) for t in pub["timeline"]] == [
+        ("Submitted", "Report received by the Namma CivicLens API."),
+        ("Assigned", "Assigned to Road maintenance."),
+        ("Assigned", "Work order created for Ward 4 road crew; target date 2099-01-31."),
+        ("In Progress", "Work started by Ward 4 road crew."),
+        ("In Progress", "After-repair evidence was attached for review."),
+        ("In Progress", "Work completed by Ward 4 road crew."),
+        ("Marked Resolved", "Pothole filled."),
+    ], "one public entry per event, no duplicates when an action also moves the status"
 
     audit = api.get(f"{API}/staff/complaints/{cid}/audit", headers=staff["ravi"]).json()
     actions = [e["action"] for e in reversed(audit)]

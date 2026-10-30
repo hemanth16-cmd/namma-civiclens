@@ -1782,15 +1782,17 @@ class ComplaintStore:
                  reason.strip(), actor["pk"], now))
             self._touch(conn, case["pk"], now, department=department["name"], department_pk=department["pk"],
                         assigned_staff_pk=assignee["pk"] if assignee else None)
-            # Public text names the department only; individual staff are never named publicly.
-            self._timeline(conn, case["pk"], case["status"], f"{'Reassigned' if reassign else 'Assigned'} to {department['name']}.",
-                           "assignment", actor, now)
             self._audit(conn, case["pk"], actor, "reassigned" if reassign else "assigned",
                         {"from": before, "to": {"department": department["code"], "assignee": assignee["username"] if assignee else None},
                          "reason": reason.strip()}, client_ip, now)
             case.update(departmentPk=department["pk"], department=department["name"])
+            # Public text names the department only; individual staff are never named publicly. When the
+            # assignment also moves the status, the status change carries the text (one public entry, not two).
+            text = f"{'Reassigned' if reassign else 'Assigned'} to {department['name']}."
             if to := lc.status_after_assignment(case):
-                self._change_status(conn, case, actor, to, f"Assigned to {department['name']}.", now, client_ip)
+                self._change_status(conn, case, actor, to, text, now, client_ip)
+            else:
+                self._timeline(conn, case["pk"], case["status"], text, "assignment", actor, now)
         self._mutate("Assignment", run)
 
     @staticmethod
@@ -1928,12 +1930,13 @@ class ComplaintStore:
                          "VALUES (?, ?, ?, ?, ?, ?, ?)", (order["pk"], action, order["status"], to, note.strip()[:1000], actor["pk"], now))
             public = {"started": f"Work started by {order['team']}.", "completed": f"Work completed by {order['team']}.",
                       "cancelled": "A work order was cancelled."}[action]
-            self._timeline(conn, case["pk"], case["status"], public, "work_order", actor, now)
-            self._touch(conn, case["pk"], now)
             self._audit(conn, case["pk"], actor, "work_order_" + action,
                         {"workOrderId": work_order_id, "from": order["status"], "to": to, "note": note.strip()}, client_ip, now)
             if to == "In Progress" and (status := lc.status_after_work_started(case)):
-                self._change_status(conn, case, actor, status, "Work has started on this complaint.", now, client_ip)
+                self._change_status(conn, case, actor, status, public, now, client_ip)  # one public entry for both
+            else:
+                self._timeline(conn, case["pk"], case["status"], public, "work_order", actor, now)
+                self._touch(conn, case["pk"], now)
             return case["id"]
         return self._mutate("Work order update", run)
 
