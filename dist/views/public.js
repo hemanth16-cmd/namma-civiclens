@@ -3,7 +3,7 @@ import {api, esc, DEMO_PASSWORD} from '../services.js';
 import {icon, btn, statusPill, verificationPill, heading, notice, publicTopbar, fmtDate, fmtDateTime, toast, panel, logo, categoryIcon, openLightbox} from '../ui.js';
 import {figure, objectURL} from './issue.js';
 import {setSession, viewer} from '../state.js';
-import {navigate} from '../router.js';
+import {navigate, takeResidentDestination} from '../router.js';
 import {reportMode, trackPublic, respondToResolution} from '../report-gateway.js';
 import {staffSession} from '../staff-session.js';
 import {residentSession} from '../resident-session.js';
@@ -400,7 +400,7 @@ function renderServerResidentLogin(root, register = false) {
       staffSession.clear();  // one identity per tab: a resident sign-in ends any staff session held here
       setSession({role: 'resident', name: session.resident.displayName, email: session.resident.email, server: true});
       toast(`Signed in as ${session.resident.displayName}.`, 'success');
-      navigate('resident');
+      navigate(takeResidentDestination());  // back to the page that asked for sign-in, else the overview
     } catch (err) {
       submit.disabled = false;
       e.target.querySelector('#login-password').value = '';

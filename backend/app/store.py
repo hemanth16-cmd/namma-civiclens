@@ -1594,8 +1594,9 @@ class ComplaintStore:
                 out = []
                 for r in rows:
                     record = self._load(conn, r["public_id"])
-                    has_evidence = conn.execute("SELECT 1 FROM evidence WHERE complaint_pk = ? AND role = 'original'", (r["pk"],)).fetchone()
-                    out.append({**record, "ownedVia": r["owned_via"], "ownedAt": r["owned_at"], "hasEvidence": has_evidence is not None})
+                    evidence = self._owner_evidence(conn, r["pk"])
+                    out.append({**record, "ownedVia": r["owned_via"], "ownedAt": r["owned_at"],
+                                "hasEvidence": any(e["role"] == "original" for e in evidence), "evidence": evidence})
                 return out, int(total)
         except DB_ERRORS as exc:
             raise StoreError("Resident complaints could not be read") from exc
@@ -1608,10 +1609,36 @@ class ComplaintStore:
                                    (public_id, resident_pk)).fetchone()
                 if row is None:
                     return None
-                has_evidence = conn.execute("SELECT 1 FROM evidence WHERE complaint_pk = ? AND role = 'original'", (row["pk"],)).fetchone()
-                return {**self._load(conn, public_id), "ownedVia": row["owned_via"], "ownedAt": row["owned_at"], "hasEvidence": has_evidence is not None}
+                evidence = self._owner_evidence(conn, row["pk"])
+                return {**self._load(conn, public_id), "ownedVia": row["owned_via"], "ownedAt": row["owned_at"],
+                        "hasEvidence": any(e["role"] == "original" for e in evidence), "evidence": evidence}
         except DB_ERRORS as exc:
             raise StoreError("Complaint could not be read") from exc
+
+    @staticmethod
+    def _owner_evidence(conn, complaint_pk: int) -> list[dict]:
+        """Evidence metadata an owner may see for their own complaint: the file they reported (role
+        'original') and after-repair photos staff attached (role 'repair'), oldest first. Never the
+        storage key, storage backend or uploader; files are fetched through resident_evidence()."""
+        rows = conn.execute(
+            "SELECT evidence_id, role, media_type, content_type, byte_size, captured_at, uploaded_at FROM evidence "
+            "WHERE complaint_pk = ? ORDER BY CASE role WHEN 'original' THEN 0 ELSE 1 END, pk", (complaint_pk,)).fetchall()
+        return [{"evidenceId": r["evidence_id"], "role": r["role"], "mediaType": r["media_type"], "contentType": r["content_type"],
+                 "byteSize": r["byte_size"], "capturedAt": r["captured_at"], "uploadedAt": r["uploaded_at"]} for r in rows]
+
+    def resident_evidence(self, resident_pk: int, public_id: str, evidence_id: str) -> dict | None:
+        """One evidence file's metadata (with pk and storage key, for streaming) only if it belongs to a
+        complaint this resident owns; None otherwise, so another resident's file is indistinguishable
+        from one that does not exist."""
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    "SELECT e.* FROM evidence e JOIN complaints c ON c.pk = e.complaint_pk "
+                    "WHERE c.public_id = ? AND c.owner_resident_pk = ? AND e.evidence_id = ?",
+                    (public_id, resident_pk, evidence_id)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Evidence could not be read") from exc
+        return _evidence_dict(row) | {"pk": row["pk"]} if row else None
 
     def claim_complaint(self, public_id: str, resident: dict, client_ip: str | None = None) -> str:
         """Attach an unowned complaint to `resident`. The caller has ALREADY verified the claim code.

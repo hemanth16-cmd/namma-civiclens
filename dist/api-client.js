@@ -160,6 +160,20 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a complaint list this app could not read.', {code: 'malformed_response'});
       return {items: d.items.map(toResidentComplaint), total: Number(d.total) || 0};
     },
+    /** GET /residents/me/complaints/{id}: one complaint, only if the signed-in resident owns it (else 404). */
+    async getResidentComplaint(token, id) {
+      return toResidentComplaint(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}`, undefined, {headers: bearer(token)}));
+    },
+
+    /** An evidence file of the resident's own complaint, as a Blob of an allowed media type (owner-only endpoint). */
+    async fetchResidentEvidence(token, id, evidenceId) {
+      const response = await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}/evidence/${encodeURIComponent(evidenceId)}`, undefined,
+        {headers: bearer(token), timeout: uploadTimeoutMs, raw: true});
+      const type = String(response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+      if (!EVIDENCE_TYPES.includes(type)) throw new ApiError('The CivicLens server sent evidence of an unexpected type, so it is not shown.', {code: 'malformed_response'});
+      return new Blob([await response.arrayBuffer()], {type});
+    },
+
     /** POST /residents/me/claims. The claim code travels in the JSON body only. */
     async claimComplaint(token, id, claim) {
       const d = await request('POST', '/residents/me/claims', {id, claim}, {headers: bearer(token)});
@@ -545,8 +559,16 @@ export function toResidentComplaint(d) {
     verification: String(d.verification), department: String(d.department ?? ''), ownedVia: d.ownedVia === 'claimed' ? 'claimed' : 'submitted',
     ownedAt: d.ownedAt ?? null,
     timeline: Array.isArray(d.timeline) ? d.timeline.map(t => ({status: String(t.status), text: String(t.text), date: t.date})) : [],
-    verificationLog: toVerificationLog(d.verificationLog)
+    verificationLog: toVerificationLog(d.verificationLog),
+    evidence: toOwnerEvidence(d.evidence)
   };
+}
+
+/** The owner's evidence list: known fields only, valid IDs only. Never a storage key or URL. */
+export function toOwnerEvidence(list) {
+  return (Array.isArray(list) ? list : []).filter(e => typeof e?.evidenceId === 'string' && /^ev_[A-Za-z0-9_-]{22}$/.test(e.evidenceId)).map(e => ({
+    evidenceId: e.evidenceId, role: e.role === 'repair' ? 'repair' : 'original', mediaType: e.mediaType === 'video' ? 'video' : 'photo',
+    contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null}));
 }
 const NOTIFICATION_ID = /^nt_[A-Za-z0-9_-]{16,40}$/;
 const SUBSCRIPTION_ID = /^ps_[A-Za-z0-9_-]{16,40}$/;
