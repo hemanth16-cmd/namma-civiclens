@@ -57,6 +57,8 @@ def align(original: Image.Image, repair: Image.Image) -> dict:
             return base | {"reason": "no_homography"}
         inliers = int(mask.sum())
         base |= {"inliers": inliers, "inlierRatio": round(inliers / len(good), 3)}
+        if inliers < 12:
+            return base | {"reason": "too_few_inliers", "homography": None}
         det = float(np.linalg.det(H[:2, :2]))
         if not 0.1 <= det <= 10 or abs(H[2, 0]) > 0.005 or abs(H[2, 1]) > 0.005:
             return base | {"reason": "implausible_geometry", "inliers": 0, "inlierRatio": 0.0}

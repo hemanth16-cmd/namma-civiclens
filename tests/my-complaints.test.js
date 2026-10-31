@@ -60,7 +60,7 @@ test('one complaint and its files come from owner-only endpoints with the reside
   assert.equal(await createApiClient({baseUrl: BASE, fetchImpl: missing}).getResidentComplaint(TOKEN, 'NCL-2026-OTHER1'), null, 'not in the account: null, as the tracking page expects');
 
   const file = recorder(new Response(new Uint8Array([0xff, 0xd8, 0xff]), {status: 200, headers: {'Content-Type': 'image/jpeg'}}));
-  const blob = await createApiClient({baseUrl: BASE, fetchImpl: file}).fetchResidentEvidenceFile(TOKEN, 'NCL-2026-MINE01', EV1);
+  const blob = await createApiClient({baseUrl: BASE, fetchImpl: file}).fetchResidentEvidence(TOKEN, 'NCL-2026-MINE01', EV1);
   assert.equal(file.calls[0].url, `${BASE}/residents/me/complaints/NCL-2026-MINE01/evidence/${EV1}`);
   assert.equal(file.calls[0].init.headers.Authorization, 'Bearer ' + TOKEN);
   assert.equal(blob.type, 'image/jpeg');
@@ -69,12 +69,12 @@ test('one complaint and its files come from owner-only endpoints with the reside
 
 test('unexpected file types, missing files and other residents\' files are errors, not broken images', async () => {
   const html = recorder(new Response('<script>', {status: 200, headers: {'Content-Type': 'text/html'}}));
-  await assert.rejects(createApiClient({baseUrl: BASE, fetchImpl: html}).fetchResidentEvidenceFile(TOKEN, 'NCL-2026-MINE01', EV1), err => err.code === 'malformed_response');
+  await assert.rejects(createApiClient({baseUrl: BASE, fetchImpl: html}).fetchResidentEvidence(TOKEN, 'NCL-2026-MINE01', EV1), err => err.code === 'malformed_response');
   const notMine = recorder(new Response(JSON.stringify({error: {code: 'evidence_not_found', message: 'None of your complaints has that evidence file.'}}), {status: 404, headers: {'Content-Type': 'application/json'}}));
-  await assert.rejects(createApiClient({baseUrl: BASE, fetchImpl: notMine}).fetchResidentEvidenceFile(TOKEN, 'NCL-2026-OTHER1', EV1),
+  await assert.rejects(createApiClient({baseUrl: BASE, fetchImpl: notMine}).fetchResidentEvidence(TOKEN, 'NCL-2026-OTHER1', EV1),
     err => err instanceof ApiError && err.status === 404 && err.code === 'evidence_not_found');
   const gone = recorder(new Response(JSON.stringify({error: {code: 'evidence_unavailable', message: 'The evidence file is not in this server\'s storage.'}}), {status: 404, headers: {'Content-Type': 'application/json'}}));
-  await assert.rejects(createApiClient({baseUrl: BASE, fetchImpl: gone}).fetchResidentEvidenceFile(TOKEN, 'NCL-2026-MINE01', EV1), err => err.code === 'evidence_unavailable');
+  await assert.rejects(createApiClient({baseUrl: BASE, fetchImpl: gone}).fetchResidentEvidence(TOKEN, 'NCL-2026-MINE01', EV1), err => err.code === 'evidence_unavailable');
 });
 
 test('a resident\'s own complaint route stays in the account; only #/issue goes to public tracking', () => {

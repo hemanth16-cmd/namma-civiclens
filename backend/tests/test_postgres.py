@@ -15,7 +15,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from app import auth
+from app import auth, wards
 from app.db import DatabaseConfigError, PostgresDatabase, SQLiteDatabase, database_from_env, selected_backend
 from app.db_migrate import main as migrate_cli
 from app.db_migrate import _norm_row, migrate
@@ -132,7 +132,8 @@ def test_version_5_postgres_database_is_upgraded_in_place(pg_url):
         assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(5,)]
         ComplaintStore(database=db).initialize()
         assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)] == [(7,)]
-        assert db.features() == {"duplicate_detection": "applied", "resident_accounts": "applied", "ai_analysis": "applied"}
+        assert db.features() == {"duplicate_detection": "applied", "resident_accounts": "applied",
+                                    "ward_zone_operations": "applied", "ai_analysis": "applied"}
         assert old.get(record["id"])["id"] == record["id"]
         for table in ("notification_recipients", "notification_follows", "push_subscriptions", "notifications"):
             assert pg_query(pg_url, f"SELECT COUNT(*) FROM {table}") == [(0,)]
@@ -313,6 +314,12 @@ def populated_sqlite(isolated_db_path, evidence_dir):
                            headers=staff).status_code == 200
         # AI analysis (named migration ai_analysis): both photos analysed and compared on upload.
         assert client.get(f"/api/v1/staff/complaints/{cid}/repair-assessment", headers=staff).json()["assessments"][0]["state"] == "completed"
+        # Ward/zone operations: seeded wards, a city-wide scope, a manual ward and an allocation.
+        store.seed_wards(wards.load_seed())
+        store.set_staff_scope("asha", "city", None, True)
+        assert client.post(f"/api/v1/staff/complaints/{cid}/ward", json={"ward": 5, "reason": "checked"}, headers=staff).status_code == 200
+        assert client.post("/api/v1/staff/supervisor/allocations", json={"complaints": [cid], "assignee": "asha", "priority": "high",
+                                                                          "reason": "drive"}, headers=staff).status_code == 200
     with closing(sqlite3.connect(isolated_db_path)) as conn:
         counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
     assert all(counts[t] > 0 for t in TABLES if t != "verification_log"), counts

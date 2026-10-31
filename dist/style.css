@@ -869,6 +869,11 @@ dialog.dialog::backdrop { background: #0F2236B3; }
 .ai-box-strong { border-style: solid; border-color: var(--red); }
 .ai-box-label { position: absolute; left: -2px; top: -22px; padding: 2px 6px; border-radius: 4px; background: var(--navy); color: var(--white);
   font-size: 12px; font-weight: 600; line-height: 1.4; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+
+/* Supervisor workspace: ward picker */
+.ward-zone { border: 1px solid var(--line, #0F22361F); border-radius: 12px; padding: 8px 12px; }
+.ward-zone summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; cursor: pointer; }
+.ward-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px 16px; padding: 10px 0 4px; }
 /* My Complaints (resident account, server mode): complaint cards with the resident's own evidence. */
 .mc-grid { list-style: none; margin: 16px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
 .mc-card { background: var(--white); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); overflow: hidden; display: flex; flex-direction: column; min-width: 0; }

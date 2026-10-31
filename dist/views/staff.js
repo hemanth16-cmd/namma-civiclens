@@ -57,13 +57,17 @@ export async function renderStaff(root, id = '') {
       ${notice('The staff console works only in <strong>server mode</strong> (set <code>"mode": "backend"</code> in <code>api-config.json</code>). In local mode, use the demonstration <a class="inline-link" href="#/login/official">admin workspace</a>.', 'info', 'alert')}`);
     return;
   }
-  if (!staffSession.get()) return renderSignIn(root, http);
-  return navigate(dashboardRoute(id));
+  const session = staffSession.get();
+  if (!session) return renderSignIn(root, http);
+  if (session.staff?.role === 'supervisor' && !id) return navigate('official/supervisor');
+  return navigate(dashboardRoute(id, session.staff?.role));
 }
 
 /** Where a staff-console link leads once signed in: the dashboard keeps the original design. */
-export function dashboardRoute(id = '') {
+export function dashboardRoute(id = '', role = '') {
   if (id === 'notifications') return 'official/notifications';
+  if (id === 'supervisor') return 'official/supervisor';
+  if (role === 'supervisor' && !id) return 'official/supervisor';
   const publicId = decodeURIComponent(id || '').trim().toUpperCase();
   return SAMPLE.test(publicId) ? 'issue/' + publicId : 'official/complaints';
 }
@@ -83,13 +87,18 @@ function renderSignIn(root, http, message = '') {
     const button = e.target.querySelector('button[type=submit]');
     button.disabled = true;
     try {
-      staffSession.set(await http.staffSignIn(String(form.get('username')), String(form.get('password'))));
+      const session = await http.staffSignIn(String(form.get('username')), String(form.get('password')));
+      staffSession.set(session);
       residentSession.clear();  // one identity per tab
       listOffset = 0;
       // Notifications opened before signing in (sessions are memory-only) are marked read now.
       for (const nid of takePendingStaffReads()) http.markNotification(staffSession.get().token, nid, true).catch(() => {});
-      setSession({role: 'official', name: staffSession.get().staff.displayName, email: staffSession.get().staff.username, server: true});
-      navigate(dashboardRoute(location.hash.replace(/^#\/staff\/?/, '')));  // e.g. a notification's complaint or the inbox
+      setSession({role: 'official', name: session.staff.displayName, email: session.staff.username, server: true});
+      const rawId = location.hash.replace(/^#\/staff\/?/, '');
+      const targetRoute = session.staff?.role === 'supervisor' && !rawId
+        ? 'official/supervisor'
+        : dashboardRoute(rawId, session.staff?.role);
+      navigate(targetRoute);
     } catch (err) {
       button.disabled = false;
       $('staff-password').value = '';

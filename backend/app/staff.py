@@ -12,11 +12,18 @@
     .venv/Scripts/python -m app.staff department disable --code roads   # (or enable)
     .venv/Scripts/python -m app.staff join --username asha --department roads    # department membership
     .venv/Scripts/python -m app.staff leave --username asha --department roads
+    .venv/Scripts/python -m app.staff wards seed            # zones and wards from seeds/wards_e_aasthi.json (idempotent)
+    .venv/Scripts/python -m app.staff wards list
+    .venv/Scripts/python -m app.staff wards import-boundaries --file wards.geojson --ward-property ward_no --source "official ward map"
+    .venv/Scripts/python -m app.staff scope grant --username ravi --zone 7     # or --ward 12, or --city
+    .venv/Scripts/python -m app.staff scope revoke --username ravi --zone 7
+    .venv/Scripts/python -m app.staff scope list --username ravi
 
 Roles (lifecycle.py): official (acts on complaints in their departments, their own assignments and
 the unassigned triage queue), supervisor (all complaints; assigns, reopens, requests reinspection,
-cancels work orders, reads the audit trail) and admin. Roles and departments are managed only here,
-never through the API. Every change is written to the audit log.
+cancels work orders, reads the audit trail; supervisor operations within their geographic scope) and
+admin (everything a supervisor can do, always city-wide). Roles, departments and geographic scope are
+managed only here, never through the API. Every change is written to the audit log.
 
 Passwords are prompted twice without echo, or read from one line of standard input with
 --password-stdin (for scripts). They are never accepted as command-line arguments, never printed,
@@ -33,6 +40,7 @@ from pathlib import Path
 
 from .auth import USERNAME_PATTERN, hash_password, normalise_username, password_problem
 from .lifecycle import ROLES, RuleViolation
+from . import wards as wd
 from .store import ComplaintStore, StaffExists, StoreError
 
 
@@ -75,6 +83,56 @@ def _department(store: ComplaintStore, args) -> int:
     return 0
 
 
+def _wards(store: ComplaintStore, args) -> int:
+    if args.wards_command == "seed":
+        try:
+            rows = wd.load_seed(args.file or wd.SEED_PATH)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"Seed file rejected: {exc}", file=sys.stderr)
+            return 2
+        report = store.seed_wards(rows)
+        counts = store.ward_counts()
+        print(f"Zones: {report['zonesInserted']} inserted, {report['zonesUpdated']} updated. "
+              f"Wards: {report['wardsInserted']} inserted, {report['wardsUpdated']} updated, {report['unchanged']} unchanged.")
+        print(f"Now {counts['operationalWards']} operational wards in {counts['operationalZones']} zones, "
+              f"{counts['wards'] - counts['operationalWards']} testing; {counts['activeWards']} active; {counts['withBoundary']} with a boundary.")
+        return 0
+    if args.wards_command == "import-boundaries":
+        try:
+            boundaries = wd.parse_boundary_file(args.file, args.ward_property)
+        except (OSError, ValueError) as exc:
+            print(f"Boundary file rejected: {exc}", file=sys.stderr)
+            return 2
+        result = store.import_boundaries(boundaries, args.source.strip())
+        print(f"Imported boundaries for {result['imported']} wards from '{args.source.strip()}'.")
+        return 0
+    rows = store.list_wards()
+    if not rows:
+        print("No wards. Run: python -m app.staff wards seed")
+    for w in rows:
+        flags = ",".join(f for f, on in (("testing", w["testing"]), ("inactive", not w["active"]), ("boundary", w["hasBoundary"])) if on) or "-"
+        print(f"zone {w['zone']['number']:>2} {w['zone']['name']:<24} ward {w['number']:>3} {w['name']:<36} {flags}")
+    return 0
+
+
+def _scope(store: ComplaintStore, args) -> int:
+    username = normalise_username(args.username)
+    if args.scope_command == "list":
+        rows = store.staff_scope(username)
+        if not rows:
+            print(f"'{username}' has no geographic scope.")
+        for r in rows:
+            print("city-wide" if r["type"] == "city" else f"{r['type']} {r['number']} ({r['name']})")
+        return 0
+    scope_type, number = ("city", None) if args.city else ("zone", args.zone) if args.zone is not None else ("ward", args.ward)
+    if not store.set_staff_scope(username, scope_type, number, args.scope_command == "grant"):
+        print(f"No staff account '{username}' or no {scope_type} {number}.", file=sys.stderr)
+        return 1
+    what = "city-wide" if scope_type == "city" else f"{scope_type} {number}"
+    print(f"'{username}': {what} {'granted' if args.scope_command == 'grant' else 'revoked'}.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.staff", description="Manage CivicLens staff accounts.")
     parser.add_argument("--db", type=Path, default=None, help="SQLite database (default: CIVICLENS_DB_PATH or backend/data/civiclens.sqlite3); ignored when DATABASE_BACKEND=postgres")
@@ -105,6 +163,24 @@ def main(argv: list[str] | None = None) -> int:
     setpw = sub.add_parser("set-password", help="Change a staff password")
     setpw.add_argument("--username", required=True)
     setpw.add_argument("--password-stdin", action="store_true")
+    wards = sub.add_parser("wards", help="Ward and zone master data")
+    wards_sub = wards.add_subparsers(dest="wards_command", required=True)
+    wards_sub.add_parser("seed", help="Insert or update zones and wards from the e-Aasthi seed file").add_argument("--file", type=Path, default=None)
+    wards_sub.add_parser("list", help="List zones and wards")
+    imp = wards_sub.add_parser("import-boundaries", help="Store official ward boundary polygons (GeoJSON FeatureCollection)")
+    imp.add_argument("--file", type=Path, required=True)
+    imp.add_argument("--ward-property", required=True, help="Feature property holding the ward number")
+    imp.add_argument("--source", required=True, help="Where the boundary file comes from (recorded with each ward)")
+    scope = sub.add_parser("scope", help="Supervisor geographic scope")
+    scope_sub = scope.add_subparsers(dest="scope_command", required=True)
+    for name in ("grant", "revoke"):
+        g = scope_sub.add_parser(name, help=f"{name.capitalize()} city-wide, zone or ward scope")
+        g.add_argument("--username", required=True)
+        target = g.add_mutually_exclusive_group(required=True)
+        target.add_argument("--city", action="store_true")
+        target.add_argument("--zone", type=int)
+        target.add_argument("--ward", type=int)
+    scope_sub.add_parser("list", help="Show a staff member's scope").add_argument("--username", required=True)
     args = parser.parse_args(argv)
 
     store = ComplaintStore(args.db)  # DATABASE_BACKEND decides; --db is the SQLite file (ignored for postgres)
@@ -121,6 +197,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "department":
             return _department(store, args)
+        if args.command == "wards":
+            return _wards(store, args)
+        if args.command == "scope":
+            return _scope(store, args)
         username = normalise_username(args.username)
         if not USERNAME_PATTERN.fullmatch(username):
             print("Username must be 3–64 characters: a–z, 0–9, dot, dash or underscore.", file=sys.stderr)

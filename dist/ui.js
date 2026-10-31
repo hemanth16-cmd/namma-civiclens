@@ -4,6 +4,7 @@ import {icon, categoryIcon, resolutionState} from './presentation.js';
 import {state, viewer} from './state.js';
 import {navigate, currentPath} from './router.js';
 import {LOGO_SRC, BRAND_NAME} from './brand.js';
+import {staffSession} from './staff-session.js';
 
 export {esc, icon, categoryIcon, resolutionState, categories};
 
@@ -120,32 +121,40 @@ export function publicTopbar({back = true, fallback = 'home', right = ''} = {}) 
 
 /** Sidebar item. aria-current marks the active destination for screen readers. */
 function navItem(href, iconName, label, active) {
-  const isActive = currentPath() === href.replace(/^#\//, '');
+  const path = href.replace(/^#\//, '');
+  const current = currentPath();
+  const isActive = current === path || (path.includes('/') && path !== 'official' && path !== 'resident' && current.startsWith(path + '/'));
   return `<a class="nav-item ${isActive ? 'active' : ''}" href="${href}" ${isActive ? 'aria-current="page"' : ''}>${icon(iconName)}<span>${label}</span></a>`;
 }
 
 export function workspaceShell({title, body}) {
   const v = viewer();
   const official = v.role === 'official';
+  const staffRole = staffSession.get()?.staff?.role;
+  const isSupervisorOrAdmin = ['supervisor', 'admin'].includes(staffRole);
   const base = official ? '#/official' : '#/resident';
   const items = official
     ? [[base, 'dashboard', 'Overview'], [base + '/complaints', 'list', 'Incident management'], [base + '/map', 'pin', 'City map'],
-       [base + '/workorders', 'wrench', 'Work orders'], [base + '/video-review', 'video', 'Video review'], [base + '/intelligence', 'scale', 'Intelligence studio']]
+       [base + '/workorders', 'wrench', 'Work orders'], [base + '/video-review', 'video', 'Video review'], [base + '/intelligence', 'scale', 'Intelligence studio'],
+       // Supervisors and admins on a server session; the API enforces the role on every request.
+       ...(isSupervisorOrAdmin ? [[base + '/supervisor', 'layers', 'Supervisor wards']] : [])]
     : [[base, 'dashboard', 'Overview'], [base + '/complaints', 'list', 'My complaints'], [base + '/community', 'message', 'Community issues'],
        [base + '/map', 'pin', 'City map'], [base + '/claim', 'lock', 'Claim a complaint'], [base + '/notifications', 'bell', 'Notifications']];
   const initials = (v.name || (official ? 'Civic official' : 'Resident')).split(/\s+/).map(s => s[0]).join('').slice(0, 2).toUpperCase();
+  const roleLabel = staffRole === 'supervisor' ? 'Supervisor operations' : staffRole === 'admin' ? 'City operations · Admin' : official ? 'City operations' : 'Your neighbourhood';
+  const workspaceTitle = staffRole === 'supervisor' ? 'Supervisor workspace' : official ? 'Admin workspace' : 'User workspace';
   return `<div class="app-shell" id="workspace">
     <a class="skip-link" href="#main">Skip to content</a>
     <aside class="sidebar" id="sidebar" aria-label="Workspace navigation">
       <div class="sidebar-head">${logo(base)}<button type="button" class="btn btn-ghost btn-icon sidebar-close" data-action="close-menu" aria-label="Close navigation">${icon('x')}</button></div>
-      <p class="sidebar-role">${official ? 'City operations' : 'Your neighbourhood'}</p>
+      <p class="sidebar-role">${roleLabel}</p>
       <nav class="nav-group" aria-label="Main">${items.map(([h, i, l]) => navItem(h, i, l, currentPath())).join('')}</nav>
       <div class="nav-group nav-foot">
         ${navItem(base + '/settings', 'settings', 'Preferences', currentPath())}
         <a class="nav-item" href="#/home">${icon('home')}<span>Public entry</span></a>
       </div>
       <div class="sidebar-foot">
-        <p class="sidebar-note">${state.session?.server && state.session?.role === 'resident' ? 'Resident account. Your complaints come from the CivicLens server, which checks every request against your resident session.' : state.session?.server ? 'Server workspace. Complaints come from the CivicLens server, which checks every request against your staff session.' : 'Local prototype. Records stay in this browser. Access rules are demonstration guards.'}</p>
+        <p class="sidebar-note">${state.session?.server && state.session?.role === 'resident' ? 'Resident account. Your complaints come from the CivicLens server, which checks every request against your resident session.' : state.session?.server ? (staffRole === 'supervisor' ? 'Supervisor workspace. Complaints come from the CivicLens server, which checks role and geographic scope.' : 'Server workspace. Complaints come from the CivicLens server, which checks every request against your staff session.') : 'Local prototype. Records stay in this browser. Access rules are demonstration guards.'}</p>
         <button type="button" class="btn btn-ghost btn-block" data-action="logout">${icon('logout')}<span>Sign out</span></button>
       </div>
     </aside>
@@ -155,7 +164,7 @@ export function workspaceShell({title, body}) {
         <div class="workspace-bar-left">
           <button type="button" class="btn btn-ghost btn-icon menu-toggle" data-action="open-menu" aria-controls="sidebar" aria-expanded="false" aria-label="Open navigation">${icon('list')}</button>
           ${backButton(official ? 'official' : 'resident')}
-          <p class="breadcrumb"><span>${official ? 'Admin workspace' : 'User workspace'}</span><span aria-hidden="true">/</span><span class="breadcrumb-current">${esc(title)}</span></p>
+          <p class="breadcrumb"><span>${workspaceTitle}</span><span aria-hidden="true">/</span><span class="breadcrumb-current">${esc(title)}</span></p>
         </div>
         <div class="workspace-bar-right">
           <a class="icon-link" href="${base}/notifications" aria-label="Notifications">${icon('bell')}</a>

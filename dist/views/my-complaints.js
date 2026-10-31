@@ -31,7 +31,7 @@ function sessionEnded() {
 
 /** A blob URL for one of the resident's own files, revoked when the page is left. */
 async function evidenceURL(http, complaintId, evidenceId) {
-  const blob = await http.fetchResidentEvidenceFile(residentSession.get().token, complaintId, evidenceId);
+  const blob = await http.fetchResidentEvidence(residentSession.get().token, complaintId, evidenceId);
   const url = URL.createObjectURL(blob);
   addCleanup(() => URL.revokeObjectURL(url));
   return {url, type: blob.type};
