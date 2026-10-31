@@ -3,7 +3,7 @@ import {api, esc, DEMO_PASSWORD} from '../services.js';
 import {icon, btn, statusPill, verificationPill, heading, notice, publicTopbar, fmtDate, fmtDateTime, toast, panel, logo, categoryIcon, openLightbox} from '../ui.js';
 import {figure, objectURL} from './issue.js';
 import {setSession, viewer} from '../state.js';
-import {navigate} from '../router.js';
+import {navigate, takeResidentDestination} from '../router.js';
 import {reportMode, trackPublic, respondToResolution} from '../report-gateway.js';
 import {staffSession} from '../staff-session.js';
 import {residentSession} from '../resident-session.js';
@@ -127,8 +127,9 @@ async function renderServerTrack(root, id) {
       ? `<strong>${esc(id)}</strong> is a sample report. Samples exist only in local demo mode and are not stored on the CivicLens server, which starts empty.`
       : `No complaint with the ID <strong>${esc(id)}</strong> was found on the CivicLens server. Check the ID for typos. Reports saved in local mode stay on the device that created them and are not on the server.`, 'warn', 'alert', 'mt');
   } else {
-    slot.innerHTML = trackResult(record, false)
-      + (record.status === 'Marked Resolved' ? verifyForm(record) : '')
+    slot.innerHTML = (record.mergedInto ? notice(`This report was merged into <a class="inline-link code-inline" href="#/track/${esc(record.mergedInto)}">${esc(record.mergedInto)}</a>, another report of the same issue. Follow that complaint for updates; this record and its history are kept.`, 'info', 'alert', 'mt') : '')
+      + trackResult(record, false)
+      + (record.status === 'Marked Resolved' && !record.mergedInto ? verifyForm(record) : '')
       + `<p class="mt"><a class="btn btn-secondary" href="#/notifications/follow/${esc(record.id)}" id="track-notify">${icon('bell')}<span>Get notified about this report</span></a> <span class="micro">Needs the private claim code from the receipt.</span></p>`
       + publicEvidencePanel(record)
       + ownerEvidence(record);
@@ -146,7 +147,7 @@ function ownerEvidence(r) {
   const signedIn = !!residentSession.get();
   return `<section class="panel mt" id="owner-evidence" aria-labelledby="owner-evidence-title">
       <h2 id="owner-evidence-title">Your photo or video</h2>
-      <p class="micro">Private originals stay available to the reporter and CivicLens staff. Originals shared at submission and completed repair photos are shown separately in the public before-and-after panel.</p>
+      <p class="micro">Private originals stay available to the reporter and staff.</p>
       <div class="evidence-pair"><figure class="evidence-figure" id="owner-figure"><figcaption><span>Reported issue</span><span class="pill">Private</span></figcaption>
         <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Private evidence</strong></p>
           ${signedIn ? btn(icon('eye') + '<span>View from my account</span>', 'id="owner-evidence-account"', 'primary', 'btn-sm') : ''}
@@ -401,7 +402,7 @@ function renderServerResidentLogin(root, register = false) {
       staffSession.clear();  // one identity per tab: a resident sign-in ends any staff session held here
       setSession({role: 'resident', name: session.resident.displayName, email: session.resident.email, server: true});
       toast(`Signed in as ${session.resident.displayName}.`, 'success');
-      navigate('resident');
+      navigate(takeResidentDestination());  // back to the page that asked for sign-in
     } catch (err) {
       submit.disabled = false;
       e.target.querySelector('#login-password').value = '';

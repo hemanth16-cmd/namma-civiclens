@@ -11,7 +11,7 @@ import {savePhoto, autoSavePhoto, preferredMethod, saveLabel, readPhotoPrefs, wr
 import {LOGO_SRC, loadLogoImage} from '../brand.js';
 import {camera} from '../camera-service.js';
 import {locator, fixQuality, fixAgeMs, GEO} from '../location-service.js';
-import {submitReport as saveReport, takeServerReceipt, reportMode, serverEvidenceKey, uploadEvidence, uploadState, forgetUpload, notifyAboutReport} from '../report-gateway.js';
+import {submitReport as saveReport, takeServerReceipt, reportMode, aiDisclosure, serverEvidenceKey, uploadEvidence, uploadState, forgetUpload, notifyAboutReport} from '../report-gateway.js';
 import {ApiError, newIdempotencyKey} from '../api-client.js';
 
 const cam = state.camera; // recorder, timer, seconds, mode, holdRecording
@@ -268,6 +268,8 @@ export function renderCapture(root) {
     note.textContent = mode === 'backend'
       ? 'No account is needed to report. Server mode: the report details and then the photo or video are sent to the CivicLens development server. Evidence is stored privately and never shown in public tracking.'
       : 'Reporting is unavailable: the CivicLens API configuration (api-config.json) is invalid.';
+    // Disclose external AI analysis before anything is uploaded, but only when the server says it is on.
+    if (mode === 'backend') aiDisclosure().then(text => { if (text && note.isConnected) note.textContent += ' ' + text; });
   });
 
   addCleanup(() => {

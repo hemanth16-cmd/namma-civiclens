@@ -99,7 +99,13 @@ def require_scope(case: dict, staff: dict) -> None:
 def require_expected(current: str, expected: str | None, what: str = "status") -> None:
     """Optimistic concurrency: the client says which state it saw; if the case moved on, refuse."""
     if expected is not None and expected != current:
-        raise RuleViolation(409, "conflict", f"The {what} changed to “{current}” since you loaded it. Reload and try again.")
+        raise RuleViolation(409, "conflict", f"The {what} changed to \"{current}\" since you loaded it. Reload and try again.")
+
+
+def require_not_merged(case: dict) -> None:
+    """A complaint merged into another as a duplicate is managed through its canonical complaint."""
+    if case.get("mergedIntoPk") is not None:
+        raise RuleViolation(409, "merged", "This complaint was merged into another as a duplicate. Act on that complaint, or revert the merge first.")
 
 
 def check_status_transition(case: dict, staff: dict, to: str, explanation: str = "", active_work_orders: int = 0) -> Transition:
@@ -109,11 +115,12 @@ def check_status_transition(case: dict, staff: dict, to: str, explanation: str =
     current = case["status"]
     rule = STATUS_TRANSITIONS.get((current, to))
     if rule is None:
-        raise RuleViolation(409, "invalid_transition", f"A complaint cannot move from “{current}” to “{to}”.")
-    require_role(staff, rule.min_role, f"move a complaint from “{current}” to “{to}”")
+        raise RuleViolation(409, "invalid_transition", f"A complaint cannot move from \"{current}\" to \"{to}\".")
+    require_role(staff, rule.min_role, f"move a complaint from \"{current}\" to \"{to}\"")
     require_scope(case, staff)
+    require_not_merged(case)
     if rule.needs_explanation and not explanation.strip():
-        raise RuleViolation(422, "explanation_required", f"Explain publicly why the complaint moves to “{to}”.")
+        raise RuleViolation(422, "explanation_required", f"Explain publicly why the complaint moves to \"{to}\".")
     if to == "Assigned" and case.get("departmentPk") is None:
         raise RuleViolation(409, "department_required", "Assign a department before marking the complaint assigned.")
     if to == "Marked Resolved" and active_work_orders:
@@ -132,6 +139,7 @@ def verification_after_status(case: dict, to: str) -> str | None:
 def check_assignment(case: dict, staff: dict, department: dict | None, assignee: dict | None) -> None:
     """Supervisor+ assigns or reassigns a department and optionally a staff member."""
     require_role(staff, "supervisor", "assign or reassign complaints")
+    require_not_merged(case)
     if case["status"] == "Marked Resolved":
         raise RuleViolation(409, "invalid_transition", "Reopen the complaint before reassigning it.")
     if department is None or not department.get("active"):
@@ -153,6 +161,7 @@ def check_note(case: dict, staff: dict) -> None:
 
 def check_work_order_create(case: dict, staff: dict) -> None:
     require_scope(case, staff)
+    require_not_merged(case)
     if case["status"] not in ("Assigned", "In Progress", "Under Construction", "Work Completed", "Verification In Progress", "On Hold"):
         raise RuleViolation(409, "invalid_transition", "Assign the complaint before creating a work order.")
 
@@ -166,7 +175,7 @@ def check_work_order_change(case: dict, order: dict, staff: dict, to: str, note:
     if to not in WORK_ORDER_STATUSES:
         raise RuleViolation(422, "invalid_status", "Choose a valid work-order status.")
     if (current, to) not in allowed:
-        raise RuleViolation(409, "invalid_transition", f"A work order cannot move from “{current}” to “{to}”.")
+        raise RuleViolation(409, "invalid_transition", f"A work order cannot move from \"{current}\" to \"{to}\".")
     if to == "Cancelled":
         require_role(staff, "supervisor", "cancel work orders")
     if to in ("Completed", "Cancelled") and not note.strip():
@@ -180,6 +189,7 @@ def status_after_work_started(case: dict) -> str | None:
 
 def check_reinspection(case: dict, staff: dict, note: str) -> None:
     require_role(staff, "supervisor", "request a reinspection")
+    require_not_merged(case)
     if case["status"] != "Marked Resolved":
         raise RuleViolation(409, "invalid_transition", "Reinspection applies only to complaints marked resolved.")
     if case["verification"] == "Reinspection Required":
@@ -203,11 +213,38 @@ def citizen_verification(case: dict, response: str) -> str | None:
     return None
 
 
+def check_merge(duplicate: dict, canonical: dict, staff: dict, duplicate_has_duplicates: bool, reason: str) -> None:
+    """Supervisor+ merges `duplicate` into `canonical`. No self-merge, no chains (the canonical must not
+    itself be merged, and a complaint that others were merged into cannot be merged away), no double merge."""
+    require_role(staff, "supervisor", "merge duplicate complaints")
+    if duplicate["pk"] == canonical["pk"]:
+        raise RuleViolation(422, "invalid_merge", "A complaint cannot be merged into itself.")
+    if duplicate.get("mergedIntoPk") is not None:
+        raise RuleViolation(409, "already_merged", "This complaint is already merged into another. Revert that merge first.")
+    if canonical.get("mergedIntoPk") is not None:
+        raise RuleViolation(409, "canonical_merged", "The chosen complaint is itself a merged duplicate. Merge into its canonical complaint instead.")
+    if duplicate_has_duplicates:
+        raise RuleViolation(409, "has_duplicates", "Other reports were merged into this complaint. Revert those merges, or merge them into the new canonical complaint, first.")
+    if not reason.strip():
+        raise RuleViolation(422, "reason_required", "Explain why these reports describe the same issue.")
+
+
+def check_merge_revert(staff: dict, reason: str) -> None:
+    require_role(staff, "supervisor", "revert merges")
+    if not reason.strip():
+        raise RuleViolation(422, "reason_required", "Give a reason for reverting the merge.")
+
+
 def allowed_actions(case: dict, staff: dict, active_work_orders: int = 0) -> list[dict]:
     """What this staff member may do now. The console shows only these; the server re-checks every
     request anyway, so this list is a convenience and never the authority."""
     if not in_scope(case, staff):
         return []
+    if case.get("mergedIntoPk") is not None:  # a merged duplicate: notes only, plus reverting for supervisors
+        merged = [{"action": "add_note", "label": "Add internal note"}]
+        if has_role(staff, "supervisor"):
+            merged.append({"action": "revert_merge", "label": "Revert merge"})
+        return merged
     actions = []
     for (current, to), rule in STATUS_TRANSITIONS.items():
         if current != case["status"] or not has_role(staff, rule.min_role):
@@ -223,6 +260,9 @@ def allowed_actions(case: dict, staff: dict, active_work_orders: int = 0) -> lis
         actions.append({"action": "create_work_order", "label": "Create work order"})
     if has_role(staff, "supervisor") and case["status"] == "Marked Resolved" and case["verification"] != "Reinspection Required":
         actions.append({"action": "request_reinspection", "label": "Request reinspection"})
+    actions.append({"action": "review_duplicates", "label": "Review possible duplicates"})
+    if has_role(staff, "supervisor"):
+        actions.append({"action": "merge", "label": "Merge into another complaint"})
     actions.append({"action": "add_note", "label": "Add internal note"})
     actions.append({"action": "add_public_update", "label": "Post public update"})
     return actions

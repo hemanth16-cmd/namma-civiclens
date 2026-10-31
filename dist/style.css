@@ -862,15 +862,26 @@ dialog.dialog::backdrop { background: #0F2236B3; }
 .notification-title { display: flex; align-items: center; gap: 8px; }
 .unread-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--coral); flex: none; }
 
-/* Direct after-repair capture and expanded incident filters. */
-.repair-column { min-width: 0; }
-.repair-toolbar { display: flex; flex-wrap: wrap; gap: .65rem; margin: .8rem 0; }
-.repair-toolbar .btn { white-space: normal; }
-.repair-camera { padding: 1rem; border: 1px solid var(--line, #d9dfe4); border-radius: 14px; margin-top: 1rem; }
-.repair-camera video { display: block; width: 100%; max-height: 380px; object-fit: contain; background: #18324a; border-radius: 10px; }
-.filter-note { padding: 0 22px; }
-#complaint-filter { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-@media (max-width: 640px) {
-  .repair-toolbar .btn { width: 100%; justify-content: center; }
-  #complaint-filter { grid-template-columns: 1fr; }
-}
+/* AI detection overlay on private evidence (staff console). Boxes are positioned in percent of the photo. */
+.ai-overlay { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+.ai-overlay > img { display: block; max-width: 100%; height: auto; }
+.ai-box { position: absolute; border: 2px dashed var(--amber-ink); border-radius: 3px; box-sizing: border-box; pointer-events: none; }
+.ai-box-strong { border-style: solid; border-color: var(--red); }
+.ai-box-label { position: absolute; left: -2px; top: -22px; padding: 2px 6px; border-radius: 4px; background: var(--navy); color: var(--white);
+  font-size: 12px; font-weight: 600; line-height: 1.4; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+/* My Complaints (resident account, server mode): complaint cards with the resident's own evidence. */
+.mc-grid { list-style: none; margin: 16px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.mc-card { background: var(--white); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+.mc-thumb { aspect-ratio: 4 / 3; background: var(--surface-quiet); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--slate); border-bottom: 1px solid var(--line); text-align: center; padding: 8px; }
+.mc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mc-thumb:has(img) { padding: 0; }
+.mc-thumb svg { width: 28px; height: 28px; color: var(--navy); }
+.mc-thumb-video { background: #0F2236; color: var(--white); }
+.mc-thumb-video svg { color: var(--white); }
+.mc-thumb-failed { background: var(--amber-tint); color: var(--amber-ink); }
+.mc-thumb-msg { font-size: 13px; }
+.mc-body { padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.mc-meta { margin: 0; font-size: 13px; color: var(--slate); }
+.mc-title { margin: 0; font-size: 17px; }
+.mc-desc { margin: 0; overflow-wrap: anywhere; }
+.mc-evidence-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; margin-top: 14px; }

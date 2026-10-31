@@ -1,6 +1,6 @@
 // City map page: legend, shared filters, map and accessible list that always agree.
 import {api, categories, statuses, esc, verificationStates} from '../services.js';
-import {workspaceRecords} from '../server-records.js';
+import {mapRecords} from '../server-records.js';
 import {categoryIcon, resolutionState} from '../presentation.js';
 import {icon, workspaceShell, heading, pill, statusPill, verificationPill, priorityPill, toast, empty} from '../ui.js';
 import {viewer, addCleanup} from '../state.js';
@@ -9,7 +9,7 @@ import {mountCityMap, pointsFor, MAP_ATTRIBUTION} from './map.js';
 
 export async function renderMapPage(root) {
   const v = viewer();
-  const records = await workspaceRecords(v);
+  const records = await mapRecords(v);  // resident (server mode): all public Bengaluru complaints
   const areas = [...new Set(records.map(r => r.area))].sort();
   const base = v.role === 'official' ? '#/official' : '#/resident';
   root.innerHTML = workspaceShell({title: 'City map', body: `
@@ -28,7 +28,7 @@ export async function renderMapPage(root) {
         </div>
         <div class="map-frame" id="map-frame"></div>
         <p class="map-status" id="map-status" role="status" aria-live="polite">Loading map…</p>
-        <p class="map-disclosure">${esc(MAP_ATTRIBUTION)}. ${records.some(r => r.sample) ? 'Sample incidents use approximate neighbourhood positions. ' : 'Positions are the GPS coordinates recorded with each report. '}Your device location is never saved.</p>
+        <p class="map-disclosure">${esc(MAP_ATTRIBUTION)}. ${records.some(r => r.sample) ? 'Sample incidents use approximate neighbourhood positions. ' : records.some(r => r.public) ? 'Every public report across Bengaluru, shown at an approximate position (about 110 m) so no reporter’s exact spot is published. ' : 'Positions are the GPS coordinates recorded with each report. '}Your device location is never saved.</p>
       </section>
       <aside class="map-side" aria-label="Filters and results">
         <section class="panel map-filters" aria-label="Filter map and list">

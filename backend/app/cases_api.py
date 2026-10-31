@@ -12,7 +12,7 @@ from server data. Write methods are POST only, matching the CORS allowlist (GET,
 import re
 import secrets
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 
 from .auth import current_staff
@@ -20,8 +20,9 @@ from .complaints import NOT_FOUND, PUBLIC_ID_PATTERN
 from .errors import ApiProblem
 from .evidence import UploadSettings, receive_upload
 from .evidence_storage import EvidenceStorage
-from .models import (AssignmentIn, AuditEntry, DepartmentOut, NoteIn, PublicUpdateIn, ReinspectionIn, RepairEvidenceReceipt,
-                     StaffCase, TransitionIn, WorkOrderChangeIn, WorkOrderIn, WorkOrderList)
+from .duplicates import DEFAULT_RADIUS_M, DEFAULT_WINDOW_DAYS, MAX_RADIUS_M, MAX_WINDOW_DAYS
+from .models import (AssignmentIn, AuditEntry, DepartmentOut, DuplicateCandidates, MergeIn, NoteIn, PublicUpdateIn, ReasonIn, ReinspectionIn,
+                     RepairEvidenceReceipt, StaffCase, TransitionIn, WorkOrderChangeIn, WorkOrderIn, WorkOrderList)
 from .quota import EvidenceQuota
 from .ratelimit import client_ip, enforce
 from .staff_api import stream_evidence
@@ -29,6 +30,7 @@ from .store import STAFF_LIST_MAX, ComplaintStore, utc_now
 
 router = APIRouter(prefix="/staff", tags=["complaint management"])
 WORK_ORDER_ID = re.compile(r"^wo_[A-Za-z0-9_-]{16}$")
+MERGE_ID = re.compile(r"^mg_[A-Za-z0-9_-]{16}$")
 EVIDENCE_ID = re.compile(r"^ev_[A-Za-z0-9_-]{22}$")
 WORK_ORDER_NOT_FOUND = "No work order was found with that ID."
 
@@ -123,17 +125,20 @@ def list_work_orders(request: Request, response: Response, staff: dict = Depends
 
 
 @router.post("/work-orders/{work_order_id}/evidence", status_code=201, response_model=RepairEvidenceReceipt)
-async def upload_repair_evidence(work_order_id: str, request: Request, response: Response, staff: dict = Depends(current_staff)) -> dict:
-    return await _upload_repair(request, response, staff, work_order_id=work_order_id)
+async def upload_repair_evidence(work_order_id: str, request: Request, response: Response, background: BackgroundTasks,
+                                 staff: dict = Depends(current_staff)) -> dict:
+    return await _upload_repair(request, response, staff, background, work_order_id=work_order_id)
 
 
 @router.post("/complaints/{public_id}/repair-evidence", status_code=201, response_model=RepairEvidenceReceipt)
-async def upload_case_repair(public_id: str, request: Request, response: Response, staff: dict = Depends(current_staff)) -> dict:
+async def upload_case_repair(public_id: str, request: Request, response: Response, background: BackgroundTasks,
+                             staff: dict = Depends(current_staff)) -> dict:
     _check_id(public_id)
-    return await _upload_repair(request, response, staff, public_id=public_id)
+    return await _upload_repair(request, response, staff, background, public_id=public_id)
 
 
-async def _upload_repair(request: Request, response: Response, staff: dict, *, work_order_id: str | None = None, public_id: str | None = None) -> dict:
+async def _upload_repair(request: Request, response: Response, staff: dict, background: BackgroundTasks, *,
+                         work_order_id: str | None = None, public_id: str | None = None) -> dict:
     """After-repair photo, through the same streaming checks as citizen evidence
     (signature sniffing, size limit, SHA-256, quota). Authorised before the body is read."""
     store = _store(request)
@@ -175,6 +180,8 @@ async def _upload_repair(request: Request, response: Response, staff: dict, *, w
             await run_in_threadpool(storage.delete, key)  # no file without a row, and no row without a file
             raise
         reservation.commit(pending.size)
+        # After the response: AI analysis of the repair photo and a before/after suggestion (app/ai/service.py).
+        background.add_task(request.app.state.ai.repair_evidence_added, row["evidenceId"])
         return {k: row[k] for k in ("evidenceId", "mediaType", "contentType", "byteSize", "sha256", "capturedAt", "uploadedAt")}
 
 
@@ -215,3 +222,43 @@ def view_case_repair(public_id: str, evidence_id: str, request: Request, staff: 
     if evidence is None or evidence["role"] != "repair":
         raise ApiProblem(404, "evidence_not_found", "No such repair evidence.")
     return stream_evidence(request, evidence, staff, f"{public_id}-repair")
+
+# ---------- Duplicate detection (Workstream 2) ----------
+
+@router.get("/complaints/{public_id}/duplicates", response_model=DuplicateCandidates)
+def duplicate_candidates(public_id: str, request: Request, response: Response, staff: dict = Depends(current_staff),
+                         radius: float = Query(DEFAULT_RADIUS_M, ge=10, le=MAX_RADIUS_M),
+                         days: int = Query(DEFAULT_WINDOW_DAYS, ge=1, le=MAX_WINDOW_DAYS)) -> dict:
+    """Ranked duplicate suggestions with the factors behind each score. Suggestions only: nothing is merged."""
+    _check_id(public_id)
+    result = _store(request).duplicate_candidates(public_id, staff["pk"], radius, days)
+    if result is None:
+        raise ApiProblem(404, "not_found", NOT_FOUND)
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@router.post("/complaints/{public_id}/merge", response_model=StaffCase)
+def merge(public_id: str, payload: MergeIn, request: Request, response: Response, staff: dict = Depends(current_staff)) -> dict:
+    """Merge this complaint (the duplicate) into `canonical`. Supervisor+; both records are kept."""
+    _check_id(public_id)
+    _store(request).merge_complaints(public_id, payload.canonical, staff["pk"], payload.reason, _ip(request))
+    return case_view(request, response, public_id, staff)
+
+
+@router.post("/merges/{merge_id}/revert", response_model=StaffCase)
+def revert_merge(merge_id: str, payload: ReasonIn, request: Request, response: Response, staff: dict = Depends(current_staff)) -> dict:
+    if not MERGE_ID.fullmatch(merge_id):
+        raise ApiProblem(404, "not_found", "No merge was found with that ID.")
+    duplicate = _store(request).revert_merge(merge_id, staff["pk"], payload.reason, _ip(request))
+    return case_view(request, response, duplicate, staff)
+
+
+@router.post("/complaints/{public_id}/duplicates/{other_id}/dismiss", response_model=StaffCase)
+def dismiss_duplicate(public_id: str, other_id: str, payload: ReasonIn, request: Request, response: Response,
+                      staff: dict = Depends(current_staff)) -> dict:
+    """Mark a suggested pair as not duplicates, so it is no longer suggested. Supervisor+."""
+    _check_id(public_id)
+    _check_id(other_id)
+    _store(request).dismiss_duplicate(public_id, other_id, staff["pk"], payload.reason, _ip(request))
+    return case_view(request, response, public_id, staff)

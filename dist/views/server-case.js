@@ -12,6 +12,7 @@ import {staffSession} from '../staff-session.js';
 import {serverClient} from '../server-records.js';
 import {mountRepairCapture} from './repair-capture.js';
 import {figure, geoBlock, labelOf, objectURL} from './issue.js';
+import {aiSections, mountAiPanels, overlayDetections} from './staff-ai.js';
 
 const $ = id => document.getElementById(id);
 const can = (r, action) => r.allowedActions.some(a => a.action === action);
@@ -193,10 +194,14 @@ export async function renderServerCase(root, id) {
           <h3 class="mt">Verification history</h3>
           ${verificationHistory}
         </section>
+        <section class="panel" id="case-ai" aria-label="AI analysis and repair verification">
+          ${aiSections()}
+        </section>
         <section class="panel" aria-labelledby="reviews-title">
           ${panelHead('Community reviews', pill('Not on the server yet'), 'Neighbourhood perspective')}
-          ${empty('Community reviews need resident accounts', 'Community reviews are not supported by the server yet, so neighbours cannot post reviews here. Citizens confirm or dispute a repair from public tracking.')}
+          ${empty('Community reviews need resident accounts', 'The CivicLens server has no resident sign-in yet, so neighbours cannot post reviews here. Citizens confirm or dispute a repair from public tracking.')}
         </section>
+        ${duplicatePanel(r)}
         <section class="panel" aria-labelledby="timeline-title">
           ${panelHead('Progress timeline', '', 'Public updates')}
           ${timeline ? `<ol class="timeline">${timeline}</ol>` : '<p class="micro">No updates yet.</p>'}
@@ -236,6 +241,7 @@ function wire(root, http, r, latest) {
     }
   };
   const value = id => ($(id)?.value || '').trim();
+  wireDuplicates(http, r, run, fail);
 
   // Evidence: fetched only on request; each view is written to the access log by the server.
   const show = async (slotId, load, mediaType, gps, captured, uploaded, label, titleText) => {
@@ -252,13 +258,37 @@ function wire(root, http, r, latest) {
       fail(err, fig.querySelector('.evidence-empty'));
     }
   };
+  // AI analysis and repair verification (app/ai): suggestions for staff, loaded with the staff session.
+  // The before/after viewers use the same staff evidence endpoints, so each view is in the access log.
+  const showInto = async (target, load, evidenceId, alt) => {
+    target.innerHTML = '<p class="micro" role="status">Loading evidence…</p>';
+    try {
+      const blob = await load();
+      if (!target.isConnected) return;
+      const url = objectURL(blob);
+      target.innerHTML = blob.type.startsWith('video/')
+        ? `<video class="receipt-media" controls playsinline src="${url}" aria-label="${esc(alt)}"></video>`
+        : `<img class="receipt-media" src="${url}" alt="${esc(alt)}">`;
+      overlayDetections(target, evidenceId);
+      target.insertAdjacentHTML('beforeend', '<p class="micro">Viewing is recorded in the evidence access log.</p>');
+      loadAccessLog(http, r);
+    } catch (err) {
+      fail(err, target);
+    }
+  };
+  mountAiPanels(http, r, {
+    onError: (err, slot) => fail(err, slot),
+    viewOriginal: (target, evidenceId) => showInto(target, () => http.fetchStaffEvidence(token(), r.id), evidenceId, 'Original evidence'),
+    viewAfter: (target, workOrderId, evidenceId) => showInto(target, () => (workOrderId ? http.fetchWorkOrderEvidence(token(), workOrderId, evidenceId) : http.fetchCaseRepairEvidence(token(), r.id, evidenceId)), evidenceId, 'After-repair evidence')
+  });
+
   root.querySelector('[data-load="before"]')?.addEventListener('click', () => show('figure-before', () => http.fetchStaffEvidence(token(), r.id),
-    r.mediaType, r.gps, r.capturedAt, r.uploadedAt, 'Reported', 'Before · reported issue'));
-  root.querySelector('[data-load="after"]')?.addEventListener('click', () => show('figure-after', () => http.fetchCaseRepairEvidence(token(), r.id, latest.evidenceId),
-    'photo', null, null, latest.uploadedAt, 'Repair', 'After · repair evidence'));
+    r.mediaType, r.gps, r.capturedAt, r.uploadedAt, 'Reported', 'Before — reported issue'));
+  root.querySelector('[data-load="after"]')?.addEventListener('click', () => show('figure-after', () => (latest.order ? http.fetchWorkOrderEvidence(token(), latest.order.id, latest.evidenceId) : http.fetchCaseRepairEvidence(token(), r.id, latest.evidenceId)),
+    'photo', null, null, latest.uploadedAt, 'Repair', 'After — repair evidence'));
   root.querySelectorAll('[data-repair]').forEach(b => b.addEventListener('click', async () => {
     try {
-      const blob = await http.fetchCaseRepairEvidence(token(), r.id, b.dataset.repair);
+      const blob = await (b.dataset.order ? http.fetchWorkOrderEvidence(token(), b.dataset.order, b.dataset.repair) : http.fetchCaseRepairEvidence(token(), r.id, b.dataset.repair));
       openLightbox(objectURL(blob), 'Repair evidence');
       loadAccessLog(http, r);
     } catch (err) { fail(err); }
@@ -349,6 +379,81 @@ function wire(root, http, r, latest) {
         ? `<ol class="history-list">${entries.map(a => `<li><div class="tl-head"><strong>${esc(a.action.replace(/_/g, ' '))}</strong><time datetime="${esc(a.at)}">${fmtDateTime(a.at)}</time></div><p class="micro">${esc(a.actorType === 'staff' ? `${a.actorName || ''} (${a.actor || ''})` : a.actorType)}</p></li>`).join('')}</ol>`
         : '<p class="micro">No audit entries yet.</p>';
     } catch (err) { fail(err, slot); }
+  });
+}
+
+// ---------- Duplicate review (Workstream 2): suggestions only; merging needs a supervisor ----------
+
+const LABEL_TEXT = {likely_duplicate: 'Likely duplicate', possible_duplicate: 'Possible duplicate', recurrence: 'Recurrence after a fix', nearby_separate: 'Probably a separate issue'};
+
+function duplicatePanel(r) {
+  if (r.mergedInto) {
+    const active = r.merges.find(m => m.duplicate === r.id && !m.revertedAt);
+    return `<section class="panel" aria-labelledby="dup-title">
+      ${panelHead('Merged report', '', 'Duplicate review')}
+      ${notice(`This report was merged into <a class="inline-link code-inline" href="#/issue/${esc(r.mergedInto)}">${esc(r.mergedInto)}</a> as a report of the same issue${active ? ` by ${esc(active.by)}: “${esc(active.reason)}”` : ''}. Manage it there; this record and its evidence are kept.`, 'info', 'alert')}
+      ${can(r, 'revert_merge') && active ? `<form id="dup-revert" class="stack" data-merge="${esc(active.id)}">
+        ${field('dup-revert-reason', 'Reason for reverting', '<input id="dup-revert-reason" maxlength="500" required>')}
+        <div class="row-actions">${btn('Revert merge', 'type="submit"', 'secondary', 'btn-sm')}</div></form>` : ''}
+    </section>`;
+  }
+  const linked = r.merges.filter(m => m.canonical === r.id && !m.revertedAt);
+  if (!linked.length && !can(r, 'review_duplicates')) return '';
+  return `<section class="panel" aria-labelledby="dup-title" id="dup-panel">
+    ${panelHead('Possible duplicates', '', 'Suggestions only')}
+    ${linked.length ? `<p class="micro">Reports merged into this complaint: ${linked.map(m => `<a class="inline-link code-inline" href="#/issue/${esc(m.duplicate)}">${esc(m.duplicate)}</a>`).join(', ')}.</p>` : ''}
+    ${can(r, 'review_duplicates') ? `<p class="micro">From location (against GPS accuracy), category, time, wording and identical files. Nothing is merged without a supervisor.</p>
+      <div class="row-actions">${btn(icon('search') + '<span>Find possible duplicates</span>', 'id="dup-find"', 'secondary', 'btn-sm')}</div>
+      <div id="dup-list" class="mt" role="status" aria-live="polite"></div>` : ''}
+  </section>`;
+}
+
+function candidateRow(r, c) {
+  const factors = c.factors.map(f => `<li><span>${esc(f.name)}: ${esc(f.detail)}</span><strong>${Math.round(f.contribution * 100)} pts</strong></li>`).join('');
+  return `<li class="panel" data-candidate="${esc(c.id)}">
+    <div class="tl-head"><strong><a class="inline-link code-inline" href="#/issue/${esc(c.id)}">${esc(c.id)}</a> · ${esc(LABEL_TEXT[c.label] || c.label)}</strong>
+      <span>${Math.round(c.score * 100)}% · ${Math.round(c.distanceM)} m away</span></div>
+    <p class="micro">${esc(c.category)} · ${esc(c.area)} · ${esc(c.status)} · reported ${c.created ? fmtDate(c.created) : '—'}</p>
+    ${c.reasons.length ? `<ul>${c.reasons.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+    ${c.caution ? notice(esc(c.caution), 'warn', 'alert') : ''}
+    <details class="explain"><summary>How the score was worked out</summary><ul class="contrib">${factors}</ul></details>
+    ${can(r, 'merge') ? `${field(`dup-reason-${esc(c.id)}`, 'Reason', `<input id="dup-reason-${esc(c.id)}" maxlength="500" placeholder="e.g. same pothole, same photo angle">`)}
+      <div class="row-actions">
+        ${btn(`Merge this report into ${esc(c.id)}`, 'data-dup-act="merge-into"', 'secondary', 'btn-sm')}
+        ${btn(`Merge ${esc(c.id)} into this report`, 'data-dup-act="merge-from"', 'secondary', 'btn-sm')}
+        ${btn('Not a duplicate', 'data-dup-act="dismiss"', 'ghost', 'btn-sm')}
+      </div>` : ''}
+  </li>`;
+}
+
+function wireDuplicates(http, r, run, fail) {
+  const token = () => staffSession.get()?.token;
+  $('dup-revert')?.addEventListener('submit', e => {
+    e.preventDefault();
+    run(e.submitter, () => http.revertMerge(token(), e.target.dataset.merge, $('dup-revert-reason').value.trim()), 'Merge reverted.');
+  });
+  $('dup-find')?.addEventListener('click', async () => {
+    const list = $('dup-list');
+    list.innerHTML = '<p class="micro">Looking for nearby reports…</p>';
+    try {
+      const result = await http.getDuplicateCandidates(token(), r.id);
+      if (!list.isConnected) return;
+      list.innerHTML = result.note ? notice(esc(result.note), 'info', 'alert')
+        : result.candidates.length ? `<p class="micro">Within ${Math.round(result.radiusM)} m and ${result.days} days, same or related category, best first.</p><ol class="stack">${result.candidates.map(c => candidateRow(r, c)).join('')}</ol>`
+        : '<p class="micro">No similar reports nearby.</p>';
+    } catch (err) {
+      fail(err, list);
+    }
+  });
+  $('dup-list')?.addEventListener('click', e => {
+    const act = e.target.closest('[data-dup-act]')?.dataset.dupAct;
+    const other = e.target.closest('[data-candidate]')?.dataset.candidate;
+    if (!act || !other) return;
+    const reason = ($(`dup-reason-${other}`)?.value || '').trim();
+    const button = e.target.closest('button');
+    if (act === 'merge-into') return run(button, () => http.mergeComplaint(token(), r.id, {canonical: other, reason}), `Merged into ${other}.`);
+    if (act === 'merge-from') return run(button, () => http.mergeComplaint(token(), other, {canonical: r.id, reason}), `${other} merged into this complaint.`);
+    return run(button, () => http.dismissDuplicate(token(), r.id, other, reason), 'Marked as not a duplicate.');
   });
 }
 

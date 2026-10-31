@@ -13,7 +13,7 @@ from app.claims import ID_ALPHABET, verify_claim_code
 from app.main import create_app
 from app.store import ComplaintStore, IdAllocationError, resolve_db_path
 
-PUBLIC_KEYS = {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog", "publicEvidence"}
+PUBLIC_KEYS = {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog", "publicEvidence", "mergedInto"}
 GENERATED_ID = re.compile(rf"^NCL-\d{{4}}-[{ID_ALPHABET}]{{6}}$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
