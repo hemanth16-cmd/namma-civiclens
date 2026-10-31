@@ -101,9 +101,17 @@ class VerificationEntry(BaseModel):
     note: str = ""
 
 
+class PublicEvidenceSummary(BaseModel):
+    evidenceId: str
+    phase: Literal["before", "after"]
+    mediaType: str
+    uploadedAt: str
+
+
 class PublicComplaint(BaseModel):
     """Public tracking projection: the same allowlist as api.publicRecord() in dist/services.js.
-    No claim code or hash, owner, precise GPS, media, description or internal fields."""
+    No claim code or hash, owner, precise GPS, storage keys, description or internal fields.
+    Only public-safe media descriptors are included; file access is checked separately."""
 
     id: str
     category: str
@@ -114,6 +122,7 @@ class PublicComplaint(BaseModel):
     updated: str
     timeline: list[TimelineEntry]
     verificationLog: list[VerificationEntry]
+    publicEvidence: list[PublicEvidenceSummary] = Field(default_factory=list)
     # Public ID of the complaint this report was merged into as a duplicate (schema 8), else null.
     mergedInto: str | None = None
 
@@ -355,7 +364,7 @@ class ReadAllResult(BaseModel):
 # Inputs are strict (unknown fields refused, lengths capped). Outputs are explicit allowlists: the
 # public projection (PublicComplaint above) is unchanged and never includes any of these fields.
 
-Status = Literal["Submitted", "Under Review", "Assigned", "In Progress", "Marked Resolved"]
+Status = Literal["Submitted", "Under Review", "Assigned", "In Progress", "Under Construction", "Work Completed", "Verification In Progress", "On Hold", "Marked Resolved"]
 WorkOrderStatus = Literal["Open", "In Progress", "Completed", "Cancelled"]
 DepartmentCode = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")]
 Username = Annotated[str, Field(pattern=r"^[a-z0-9._-]{3,64}$")]
@@ -527,6 +536,7 @@ class MergeOut(BaseModel):
 
 class StaffCase(StaffComplaint):
     """StaffComplaint plus management data. Internal notes and staff names appear only here."""
+    repairEvidence: list[StaffEvidenceSummary] = Field(default_factory=list)
     version: int
     merges: list[MergeOut] = []
     assignment: AssignmentOut
@@ -654,6 +664,7 @@ class ResidentPreferences(_Strict):
     updates: bool = True
     verification: bool = True
     hotspots: bool = False
+
 
 
 # ---------- Duplicate detection (schema 8) ----------

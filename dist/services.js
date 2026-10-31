@@ -10,7 +10,7 @@ export const categories = [
   'Potholes', 'Road cracks and damage', 'Garbage accumulation', 'Illegal dumping',
   'Drainage or waterlogging', 'Broken streetlights', 'Damaged footpaths', 'Water leakage', 'Other civic issues'
 ];
-export const statuses = ['Submitted', 'Under Review', 'Assigned', 'In Progress', 'Marked Resolved'];
+export const statuses = ['Submitted', 'Under Review', 'Assigned', 'In Progress', 'Under Construction', 'Work Completed', 'Verification In Progress', 'On Hold', 'Marked Resolved'];
 export const verificationStates = ['Pending Verification', 'Citizen Confirmed', 'Disputed', 'Reinspection Required'];
 export const citizenResponses = ['Appears Resolved', 'Still Present', 'Cannot Confirm'];
 export const DEMO_PASSWORD = 'CivicDemo2026';

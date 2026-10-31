@@ -2290,6 +2290,8 @@ class ComplaintStore:
             "assignmentHistory": [{"id": h["assignment_id"], "department": {"code": h["code"], "name": h["name"]}, "assignee": h["assignee"],
                                    "reason": h["reason"], "by": h["actor"], "at": h["assigned_at"]} for h in history],
             "workOrders": orders,
+            "repairEvidence": [_evidence_dict(e) for e in conn.execute(
+                "SELECT * FROM evidence WHERE complaint_pk = ? AND role = 'repair' ORDER BY uploaded_at, pk", (case["pk"],))],
             "notes": [{"id": n["note_id"], "body": n["body"], "createdAt": n["created_at"],
                        "author": {"username": n["username"], "displayName": n["display_name"]}} for n in notes],
             "allowedActions": lc.allowed_actions(case, actor, active),
@@ -2566,6 +2568,61 @@ class ComplaintStore:
                         {"workOrderId": work_order_id, "evidenceId": meta["evidenceId"], "sha256": meta["sha256"]}, client_ip, now)
             return _evidence_dict(conn.execute("SELECT * FROM evidence WHERE pk = ?", (evidence_pk,)).fetchone())
         return self._mutate("Repair evidence", run)
+
+    def add_case_repair_evidence(self, public_id: str, staff_pk: int, meta: dict, client_ip: str | None = None) -> dict:
+        """Attach a repair photo directly to a case without manufacturing a work order."""
+        def run(conn):
+            case = self._locked_case(conn, public_id)
+            actor = self._actor(conn, staff_pk)
+            lc.require_scope(case, actor)
+            now = utc_now()
+            evidence_pk = conn.insert(
+                "INSERT INTO evidence (evidence_id, complaint_pk, role, storage_key, media_type, content_type, byte_size, sha256, captured_at, "
+                "uploaded_at, storage_backend, uploaded_by_staff_pk) VALUES (?, ?, 'repair', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (meta["evidenceId"], case["pk"], meta["storageKey"], meta["mediaType"], meta["contentType"], meta["byteSize"],
+                 meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"], meta.get("storageBackend", "local"), actor["pk"]))
+            self._timeline(conn, case["pk"], case["status"], "After-repair evidence was attached for review.", "work_order", actor, now)
+            self._touch(conn, case["pk"], now)
+            self._audit(conn, case["pk"], actor, "repair_evidence_added",
+                        {"evidenceId": meta["evidenceId"], "sha256": meta["sha256"]}, client_ip, now)
+            return _evidence_dict(conn.execute("SELECT * FROM evidence WHERE pk = ?", (evidence_pk,)).fetchone())
+        return self._mutate("Repair evidence", run)
+
+    def case_evidence(self, public_id: str, evidence_id: str, staff_pk: int | None = None) -> dict | None:
+        """Staff: scoped access. Public: shared original, or repair after administrative resolution.
+        Public visibility is rechecked on every request, so reopening removes repair publication.
+        """
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    "SELECT e.*, c.share_evidence, c.status FROM evidence e JOIN complaints c ON c.pk = e.complaint_pk "
+                    "WHERE c.public_id = ? AND e.evidence_id = ?", (public_id, evidence_id)).fetchone()
+                if row is None:
+                    return None
+                if staff_pk is not None:
+                    lc.require_scope(self._case(conn, public_id), self._actor(conn, staff_pk))
+                elif not ((row["role"] == "original" and row["share_evidence"]) or
+                          (row["role"] == "repair" and row["status"] == "Marked Resolved")):
+                    return None
+                return _evidence_dict(row) | {"pk": row["pk"]}
+        except RuleViolation:
+            raise
+        except DB_ERRORS as exc:
+            raise StoreError("Evidence could not be read") from exc
+
+    def public_evidence(self, public_id: str) -> list[dict]:
+        """Public-safe descriptors only: no storage keys, checksums, staff identities or location."""
+        try:
+            with closing(self._connect()) as conn:
+                rows = conn.execute(
+                    "SELECT e.evidence_id, e.role, e.media_type, e.uploaded_at FROM evidence e "
+                    "JOIN complaints c ON c.pk = e.complaint_pk WHERE c.public_id = ? AND "
+                    "((e.role = 'original' AND c.share_evidence = 1) OR (e.role = 'repair' AND c.status = 'Marked Resolved')) "
+                    "ORDER BY e.uploaded_at, e.pk", (public_id,)).fetchall()
+                return [{"evidenceId": r["evidence_id"], "phase": "before" if r["role"] == "original" else "after",
+                         "mediaType": r["media_type"], "uploadedAt": r["uploaded_at"]} for r in rows]
+        except DB_ERRORS as exc:
+            raise StoreError("Evidence could not be read") from exc
 
     def work_order_evidence(self, work_order_id: str, evidence_id: str, staff_pk: int) -> dict | None:
         """Metadata (with pk and storage key, for streaming) of one file linked to a work order the staff member may see."""

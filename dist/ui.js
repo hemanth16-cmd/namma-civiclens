@@ -27,6 +27,7 @@ export function pill(text, tone = 'neutral', iconName = '') {
 export function statusPill(status) {
   const map = {
     'Submitted': ['neutral', 'file'], 'Under Review': ['navy', 'eye'], 'Assigned': ['navy', 'user'],
+    'Under Construction': ['coral', 'wrench'], 'Work Completed': ['neutral', 'check'], 'Verification In Progress': ['neutral', 'eye'], 'On Hold': ['neutral', 'clock'],
     'In Progress': ['coral', 'wrench'], 'Marked Resolved': ['green', 'check']
   };
   const [tone, ic] = map[status] || ['neutral', 'flag'];

@@ -5,11 +5,12 @@
 // re-reads the case after every change. Private evidence opens on request because every view is logged.
 import {esc, assessPriority} from '../services.js';
 import {icon, categoryIcon, resolutionState, workspaceShell, heading, btn, statusPill, verificationPill, priorityPill, notice, panel, panelHead, toast, fmtDate, fmtDateTime, openLightbox, empty, pill} from '../ui.js';
-import {setSession} from '../state.js';
+import {setSession, addCleanup} from '../state.js';
 import {navigate, rerender} from '../router.js';
 import {ApiError} from '../api-client.js';
 import {staffSession} from '../staff-session.js';
 import {serverClient} from '../server-records.js';
+import {mountRepairCapture} from './repair-capture.js';
 import {figure, geoBlock, labelOf, objectURL} from './issue.js';
 import {aiSections, mountAiPanels, overlayDetections} from './staff-ai.js';
 
@@ -43,7 +44,8 @@ export async function renderServerCase(root, id) {
 
   const solved = resolutionState(r);
   const title = `${r.category} reported by a citizen`;
-  const repairs = r.workOrders.flatMap(w => w.evidence.filter(e => e.phase === 'after').map(e => ({...e, order: w})))
+  const orderRepairs = r.workOrders.flatMap(w => w.evidence.filter(e => e.phase === 'after').map(e => ({...e, order: w})));
+  const repairs = (r.repairEvidence?.length ? r.repairEvidence.map(e => ({...e, order: orderRepairs.find(x => x.evidenceId === e.evidenceId)?.order})) : orderRepairs)
     .sort((a, b) => String(a.uploadedAt).localeCompare(String(b.uploadedAt)));
   const latest = repairs.at(-1);
   const activeOrder = r.workOrders.find(w => ['Open', 'In Progress'].includes(w.status));
@@ -53,9 +55,9 @@ export async function renderServerCase(root, id) {
 
   const repairHistory = repairs.length
     ? `<ol class="history-list">${repairs.slice().reverse().map(e => `<li>
-        <div class="tl-head"><strong>After-repair evidence · ${esc(e.order.team)}</strong><span class="pill">Staff only</span></div>
-        <p class="micro">Work order ${esc(e.order.status.toLowerCase())} · uploaded ${fmtDateTime(e.uploadedAt)}</p>
-        <p>${btn(icon('eye') + '<span>View repair photo</span>', `data-repair="${esc(e.evidenceId)}" data-order="${esc(e.order.id)}"`, 'ghost', 'btn-sm')}</p>
+        <div class="tl-head"><strong>After-repair evidence · ${esc(e.order?.team || 'Case repair')}</strong><span class="pill">${r.status === 'Marked Resolved' ? 'Public repair evidence' : 'Staff review'}</span></div>
+        <p class="micro">${e.order ? `Work order ${esc(e.order.status.toLowerCase())} · ` : ''}Uploaded ${fmtDateTime(e.uploadedAt)}</p>
+        <p>${btn(icon('eye') + '<span>View repair photo</span>', `data-repair="${esc(e.evidenceId)}" data-order="${esc(e.order?.id || '')}"`, 'ghost', 'btn-sm')}</p>
       </li>`).join('')}</ol>`
     : '<p class="micro">No repair evidence has been uploaded yet.</p>';
 
@@ -71,13 +73,13 @@ export async function renderServerCase(root, id) {
   const what = r.mediaType === 'video' ? 'video' : 'photo';
   const beforeFigure = r.evidence
     ? `<figure class="evidence-figure" id="figure-before"><figcaption><span>Before · reported issue</span><span class="pill">${r.mediaType === 'video' ? 'Video' : 'Photo'}</span></figcaption>
-        <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Private evidence</strong></p><p class="micro">Opening it records your name and the time in the access log.</p>
+        <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>${r.shareEvidence ? 'Shared original evidence' : 'Private evidence'}</strong></p><p class="micro">Opening it records your name and the time in the access log.</p>
         ${btn(icon('eye') + `<span>View ${what}</span>`, 'data-load="before" id="staff-view-evidence"', 'primary', 'btn-sm')}</div>
         ${geoBlock(r.gps, 'No GPS metadata for this original')}</figure>`
     : figure({title: 'Before · reported issue', url: null, emptyGeo: 'No GPS metadata for this original', emptyText: 'No evidence has been uploaded for this complaint'});
   const afterFigure = latest
     ? `<figure class="evidence-figure" id="figure-after"><figcaption><span>After · repair evidence</span><span class="pill">Photo</span></figcaption>
-        <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Latest repair photo</strong></p><p class="micro">Uploaded ${fmtDateTime(latest.uploadedAt)} for ${esc(latest.order.team)}.</p>
+        <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Latest repair photo</strong></p><p class="micro">Uploaded ${fmtDateTime(latest.uploadedAt)} for ${esc(latest.order?.team || 'this case')}.</p>
         ${btn(icon('eye') + '<span>View photo</span>', 'data-load="after"', 'primary', 'btn-sm')}</div>
         ${geoBlock(null, 'Location is not read from repair photos')}</figure>`
     : figure({title: 'After · repair evidence', url: null, emptyGeo: 'No GPS metadata supplied for the repair', emptyText: 'No repair evidence yet'});
@@ -176,9 +178,17 @@ export async function renderServerCase(root, id) {
     <div class="detail-layout">
       <div class="stack">
         <section class="panel evidence-panel" aria-labelledby="evidence-title">
-          ${panelHead('Before and after', pill(r.verification, r.verification === 'Disputed' ? 'red' : 'neutral'), 'Private evidence')}
+          ${panelHead('Before and after', pill(r.verification, r.verification === 'Disputed' ? 'red' : 'neutral'), 'Case evidence')}
           <p class="micro">Original report and repair evidence stay linked to this case. Geo-tags show the source; a missing tag is stated, not filled in.</p>
-          <div class="evidence-pair" id="staff-evidence-view">${beforeFigure}${afterFigure}</div>
+          <div class="evidence-pair" id="staff-evidence-view">${beforeFigure}<div class="repair-column">${afterFigure}
+            <div class="repair-toolbar" aria-label="Add after-repair evidence">
+              <button type="button" class="btn btn-secondary" id="case-repair-upload-button">${icon('upload')}<span>Upload repair photo</span></button>
+              <input type="file" id="case-repair-upload" accept="image/jpeg" hidden>
+              ${btn(icon('camera') + '<span>Take repair photo</span>', 'id="case-repair-camera"', 'primary')}
+            </div>
+            <p class="micro">Repair photos become visible to everyone in public tracking when this case is marked resolved. Original private evidence remains private.</p>
+            <div id="repair-capture-slot"></div><div id="repair-message" role="status" aria-live="polite"></div>
+          </div></div>
           <h3 class="mt">Repair history</h3>
           ${repairHistory}
           <h3 class="mt">Verification history</h3>
@@ -269,21 +279,50 @@ function wire(root, http, r, latest) {
   mountAiPanels(http, r, {
     onError: (err, slot) => fail(err, slot),
     viewOriginal: (target, evidenceId) => showInto(target, () => http.fetchStaffEvidence(token(), r.id), evidenceId, 'Original evidence'),
-    viewAfter: (target, workOrderId, evidenceId) => showInto(target, () => http.fetchWorkOrderEvidence(token(), workOrderId, evidenceId), evidenceId, 'After-repair evidence')
+    viewAfter: (target, workOrderId, evidenceId) => showInto(target, () => (workOrderId ? http.fetchWorkOrderEvidence(token(), workOrderId, evidenceId) : http.fetchCaseRepairEvidence(token(), r.id, evidenceId)), evidenceId, 'After-repair evidence')
   });
 
   root.querySelector('[data-load="before"]')?.addEventListener('click', () => show('figure-before', () => http.fetchStaffEvidence(token(), r.id),
-    r.mediaType, r.gps, r.capturedAt, r.uploadedAt, 'Reported', 'Before · reported issue'));
-  root.querySelector('[data-load="after"]')?.addEventListener('click', () => show('figure-after', () => http.fetchWorkOrderEvidence(token(), latest.order.id, latest.evidenceId),
-    'photo', null, null, latest.uploadedAt, 'Repair', 'After · repair evidence'));
+    r.mediaType, r.gps, r.capturedAt, r.uploadedAt, 'Reported', 'Before — reported issue'));
+  root.querySelector('[data-load="after"]')?.addEventListener('click', () => show('figure-after', () => (latest.order ? http.fetchWorkOrderEvidence(token(), latest.order.id, latest.evidenceId) : http.fetchCaseRepairEvidence(token(), r.id, latest.evidenceId)),
+    'photo', null, null, latest.uploadedAt, 'Repair', 'After — repair evidence'));
   root.querySelectorAll('[data-repair]').forEach(b => b.addEventListener('click', async () => {
     try {
-      const blob = await http.fetchWorkOrderEvidence(token(), b.dataset.order, b.dataset.repair);
+      const blob = await (b.dataset.order ? http.fetchWorkOrderEvidence(token(), b.dataset.order, b.dataset.repair) : http.fetchCaseRepairEvidence(token(), r.id, b.dataset.repair));
       openLightbox(objectURL(blob), 'Repair evidence');
       loadAccessLog(http, r);
     } catch (err) { fail(err); }
   }));
   if (r.evidence) loadAccessLog(http, r);
+
+  const uploadRepair = async file => {
+    const slot = $('repair-message');
+    const controls = root.querySelectorAll('.repair-toolbar input, .repair-toolbar button');
+    controls.forEach(el => { el.disabled = true; });
+    if (slot) slot.textContent = 'Uploading repair evidence…';
+    try {
+      if (!file || file.type !== 'image/jpeg') throw new Error('Choose a JPEG photo. Use Take repair photo to capture a JPEG.');
+      if (file.size > 20 * 1024 * 1024) throw new Error('Choose a photo smaller than 20 MB.');
+      await http.uploadCaseRepairEvidence(token(), r.id, file);
+      toast('Repair photo saved. It will be public once the case is marked resolved.', 'success');
+      rerender();
+    } catch (err) {
+      controls.forEach(el => { el.disabled = false; });
+      if (slot?.isConnected) slot.innerHTML = notice(esc(err.message || 'The repair photo could not be uploaded.'), 'error', 'alert');
+    }
+  };
+  $('case-repair-upload-button')?.addEventListener('click', () => $('case-repair-upload').click());
+  $('case-repair-upload')?.addEventListener('change', e => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) uploadRepair(file);
+  });
+  let closeCamera = null;
+  addCleanup(() => closeCamera?.());
+  $('case-repair-camera')?.addEventListener('click', () => {
+    closeCamera?.();
+    closeCamera = mountRepairCapture($('repair-capture-slot'), uploadRepair);
+  });
 
   $('case-form')?.addEventListener('submit', e => {
     e.preventDefault();
