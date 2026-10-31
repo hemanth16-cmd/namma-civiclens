@@ -37,6 +37,11 @@ async function context(browser) {
 const go = async (p, hash, wait = 900) => { await p.goto(BASE + '/#/' + hash); await p.waitForTimeout(wait); };
 const hash = p => p.url().split('#')[1] || '';
 const title = p => p.textContent('#page-title, #login-title').then(t => t.trim()).catch(() => '');
+// The resident's My complaints page (server mode) lists cards in #mc-results once loaded.
+const myComplaints = async p => {
+  await p.waitForFunction(() => !/Loading/.test(document.querySelector('#mc-count')?.textContent || 'Loading'), null, {timeout: 8000}).catch(() => {});
+  return p.textContent('#mc-results').catch(() => '');
+};
 const session = p => p.evaluate(() => sessionStorage.getItem('ncl-session'));
 const residentToken = p => p.evaluate(async () => (await import('/resident-session.js')).residentSession.get()?.token ?? null);
 
@@ -144,7 +149,7 @@ async function anonymousComplaint(media, kind) {
   check('resident: a wrong claim code is rejected', /not correct/i.test(await res.textContent('#claim-error')));
   await res.fill('#claim-id', photo.id.toLowerCase()); await res.fill('#claim-code', photo.claim);
   await res.click('#claim-form button[type=submit]'); await res.waitForTimeout(1500);
-  check('resident: the right claim code claims the guest complaint', hash(res) === '/resident/complaints' && (await res.textContent('#complaint-results')).includes(photo.id));
+  check('resident: the right claim code claims the guest complaint', hash(res) === '/resident/complaints' && (await myComplaints(res)).includes(photo.id));
   await go(res, 'track/' + photo.id, 1500);
   await res.click('#owner-evidence-account'); await res.waitForTimeout(2500);
   const ri = await res.evaluate(() => { const i = document.querySelector('#owner-evidence img'); return i ? {w: i.naturalWidth, src: i.src.slice(0, 5)} : null; });
@@ -160,10 +165,15 @@ async function anonymousComplaint(media, kind) {
   });
   await go(res, 'resident', 800);
   await go(res, 'resident/complaints', 1500);
-  check('resident: a complaint submitted while signed in is in My complaints', (await res.textContent('#complaint-results')).includes(submitted));
+  check('resident: a complaint submitted while signed in is in My complaints', (await myComplaints(res)).includes(submitted));
   const own = await (await fetch(API + '/residents/me/complaints', {headers: {Authorization: 'Bearer ' + tok}})).json();
   check('resident: server lists exactly the claimed and the submitted complaint', own.total === 2 && own.items.some(i => i.id === photo.id && i.ownedVia === 'claimed') && own.items.some(i => i.id === submitted && i.ownedVia === 'submitted'));
 
+  await go(res, 'resident/complaints/' + photo.id, 2500);
+  await res.waitForFunction(() => document.querySelector('#mc-detail img'), null, {timeout: 8000}).catch(() => {});
+  const mc = await res.evaluate(() => { const i = document.querySelector('#mc-detail img'); return i ? {w: i.naturalWidth, src: i.src.slice(0, 5)} : null; });
+  check('resident: My Complaints detail shows the claimed complaint photo', mc && mc.w === 320 && mc.src === 'blob:', JSON.stringify(mc));
+  seen.myComplaintsPhoto = await shownSha(res, '#mc-detail img');
   await go(res, 'resident/settings', 1200);
   await res.click('input[name="updates"]'); await res.waitForTimeout(900);
   const prefs = await (await fetch(API + '/residents/me/preferences', {headers: {Authorization: 'Bearer ' + tok}})).json();
@@ -173,7 +183,9 @@ async function anonymousComplaint(media, kind) {
   await go(res, 'resident/map', 2500);
   check('resident: city map page loads', (await title(res)).length > 0 && res.errors.length === 0, res.errors.join('; '));
   await go(res, 'resident/community');
-  check('resident: community screen says honestly it is not on the server yet', /not on the server yet/i.test(await res.textContent('main')));
+  await res.waitForFunction(() => !/Loading/.test(document.querySelector('#community-count')?.textContent || 'Loading'), null, {timeout: 8000}).catch(() => {});
+  check('resident: community issues list public Bengaluru complaints from the server', (await res.textContent('#community-results')).includes(photo.id),
+    (await res.textContent('#community-count')).trim());
   await go(res, 'resident/notifications', 1200);
   check('resident: notifications open the notification inbox', hash(res).startsWith('/notifications'));
   await go(res, 'official');
@@ -200,7 +212,7 @@ async function anonymousComplaint(media, kind) {
   await other.click('#login-form button[type=submit]'); await other.waitForTimeout(1500);
   check('second resident: registration signs in', hash(other) === '/resident' && (await title(other)) === 'Hello, Bina');
   await go(other, 'resident/complaints', 1200);
-  const otherList = await other.textContent('#complaint-results');
+  const otherList = await myComplaints(other);
   check("second resident: does not see the first resident's complaints", !otherList.includes(photo.id) && !otherList.includes(submitted));
   await go(other, 'resident/claim');
   await other.fill('#claim-id', photo.id); await other.fill('#claim-code', photo.claim);
@@ -224,6 +236,10 @@ async function anonymousComplaint(media, kind) {
 
   await go(adm, 'issue/' + photo.id, 2500);
   check('admin: opens complaint details', (await adm.textContent('main')).includes(photo.id));
+  await adm.waitForFunction(() => !/Loading AI results/.test(document.querySelector('#staff-ai')?.textContent || 'Loading AI results'), null, {timeout: 8000}).catch(() => {});
+  const aiText = await adm.textContent('#case-ai').catch(() => '');
+  check('admin: the AI analysis panel loads on the case page (AI off without a Roboflow key)', /AI analysis/.test(aiText) && /Repair verification/.test(aiText)
+    && !/request failed|could not read/i.test(aiText), aiText.replace(/\s+/g, ' ').slice(0, 120));
   await adm.click('#staff-view-evidence'); await adm.waitForTimeout(2000);
   const img = await adm.evaluate(() => { const i = document.querySelector('.evidence-figure img.evidence-media'); return i ? {w: i.naturalWidth, src: i.src.slice(0, 5)} : null; });
   check('admin: views the authorised photo evidence', img && img.w === 320 && img.src === 'blob:', JSON.stringify(img));
@@ -262,7 +278,7 @@ async function anonymousComplaint(media, kind) {
   });
   check('admin: plays the authorised video evidence', vid && !vid.error && vid.ready >= 2 && vid.time > 0 && vid.src === 'blob:', JSON.stringify(vid));
   seen.adminVideo = await shownSha(adm, '.evidence-figure video.evidence-media');
-  check('same photo file: admin and resident owner see byte-identical evidence', seen.adminPhoto && seen.adminPhoto === seen.residentPhoto && seen.adminPhoto === sha(media.jpeg), JSON.stringify({a: seen.adminPhoto?.slice(0, 12), r: seen.residentPhoto?.slice(0, 12)}));
+  check('same photo file: admin, resident owner and My Complaints see byte-identical evidence', seen.adminPhoto && seen.adminPhoto === seen.residentPhoto && seen.adminPhoto === seen.myComplaintsPhoto && seen.adminPhoto === sha(media.jpeg), JSON.stringify({a: seen.adminPhoto?.slice(0, 12), r: seen.residentPhoto?.slice(0, 12)}));
   check('same video file: admin and claim-code passerby see byte-identical evidence', seen.adminVideo && seen.adminVideo === seen.passerbyVideo && seen.adminVideo === sha(media.webm), JSON.stringify({a: seen.adminVideo?.slice(0, 12), p: seen.passerbyVideo?.slice(0, 12)}));
   await adm.screenshot({path: SHOTS + '/7-admin-video.png'});
   const unauth = await fetch(`${API}/staff/complaints/${video.id}/evidence`);
