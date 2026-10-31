@@ -1,6 +1,6 @@
 # Namma CivicLens — Backend
 
-**Status (Phase 3.6 + Supabase migration + Web Push):** a FastAPI service backed by SQLite (default) or **PostgreSQL / Supabase Postgres**, and private evidence storage — local files (default) or a private **Supabase Storage** bucket — with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged), and sends **Web Push notifications** about complaints to citizens who follow them and to staff, with a persistent notification history. The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. Owners and the public cannot view uploaded evidence. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
+**Status (Phase 3.6 + Supabase migration + Web Push):** a FastAPI service backed by SQLite (default) or **PostgreSQL / Supabase Postgres**, and private evidence storage — local files (default) or a private **Supabase Storage** bucket — with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged), and sends **Web Push notifications** about complaints to citizens who follow them and to staff, with a persistent notification history. The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. A complaint's owner can view its evidence with the private claim code or from the resident account that owns it; the public cannot. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
 
 > **No user authentication; development-grade abuse protection only.** Anyone who can reach the server can create complaints and look them up by ID. Phase 3.5 added per-IP/per-complaint rate limits, an evidence storage quota and idempotent creation, but the limits live in one process's memory (reset on restart, not shared between workers). Before any public deployment it still needs shared rate limiting, HTTPS, abuse/spam controls and server-side authentication for anything beyond anonymous submit and public tracking.
 
@@ -250,7 +250,7 @@ Add `--db <path>` to target a database other than `CIVICLENS_DB_PATH` / `backend
 
 Sessions: `Authorization: Bearer <token>`. The token is 256-bit random; only its SHA-256 hash is stored, with an expiry (8 hours, `CIVICLENS_STAFF_SESSION_SECONDS`). A session stops working when it expires, on sign-out, when the account is disabled, or when its password changes; re-enabling an account does not revive old sessions. Upload tokens and staff tokens are not interchangeable. Missing or invalid sessions get `401 unauthorized` with `WWW-Authenticate: Bearer`.
 
-Limits of this design: one role only; no MFA, password-reset flow or lockout beyond rate limits; the access log stores the client IP (personal data, kept indefinitely for now); evidence is still not available to owners or the public; `http://` only in development, so tokens travel unencrypted on anything but localhost.
+Limits of this design: one role only; no MFA, password-reset flow or lockout beyond rate limits; the access log stores the client IP (personal data, kept indefinitely for now); evidence is not available to the public (owners: see "Owner evidence viewing"); `http://` only in development, so tokens travel unencrypted on anything but localhost.
 
 The frontend's staff console is `#/staff` in backend mode (see `docs/IMPLEMENTATION_PROGRESS.md`); it keeps the token in page memory only, so reloading signs the tab out.
 
@@ -283,6 +283,25 @@ the body is rejected (`422`). Any other bearer token (expired, revoked, or a sta
 with `401`, not quietly treated as anonymous. The owner is part of the idempotency fingerprint, so
 nobody else can replay a resident's key. Public tracking (`GET /complaints/{id}`) never shows an
 owner.
+
+### Owner evidence viewing
+
+The owner of a complaint sees its original photo or video through the **same retrieval service as staff**
+(`app/evidence_access.py`: same evidence metadata, storage backend selection, file opening and streaming;
+moved unchanged out of `staff_api.py`). Only the authorisation and the access record differ:
+
+| Method and path | Auth | Result |
+| --- | --- | --- |
+| `POST /api/v1/complaints/{id}/evidence/view` `{"claim"}` | the private claim code, in the JSON body only | the file, streamed with the same headers as the staff view (`no-store, private`, `nosniff`, sandbox CSP). A wrong code and an unknown ID give the same `403 invalid_claim` after one scrypt check. |
+| `GET /api/v1/residents/me/complaints/{id}/evidence` | resident session that **owns** the complaint | the same file; any other ID is `404` |
+
+Both are rate-limited before the check (20 per 15 min per IP, 30 per hour per complaint:
+`CIVICLENS_RATE_OWNER_EVIDENCE_IP`, `CIVICLENS_RATE_OWNER_EVIDENCE_COMPLAINT`). Every owner view is written to
+`audit_log` (`owner_evidence_view`, actor `citizen`, how: `claim_code` or `resident`); `evidence_access_log`
+stays staff-only, and an owner's view does not send the "Report under review" notification a staff view sends.
+The browser fetches the bytes and shows them from a `blob:` URL, as the staff console does, so no credential,
+storage key or storage URL is ever placed in a link. Staff tokens, resident tokens and upload tokens remain
+separate: none of them opens another's route.
 
 ### Demonstration accounts (local or isolated test databases only)
 
@@ -759,4 +778,4 @@ Migration 7 upgrades an existing database in place and keeps every row. Existing
 
 ## Not included yet
 
-Authentication and sessions for residents, shared (multi-process) rate limiting, claiming complaints, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (needs an agreed interface with the notification work), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.
+Shared (multi-process) rate limiting, **public** evidence viewing (staff and owners can view; never permanent public links), MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (needs an agreed interface with the notification work), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.

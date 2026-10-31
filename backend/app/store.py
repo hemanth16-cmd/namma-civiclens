@@ -1362,6 +1362,17 @@ class ComplaintStore:
 
         return self._mutate("Complaint claim", run)
 
+    def log_owner_evidence_view(self, complaint_pk: int, evidence_id: str, via: str, resident_id: str | None,
+                                client_ip: str | None) -> None:
+        """Record that a complaint's owner viewed its original evidence (claim code or resident session).
+        Written to audit_log, which staff can read; evidence_access_log is for staff views only."""
+        details = {"evidenceId": evidence_id, "via": via, **({"residentId": resident_id} if resident_id else {})}
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                self._audit(conn, complaint_pk, None, "owner_evidence_view", details, client_ip, utc_now(), actor_type="citizen")
+        except DB_ERRORS as exc:
+            raise StoreError("Evidence view could not be logged") from exc
+
     def get_resident_preferences(self, resident_pk: int) -> dict:
         try:
             with closing(self._connect()) as conn:
