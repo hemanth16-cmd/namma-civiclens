@@ -56,7 +56,7 @@ function writeSelected(numbers) {
 export async function renderSupervisor(root, parts = []) {
   if (!(await usesServerRecords()) || !isSupervisor()) {
     return mount(root, 'Supervisor', `${heading({eyebrow: 'Supervisor operations', title: 'Supervisor workspace'})}
-      ${notice('Supervisor operations need a CivicLens server session with the supervisor or admin role.', 'info', 'alert')}`);
+      ${notice('Supervisor operations need a CivicLens server session with the supervisor or admin role. <a class="inline-link" href="#/login/official">Sign in with an authorised staff account</a>.', 'info', 'alert')}`);
   }
   const [view, value] = parts;
   if (view === 'allocate') return renderAllocate(root);
