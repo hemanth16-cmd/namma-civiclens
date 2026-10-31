@@ -143,3 +143,19 @@ test('duplicate suggestions keep known labels and fields only, and merges post t
   assert.equal(merged.mergedInto, 'NCL-2026-STF002');
   assert.equal(merged.merges.length, 1, 'malformed merge records are dropped');
 });
+
+test('the community list is public, sends only the chosen filters and keeps public fields only', async () => {
+  const body = {total: 2, limit: 50, offset: 0, items: [
+    {id: 'NCL-2026-COM001', title: 'Potholes reported by a citizen', category: 'Potholes', area: 'Hebbal', status: 'Submitted', verification: 'Pending Verification',
+      department: 'Awaiting civic review', created: 'z', updated: 'z', gps: {lat: 13}, description: 'secret', claim: 'x'},
+    {id: 'not-an-id'}],
+    facets: {categories: [{name: 'Potholes', count: 2}], areas: [{name: 'Hebbal', count: 2}, {count: 1}]}};
+  const fetchImpl = recorder(json(200, body));
+  const r = await createApiClient({baseUrl: BASE, fetchImpl}).listPublicComplaints({category: 'Potholes', area: 'Hebbal', status: ''});
+  const [call] = fetchImpl.calls;
+  assert.equal(call.url, BASE + '/complaints?limit=50&offset=0&category=Potholes&area=Hebbal');
+  assert.equal(call.init.headers.Authorization, undefined, 'no staff token');
+  assert.equal(r.items.length, 1);
+  assert.ok(!JSON.stringify(r).includes('secret') && !JSON.stringify(r).includes('"lat"'), 'no private fields kept');
+  assert.deepEqual(r.facets.areas, [{name: 'Hebbal', count: 2}]);
+});

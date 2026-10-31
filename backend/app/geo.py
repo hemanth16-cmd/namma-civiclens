@@ -13,6 +13,8 @@ this scale; see docs/CORE_PLATFORM_PLAN.md §7.
 import math
 
 EARTH_RADIUS_M = 6_371_008.8      # IUGG mean Earth radius
+# Bengaluru service area: the same box as dist/exif.js SERVICE_AREA (south, north, west, east).
+SERVICE_AREA = {"south": 12.75, "north": 13.3, "west": 77.35, "east": 77.9}
 METRES_PER_DEGREE_LAT = math.pi * EARTH_RADIUS_M / 180
 
 

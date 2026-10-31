@@ -10,11 +10,12 @@ import json
 import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 
 from .claims import verify_claim_code
 from .errors import ApiProblem
-from .models import CitizenResponseIn, CitizenResponseOut, ComplaintCreate, ComplaintReceipt, PublicComplaint, UploadTokenRequest, UploadTokenResponse
+from .models import (CATEGORIES, CitizenResponseIn, CitizenResponseOut, ComplaintCreate, ComplaintReceipt, PublicComplaint, PublicComplaintList,
+                     UploadTokenRequest, UploadTokenResponse)
 from .ratelimit import client_ip, enforce
 from .store import ComplaintStore, IdempotencyCompleted, IdempotencyConflict, iso
 
@@ -79,6 +80,20 @@ def create_complaint(payload: ComplaintCreate, request: Request, response: Respo
         background.add_task(request.app.state.notifier.complaint_created, record["id"], record["category"])
     response.headers["Location"] = f"{request.url.path}/{record['id']}"
     return {**record, "claim": claim, "replayed": replayed}
+
+
+@router.get("", response_model=PublicComplaintList, dependencies=[Depends(_limit_track)])
+def list_community_complaints(request: Request, response: Response,
+                              category: str | None = Query(None, max_length=60), area: str | None = Query(None, max_length=120),
+                              status: str | None = Query(None, pattern="^(Submitted|Under Review|Assigned|In Progress|Marked Resolved)$"),
+                              limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)) -> dict:
+    """Community issues across Bengaluru: every complaint in the service area, newest first, with the
+    public fields only, optionally filtered by issue type (category), neighbourhood (area) and status.
+    Facets give the counts behind the filter menus."""
+    if category is not None and category not in CATEGORIES:
+        raise ApiProblem(422, "validation_error", "Choose a valid issue category.")
+    response.headers["Cache-Control"] = "no-store"
+    return _store(request).list_public_complaints(category or None, area or None, status or None, limit, offset)
 
 
 @router.get("/{public_id}", response_model=PublicComplaint, dependencies=[Depends(_limit_track)])

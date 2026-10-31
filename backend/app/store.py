@@ -1261,6 +1261,44 @@ class ComplaintStore:
             "mergedInto": r["merged_into"],
         } for r in rows], total
 
+    # ---------- Public community list ----------
+
+    def list_public_complaints(self, category: str | None = None, area: str | None = None, status: str | None = None,
+                               limit: int = 50, offset: int = 0) -> dict:
+        """Community view of every complaint in the Bengaluru service area, newest first. Only public
+        fields (the same allowlist as public tracking: no coordinates, description, evidence or claim
+        data). Reports merged into another as duplicates are left out; their canonical complaint is listed.
+        Facets count every listed complaint by category and by neighbourhood, ignoring the filters, so the
+        filter menus always offer every option."""
+        box = geo.SERVICE_AREA
+        base = ("FROM complaints c WHERE c.merged_into_pk IS NULL AND c.gps_lat BETWEEN ? AND ? AND c.gps_lng BETWEEN ? AND ?")
+        base_params = (box["south"], box["north"], box["west"], box["east"])
+        where, params = base, base_params
+        for column, value in (("category", category), ("area", area), ("status", status)):
+            if value:
+                where += f" AND c.{column} = ?"
+                params += (value,)
+        limit = max(1, min(int(limit), STAFF_LIST_MAX))
+        try:
+            with closing(self._connect()) as conn:
+                total = conn.execute(f"SELECT COUNT(*) {where}", params).fetchone()[0]
+                rows = conn.execute(
+                    f"SELECT c.public_id, c.title, c.category, c.area, c.status, c.verification, c.department, c.created_at, c.updated_at "
+                    f"{where} ORDER BY c.pk DESC LIMIT ? OFFSET ?", (*params, limit, max(0, int(offset)))).fetchall()
+                categories = conn.execute(f"SELECT c.category, COUNT(*) {base} GROUP BY c.category ORDER BY COUNT(*) DESC, c.category",
+                                          base_params).fetchall()
+                areas = conn.execute(f"SELECT c.area, COUNT(*) {base} GROUP BY c.area ORDER BY COUNT(*) DESC, c.area", base_params).fetchall()
+        except DB_ERRORS as exc:
+            raise StoreError("Community complaints could not be listed") from exc
+        return {
+            "items": [{"id": r["public_id"], "title": r["title"], "category": r["category"], "area": r["area"], "status": r["status"],
+                       "verification": r["verification"], "department": r["department"], "created": r["created_at"],
+                       "updated": r["updated_at"]} for r in rows],
+            "total": total, "limit": limit, "offset": max(0, int(offset)),
+            "facets": {"categories": [{"name": r[0], "count": r[1]} for r in categories],
+                       "areas": [{"name": r[0], "count": r[1]} for r in areas]},
+        }
+
     def require_case_scope(self, public_id: str, staff_pk: int) -> None:
         """Raises RuleViolation 403 when an official may not see this complaint (lifecycle.in_scope)."""
         try:

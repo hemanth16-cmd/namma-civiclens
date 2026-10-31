@@ -291,6 +291,27 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/duplicates/${encodeURIComponent(otherId)}/dismiss`, {reason}, {headers: staffAuth(token)}));
     },
 
+    /**
+     * GET /complaints: community issues across Bengaluru (public fields only), newest first, filtered by
+     * issue type (category), neighbourhood (area) and status. Facets give the counts for the filter menus.
+     */
+    async listPublicComplaints({category = '', area = '', status = '', limit = 50, offset = 0} = {}) {
+      const q = new URLSearchParams({limit: String(limit), offset: String(offset)});
+      if (category) q.set('category', category);
+      if (area) q.set('area', area);
+      if (status) q.set('status', status);
+      const d = await request('GET', '/complaints?' + q);
+      if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a community list this app could not read.', {code: 'malformed_response'});
+      const facet = list => (Array.isArray(list) ? list : []).filter(f => typeof f?.name === 'string').map(f => ({name: f.name, count: Number(f.count) || 0}));
+      return {
+        total: Number(d.total) || 0,
+        items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
+          id: i.id, title: String(i.title ?? ''), category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
+          verification: String(i.verification ?? ''), department: String(i.department ?? ''), created: i.created ?? null, updated: i.updated ?? null})),
+        facets: {categories: facet(d.facets?.categories), areas: facet(d.facets?.areas)}
+      };
+    },
+
     async getEvidenceAccessLog(token, id) {
       const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/evidence/access`, undefined, {headers: staffAuth(token)});
       if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent an access log this app could not read.', {code: 'malformed_response'});

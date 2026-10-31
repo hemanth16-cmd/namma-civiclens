@@ -97,6 +97,10 @@ Roles: `official` (complaints in their departments, their own assignments, and t
 
 `GET /api/v1/complaints/{id}` (public) keeps its shape: the timeline now includes public updates and lifecycle explanations, and `verificationLog` is filled, always with generic actors ("Citizen", "Civic team"). It never contains internal notes, staff names, work-order details, completion notes, evidence IDs or coordinates (tested). Not built yet: repairs as a separate resource (after-repair photos belong to work orders), reviews, owner accounts and claiming.
 
+### 2.2 Implemented: community list across Bengaluru
+
+`GET /api/v1/complaints?category=&area=&status=&limit=&offset=` (anonymous, rate-limited like tracking) lists every complaint inside the Bengaluru service area (12.75–13.3° N, 77.35–77.9° E, the same box as `dist/exif.js`), newest first, `limit` ≤ 100. It returns the public-tracking allowlist without the timeline: `id, title, category, area, status, verification, department, created, updated`. No coordinates, description, evidence or claim data. Reports merged into another as duplicates are left out. `facets.categories` and `facets.areas` count every listed complaint by issue type and neighbourhood, ignoring the filters, and feed the filter menus on the resident Community issues page (server mode). Complaints outside the service area (for example test data) are not listed.
+
 ### 3.3 Implemented (Workstream 2): duplicate detection
 
 Suggestions are explainable and never acted on automatically. Scoring lives in `backend/app/duplicates.py`, distances in `backend/app/geo.py` (WGS84, haversine, metres).

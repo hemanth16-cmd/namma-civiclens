@@ -596,3 +596,36 @@ class MergeIn(_Strict):
 
 class ReasonIn(_Strict):
     reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+# ---------- Public community list ----------
+
+class PublicComplaintSummary(BaseModel):
+    """One row of the community list: the public-tracking allowlist without the timeline."""
+    id: str
+    title: str
+    category: str
+    area: str
+    status: str
+    verification: str
+    department: str
+    created: str
+    updated: str
+
+
+class Facet(BaseModel):
+    name: str
+    count: int
+
+
+class CommunityFacets(BaseModel):
+    categories: list[Facet]
+    areas: list[Facet]
+
+
+class PublicComplaintList(BaseModel):
+    items: list[PublicComplaintSummary]
+    total: int
+    limit: int
+    offset: int
+    facets: CommunityFacets
