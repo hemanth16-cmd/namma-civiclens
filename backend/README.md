@@ -32,6 +32,16 @@ backend/
     notifications.py   Notification events, history storage and push delivery/failure handling (Notifier)
     notifications_api.py /notifications routes: config, inboxes, follows, devices, history, read state, test
     errors.py          Error envelope {"error": {"code", "message"[, "details"]}}
+    ai/                AI analysis with Roboflow (off by default; see "AI analysis" below)
+      model_registry.py  Configuration from environment: detectors, category routing, class mapping
+      roboflow_service.py HTTPS client for Roboflow models (infer) and workflows (run_workflow); header auth
+      result_normalizer.py Provider responses -> {className, category, confidence, bbox[, polygon]}
+      images.py          Private evidence reads, JPEG validation, metadata stripping, quality metrics
+      image_alignment.py OpenCV ORB + RANSAC: do two photos show the same place?
+      repair_verifier.py Before/after decision rules (likely_repaired / damage_visible / inconclusive)
+      ai_store.py        SQL for ai_inferences, repair_assessments, repair_assessment_inferences (schema 8)
+      service.py         AiService: scheduling, bounded worker pool, startup recovery
+    ai_api.py          /staff/complaints/{id}/ai, /ai/retry, /verify-repair, /repair-assessment[/{id}/review]; public /ai
   tests/
     conftest.py        Gives every test its own temporary database
     test_health.py     Health, routing and error-shape tests
@@ -50,6 +60,10 @@ backend/
     test_deep_stress.py 50 concurrent complaints, 100 tracking, 20 streaming uploads, Kannada/multilingual Unicode, 50 mixed DB workers, rate-limiter memory bounds, quota exhaustion
     test_security_review.py IDOR isolation, staff session revocation, tracking secrecy, sanitization, media exploits (SVG, HTML, PHP, traversal), SQL injection, SSRF prevention
     test_migration_stress.py Full 12-table SQLite-to-PostgreSQL synthetic migration, verification, sequence resets, idempotency, conflict halt
+    test_ai_unit.py    AI configuration, Roboflow client (mocked HTTP), normalisation, images, alignment, decision rules
+    test_ai_api.py     AI end to end over HTTP with a fake provider: detection, failures, retries, scope, repair checks, review
+    test_migration_v8.py Schema 8 upgrade on SQLite and PostgreSQL (JSONB), and SQLite -> PostgreSQL copy of AI rows
+    aiutil.py          Synthetic test photos and the deterministic fake provider
     test_push_stress.py Push failure pruning (410 Gone, 5-failure threshold), unread race conditions, zero-leakage payload verification
   data/                Default database and evidence location (created on first start; git-ignored)
     civiclens.sqlite3  complaints, timeline, verification log, evidence metadata
@@ -540,6 +554,83 @@ The frontend reads `dist/api-config.json`:
 
 Reload the page after changing the file. Full details are in `../docs/IMPLEMENTATION_PROGRESS.md` (Phase 3.3).
 
+## AI analysis (Roboflow)
+
+Photos uploaded by citizens, and after-repair photos uploaded to work orders, can be analysed by Roboflow in
+the background. Staff see the detections (category, model confidence, boxes over the evidence) and a
+before/after repair suggestion that a supervisor approves or rejects. **Nothing is decided automatically:**
+AI never changes a complaint's status, its citizen verification or a work order. Design and rules:
+`docs/ARCHITECTURE.md` section 7; API: `docs/api-contract.md` section 8.1.
+
+### Enable it
+
+```
+export CIVICLENS_AI_PROVIDER=roboflow
+export ROBOFLOW_API_KEY=...          # Roboflow -> Settings -> API Keys. SECRET: backend environment only.
+python -m app
+```
+
+Without both variables AI is off (`GET /api/v1/ai` says so, the staff console shows why) and complaints work
+exactly as before. The key is sent only in the `Authorization: Bearer` header (inference-sdk's
+`api_key_transport="header"`), never in URLs, logs, the database or responses. The server needs outbound HTTPS
+to `serverless.roboflow.com` (or `ROBOFLOW_API_URL`).
+
+### Detectors, models and workflows
+
+| Detector | Default | Variables |
+| --- | --- | --- |
+| `pothole` | workflow `mohammed-arshad-nb1p3/general-segmentation-api-18`, classes `potholes` | `ROBOFLOW_POTHOLE_MODE`, `_WORKFLOW_ID`, `_CLASSES` (or `_MODEL_ID` in model mode) |
+| `pavement` | model `pavement-gvib5/1` | `ROBOFLOW_PAVEMENT_MODE`, `_MODEL_ID` |
+| `garbage` | workflow `general-segmentation-api-20`, classes `box, garbage, z` | `ROBOFLOW_GARBAGE_*` |
+| `infrastructure` | workflow `general-segmentation-api-19`, classes `pothole, graffiti, damaged-sign, electricity-pole-damage, fallen-trees` | `ROBOFLOW_INFRASTRUCTURE_*` |
+
+`ROBOFLOW_WORKSPACE` (default `mohammed-arshad-nb1p3`) applies to workflows. To switch a detector to a trained
+Universe model, e.g. garbage: `ROBOFLOW_GARBAGE_MODE=model` and `ROBOFLOW_GARBAGE_MODEL_ID=garbage-dumping-6avsy/<version>`,
+using the exact ID from the project's Deploy tab; no version is assumed by the code. `CIVICLENS_AI_DETECTORS`
+limits which detectors run. Which detectors run per complaint category, and how class names map to categories,
+can be overridden with `CIVICLENS_AI_CATEGORY_ROUTES` and `CIVICLENS_AI_CLASS_MAP` (JSON; examples in
+`.env.example`). A malformed value stops startup with a message naming the variable.
+
+**What has been tested:** the request formats were taken from inference-sdk 1.8.3's source, and every adapter is
+tested against mocked HTTP responses. **None of the four detectors has been called for real from this code yet**
+(the development sandbox could not reach Roboflow), so the real response shape of each workflow, and the class
+names `pavement-gvib5/1` returns, still need a live check: run the smoke test below and adjust
+`CIVICLENS_AI_CLASS_MAP` if a class shows up with category `null`.
+
+### Live smoke test (needs the key and network access)
+
+```
+CIVICLENS_AI_PROVIDER=roboflow ROBOFLOW_API_KEY=... python -c "
+from app.ai.model_registry import AiSettings; from app.ai.roboflow_service import RoboflowClient
+from app.ai.images import prepare; from app.ai.result_normalizer import normalise
+s = AiSettings.from_env(); c = RoboflowClient(s); p = prepare(open('pothole.jpg','rb').read(), s.max_side_px)
+for name, spec in s.detectors.items():
+    try: r = normalise(c.detect(spec, p.upload_jpeg), s, p.upload_size, (p.width, p.height)); print(name, r['topClass'], r['topCategory'], r['topConfidence'], r['confidenceMeta']['returned'])
+    except Exception as e: print(name, 'FAILED', getattr(e, 'code', type(e).__name__))
+"
+```
+
+### How it runs
+
+After an upload is committed and answered, a background task creates one `ai_inferences` row per routed
+detector and hands the photo to a small in-process thread pool (`CIVICLENS_AI_WORKERS`, default 2; at most
+`CIVICLENS_AI_MAX_QUEUE` queued). The worker reads the file through the private storage backend, re-encodes it
+without metadata (no GPS leaves the server), records `ai_evidence_sent` in the audit log, calls Roboflow
+(30 s timeout, at most one retry) and stores the normalised result or an error code. Videos are never sent
+(`skipped`, `unsupported_media`). A repair photo also creates a `repair_assessments` row that is computed once
+both photos have results. Jobs are rows, so a restart resumes pending work; a stuck `running` job is retried
+after 10 minutes; `POST /staff/complaints/{id}/ai/retry` re-runs failed jobs (up to 5 attempts).
+
+### Schema 8
+
+`ai_inferences` (one row per evidence file and detector: provider, mechanism, model/workflow ID, version, class
+prompt, state, top class and category, confidence, normalised predictions and confidence metadata as JSON —
+JSONB on PostgreSQL —, image size, error code, attempts, timestamps), `repair_assessments` (original and repair
+evidence, work order, suggested outcome, verification confidence, location check, GPS distance, details JSON,
+requester, review status, reviewer, note, timestamps) and `repair_assessment_inferences` (which inference rows
+an assessment compared). Applied automatically at startup on SQLite and PostgreSQL; `python -m app.db_migrate`
+copies the new tables too.
+
 ## Test
 
 ```sh
@@ -775,6 +866,17 @@ Set up roles and departments with the CLI (the database follows `DATABASE_BACKEN
 ```
 
 Migration 7 upgrades an existing database in place and keeps every row. Existing staff stay `official`, and existing complaints are unassigned (the triage queue). On SQLite, two tables (`staff_accounts`, `evidence`) are rebuilt to change their constraints; `apply_schema` turns foreign keys off for that and checks them before committing. On PostgreSQL the constraints are altered in place. Take a backup before deploying it to Supabase (`pg_dump`, or the dashboard's backup) and let the API apply it at startup, as with earlier migrations.
+
+## Duplicate detection (Workstream 2, schema 8)
+
+`GET /staff/complaints/{id}/duplicates` returns ranked, explained suggestions (see `docs/api-contract.md` §3.3). Supervisors merge, revert or dismiss; nothing is merged automatically.
+
+- **Candidates** come from a bounding-box query on the new `(gps_lat, gps_lng)` index (plain comparisons, identical on SQLite and PostgreSQL), filtered by category, time window, merge state and dismissed pairs, then measured exactly with the haversine distance in Python. No PostGIS or `pg_trgm`; both engines behave the same.
+- **Scoring** (`app/duplicates.py`) weighs location relative to the two reports' combined GPS uncertainty, so precise fixes 40 m apart are separate issues while coarse fixes at the same distance may be one. It also weighs category, time and description overlap. Each factor's contribution is returned, so a supervisor can see why.
+- **Merges** (`complaint_merges`) keep both complaints intact. `complaints.merged_into_pk` points at the canonical complaint, a partial unique index allows one active merge per duplicate, and rows cannot be deleted. Chains and double merges are refused under row locks. Every merge, revert and dismissal is in the audit log of both complaints.
+- **Not done:** perceptual image similarity (needs Pillow/imagehash and decoding private files; proposed separately); followers of a merged report receiving the canonical complaint's notifications (an interface request to the notification work).
+
+Migration 8 only adds a column, two tables and indexes; no existing row changes.
 
 ## Not included yet
 

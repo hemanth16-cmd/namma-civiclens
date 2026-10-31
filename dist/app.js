@@ -7,6 +7,8 @@ import {renderIntelligence} from './views/intelligence.js';
 import {renderMapPage} from './views/map-page.js';
 import {renderStaff} from './views/staff.js';
 import {renderMyReports} from './views/my-reports.js';
+import {renderMyComplaint} from './views/my-complaints.js';
+import {isServerResident} from './server-records.js';
 import {reportMode} from './report-gateway.js';
 import {renderNotifications as renderServerNotifications} from './views/notifications.js';
 import {openNotification, refreshPush, takeLaunchNotification, inbox} from './push-client.js';
@@ -17,7 +19,7 @@ import {createApiClient} from './api-client.js';
 import {mountVideoReview} from './video-review.js';
 import {api} from './services.js';
 import {state, viewer, setSession, runCleanups, addCleanup} from './state.js';
-import {navigate, currentPath, recordRoute, goBack, setRenderer, serverModeRoute, serverWorkspaceAccess} from './router.js';
+import {navigate, currentPath, recordRoute, goBack, setRenderer, serverModeRoute, serverWorkspaceAccess, rememberResidentDestination} from './router.js';
 import {toast, workspaceShell, notice, esc, btn} from './ui.js';
 
 const app = document.querySelector('#app');
@@ -62,7 +64,12 @@ async function dispatch(path, parts, root) {
   if (head === 'official' || head === 'resident') {
     if (!second) return renderOverview(root);
     switch (second) {
-      case 'complaints': return renderComplaints(root, head === 'official' ? 'all' : 'mine');
+      case 'complaints':
+        if (head === 'resident' && parts[2]) {
+          // A resident's own complaint opens in their account (server mode); local mode keeps the demo case page.
+          return await isServerResident(viewer()) ? renderMyComplaint(root, decodeURIComponent(parts[2]).toUpperCase()) : navigate('issue/' + parts[2]);
+        }
+        return renderComplaints(root, head === 'official' ? 'all' : 'mine');
       case 'community': return renderComplaints(root, 'community');
       case 'map': return renderMapPage(root);
       case 'claim': return renderClaim(root);
@@ -94,7 +101,10 @@ async function render({focus = true} = {}) {
     const staff = staffSession.get();
     const access = serverWorkspaceAccess(head, {staff, resident: residentSession.get(), session: state.session});
     if (access.clear) setSession(null);
-    if (access.redirect) return navigate(access.redirect);
+    if (access.redirect) {
+      if (access.redirect === 'login/resident' && head === 'resident') rememberResidentDestination(path);  // e.g. a refresh on My Complaints
+      return navigate(access.redirect);
+    }
     if (access.identity) { setSession(access.identity); role = access.identity.role; }
     const target = serverModeRoute(parts, {staff: !!staff});
     if (target) return navigate(target);

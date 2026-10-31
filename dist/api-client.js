@@ -160,6 +160,13 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a complaint list this app could not read.', {code: 'malformed_response'});
       return {items: d.items.map(toResidentComplaint), total: Number(d.total) || 0};
     },
+    /** One evidence file (original or after-repair) of the resident's own complaint, as a Blob of an allowed media
+     * type: GET /residents/me/complaints/{id}/evidence/{evidenceId}. Used by My Complaints. */
+    async fetchResidentEvidenceFile(token, id, evidenceId) {
+      return evidenceBlob(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}/evidence/${encodeURIComponent(evidenceId)}`, undefined,
+        {headers: bearer(token), timeout: uploadTimeoutMs, raw: true}));
+    },
+
     /** POST /residents/me/claims. The claim code travels in the JSON body only. */
     async claimComplaint(token, id, claim) {
       const d = await request('POST', '/residents/me/claims', {id, claim}, {headers: bearer(token)});
@@ -197,7 +204,7 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
           id: i.id, category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
           verification: String(i.verification ?? ''), created: i.created ?? null, updated: i.updated ?? null,
           mediaType: i.mediaType === 'video' ? 'video' : 'photo', hasEvidence: i.hasEvidence === true,
-          title: String(i.title ?? ''), department: String(i.department ?? ''), gps: toListGps(i.gps)
+          title: String(i.title ?? ''), department: String(i.department ?? ''), gps: toListGps(i.gps), mergedInto: publicIdOrNull(i.mergedInto)
         }))
       };
     },
@@ -312,10 +319,94 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return {verification: String(d.verification ?? ''), changed: d.changed === true};
     },
 
+    // ---------- Duplicate detection (staff). Suggestions only; merging needs a supervisor. ----------
+
+    async getDuplicateCandidates(token, id, {radius = null, days = null} = {}) {
+      const q = new URLSearchParams();
+      if (radius) q.set('radius', String(radius));
+      if (days) q.set('days', String(days));
+      const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/duplicates${q.size ? '?' + q : ''}`, undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d.candidates)) throw new ApiError('The CivicLens server sent duplicate suggestions this app could not read.', {code: 'malformed_response'});
+      return {radiusM: Number(d.radiusM) || 0, days: Number(d.days) || 0, note: typeof d.note === 'string' ? d.note : null,
+        candidates: d.candidates.filter(c => publicIdOrNull(c?.id) && DUPLICATE_LABELS.includes(c.label)).map(c => ({
+          id: c.id, category: String(c.category ?? ''), area: String(c.area ?? ''), created: c.created ?? null, status: String(c.status ?? ''),
+          verification: String(c.verification ?? ''), score: Number(c.score) || 0, label: c.label, distanceM: Number(c.distanceM) || 0,
+          factors: (Array.isArray(c.factors) ? c.factors : []).map(f => ({name: String(f?.name ?? ''), value: Number.isFinite(f?.value) ? f.value : null,
+            weight: Number(f?.weight) || 0, contribution: Number(f?.contribution) || 0, detail: String(f?.detail ?? '')})),
+          reasons: (Array.isArray(c.reasons) ? c.reasons : []).map(String), caution: typeof c.caution === 'string' ? c.caution : null}))};
+    },
+
+    /** Merge complaint `id` (the duplicate) into `canonical`. Resolves to the duplicate's updated staff case. */
+    async mergeComplaint(token, id, {canonical, reason}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/merge`, {canonical, reason}, {headers: staffAuth(token)}));
+    },
+
+    async revertMerge(token, mergeId, reason) {
+      return toStaffComplaint(await request('POST', `/staff/merges/${encodeURIComponent(mergeId)}/revert`, {reason}, {headers: staffAuth(token)}));
+    },
+
+    async dismissDuplicate(token, id, otherId, reason) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/duplicates/${encodeURIComponent(otherId)}/dismiss`, {reason}, {headers: staffAuth(token)}));
+    },
+
+    /**
+     * GET /complaints: community issues across Bengaluru (public fields only), newest first, filtered by
+     * issue type (category), neighbourhood (area) and status. Facets give the counts for the filter menus.
+     */
+    async listPublicComplaints({category = '', area = '', status = '', limit = 50, offset = 0} = {}) {
+      const q = new URLSearchParams({limit: String(limit), offset: String(offset)});
+      if (category) q.set('category', category);
+      if (area) q.set('area', area);
+      if (status) q.set('status', status);
+      const d = await request('GET', '/complaints?' + q);
+      if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a community list this app could not read.', {code: 'malformed_response'});
+      const facet = list => (Array.isArray(list) ? list : []).filter(f => typeof f?.name === 'string').map(f => ({name: f.name, count: Number(f.count) || 0}));
+      return {
+        total: Number(d.total) || 0,
+        items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
+          id: i.id, title: String(i.title ?? ''), category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
+          verification: String(i.verification ?? ''), department: String(i.department ?? ''), created: i.created ?? null, updated: i.updated ?? null,
+          mapPoint: toMapPoint(i.mapPoint)})),
+        facets: {categories: facet(d.facets?.categories), areas: facet(d.facets?.areas)}
+      };
+    },
+
     async getEvidenceAccessLog(token, id) {
       const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/evidence/access`, undefined, {headers: staffAuth(token)});
       if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent an access log this app could not read.', {code: 'malformed_response'});
       return d.map(e => ({username: String(e?.username ?? ''), displayName: String(e?.displayName ?? ''), action: String(e?.action ?? ''), accessedAt: e?.accessedAt ?? null}));
+    },
+
+    // ---------- AI analysis (staff). Results are suggestions; the server never changes a case because of them. ----------
+
+    /** Public: whether photos may be analysed by an external AI service, and the notice to show before upload. */
+    async getAiDisclosure() {
+      const d = await request('GET', '/ai');
+      return {enabled: d.enabled === true, disclosure: typeof d.disclosure === 'string' ? d.disclosure.slice(0, 500) : null};
+    },
+
+    async getAiAnalysis(token, id) {
+      return toAiAnalysis(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/ai`, undefined, {headers: staffAuth(token)}));
+    },
+
+    async retryAiAnalysis(token, id) {
+      return toAiAnalysis(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/ai/retry`, {}, {headers: staffAuth(token)}));
+    },
+
+    async getRepairAssessments(token, id) {
+      return toRepairAssessments(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/repair-assessment`, undefined, {headers: staffAuth(token)}));
+    },
+
+    /** Compare the original photo with an after-repair photo (default: the latest). */
+    async verifyRepair(token, id, repairEvidenceId = null) {
+      return toRepairAssessments(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/verify-repair`,
+        repairEvidenceId ? {repairEvidenceId} : {}, {headers: staffAuth(token)}));
+    },
+
+    /** Supervisor review of an AI suggestion: decision 'approved' or 'rejected' (a note is required to reject). */
+    async reviewRepairAssessment(token, id, assessmentId, {decision, note = ''}) {
+      return toRepairAssessment(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/repair-assessment/${encodeURIComponent(assessmentId)}/review`,
+        {decision, note}, {headers: staffAuth(token)}));
     },
 
     // ---------- Notifications. `token` is a staff session token or this device's citizen inbox token. ----------
@@ -398,6 +489,13 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
 
 const bearer = token => ({Authorization: 'Bearer ' + token});
 
+/** The public list's approximate position (about 110 m), or null when missing or not a valid coordinate. */
+export function toMapPoint(p) {
+  const ok = v => typeof v === 'number' && Number.isFinite(v);
+  if (!p || !ok(p.lat) || !ok(p.lng) || Math.abs(p.lat) > 90 || Math.abs(p.lng) > 180) return null;
+  return {lat: p.lat, lng: p.lng, precision: String(p.precision ?? 'approximate')};
+}
+
 function toResident(r) {
   if (!r || typeof r.email !== 'string') throw new ApiError('The CivicLens server sent an account this app could not read.', {code: 'malformed_response'});
   return {residentId: String(r.residentId ?? ''), email: r.email, displayName: String(r.displayName ?? r.email), demo: r.demo === true};
@@ -423,8 +521,16 @@ export function toResidentComplaint(d) {
     verification: String(d.verification), department: String(d.department ?? ''), ownedVia: d.ownedVia === 'claimed' ? 'claimed' : 'submitted',
     ownedAt: d.ownedAt ?? null,
     timeline: Array.isArray(d.timeline) ? d.timeline.map(t => ({status: String(t.status), text: String(t.text), date: t.date})) : [],
-    verificationLog: toVerificationLog(d.verificationLog)
+    verificationLog: toVerificationLog(d.verificationLog),
+    evidence: toOwnerEvidence(d.evidence)
   };
+}
+
+/** The owner's evidence list: known fields only, valid IDs only. Never a storage key or URL. */
+export function toOwnerEvidence(list) {
+  return (Array.isArray(list) ? list : []).filter(e => typeof e?.evidenceId === 'string' && /^ev_[A-Za-z0-9_-]{22}$/.test(e.evidenceId)).map(e => ({
+    evidenceId: e.evidenceId, role: e.role === 'repair' ? 'repair' : 'original', mediaType: e.mediaType === 'video' ? 'video' : 'photo',
+    contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null}));
 }
 const NOTIFICATION_ID = /^nt_[A-Za-z0-9_-]{16,40}$/;
 const SUBSCRIPTION_ID = /^ps_[A-Za-z0-9_-]{16,40}$/;
@@ -465,7 +571,10 @@ function toListGps(g) {
 }
 const staffAuth = token => ({Authorization: 'Bearer ' + token});
 
-const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update'];
+const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update', 'review_duplicates', 'merge', 'revert_merge'];
+const DUPLICATE_LABELS = ['likely_duplicate', 'possible_duplicate', 'recurrence', 'nearby_separate'];
+const MERGE_ID = /^mg_[A-Za-z0-9_-]{16}$/;
+const publicIdOrNull = v => (typeof v === 'string' && PUBLIC_ID.test(v) ? v : null);
 const staffRef = s => (s && typeof s.username === 'string' ? {username: s.username, displayName: String(s.displayName ?? s.username)} : null);
 
 /** Work order for staff. Only known fields are copied. */
@@ -496,6 +605,11 @@ function toManagement(d) {
     workOrders: (Array.isArray(d.workOrders) ? d.workOrders : []).map(toWorkOrder).filter(Boolean),
     notes: (Array.isArray(d.notes) ? d.notes : []).map(n => ({id: String(n?.id ?? ''), body: String(n?.body ?? ''), createdAt: n?.createdAt ?? null,
       author: staffRef(n?.author)})),
+    mergedInto: publicIdOrNull(d.mergedInto),
+    merges: (Array.isArray(d.merges) ? d.merges : []).filter(m => typeof m?.id === 'string' && MERGE_ID.test(m.id)).map(m => ({
+      id: m.id, duplicate: publicIdOrNull(m.duplicate), canonical: publicIdOrNull(m.canonical), reason: String(m.reason ?? ''),
+      score: Number.isFinite(m.score) ? m.score : null, label: DUPLICATE_LABELS.includes(m.label) ? m.label : null, by: String(m.by ?? ''),
+      at: m.at ?? null, revertedAt: m.revertedAt ?? null, revertedBy: m.revertedBy ?? null, revertReason: m.revertReason ?? null})),
     allowedActions: (Array.isArray(d.allowedActions) ? d.allowedActions : []).filter(x => STAFF_ACTIONS.includes(x?.action)).map(x => ({
       action: x.action, label: String(x.label ?? ''), to: typeof x.to === 'string' ? x.to : null, needsExplanation: x.needsExplanation === true}))
   };
@@ -631,6 +745,7 @@ export function toPublicRecord(d) {
   return {
     id: d.id, category: String(d.category ?? ''), area: String(d.area ?? ''), status: String(d.status ?? ''),
     verification: String(d.verification ?? ''), department: String(d.department ?? ''), updated: d.updated ?? null,
+    mergedInto: publicIdOrNull(d.mergedInto),
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
     verificationLog: toVerificationLog(d.verificationLog)
   };
@@ -642,4 +757,66 @@ function toVerificationLog(list) {
     id: String(e?.id ?? ''), date: e?.date ?? null, type: String(e?.type ?? ''), from: e?.from ?? null, to: e?.to ?? null,
     response: e?.response ?? null, by: String(e?.by ?? ''), actor: String(e?.actor ?? ''), note: String(e?.note ?? '')
   }));
+}
+
+// ---------- AI analysis ----------
+
+const AI_STATES = ['pending', 'running', 'completed', 'failed', 'skipped'];
+const OUTCOMES = ['likely_repaired', 'damage_visible', 'inconclusive'];
+const unit = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null);
+const px = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+
+function toAiStatus(a) {
+  return {enabled: a?.enabled === true, provider: typeof a?.provider === 'string' ? a.provider : null,
+    reason: typeof a?.reason === 'string' ? a.reason : null, disclosure: typeof a?.disclosure === 'string' ? a.disclosure : null,
+    thresholds: {present: unit(a?.thresholds?.present) ?? 0.5, low: unit(a?.thresholds?.low) ?? 0.25}};
+}
+
+/** One detection: class, mapped category (or null), model confidence and a top-left pixel box in the original photo. */
+export function toAiDetection(d) {
+  if (typeof d?.className !== 'string' || unit(d.confidence) === null || !d.bbox || typeof d.bbox !== 'object') return null;
+  return {className: d.className.slice(0, 100), category: typeof d.category === 'string' ? d.category : null, confidence: d.confidence,
+    bbox: {x: px(d.bbox.x), y: px(d.bbox.y), width: px(d.bbox.width), height: px(d.bbox.height)}};
+}
+
+function toAiInference(i) {
+  if (typeof i?.id !== 'string' || !AI_STATES.includes(i.state)) return null;
+  return {id: i.id, evidenceId: String(i.evidenceId ?? ''), evidenceRole: i.evidenceRole === 'repair' ? 'repair' : 'original',
+    detector: String(i.detector ?? ''), provider: String(i.provider ?? ''), mechanism: i.mechanism === 'model' ? 'model' : 'workflow',
+    modelId: String(i.modelId ?? ''), modelVersion: i.modelVersion ?? null, classPrompt: i.classPrompt ?? null, state: i.state,
+    detectedCategory: i.detectedCategory ?? null, originalClass: i.originalClass ?? null, topConfidence: unit(i.topConfidence),
+    detections: (Array.isArray(i.detections) ? i.detections : []).map(toAiDetection).filter(Boolean),
+    imageWidth: Number(i.imageWidth) || null, imageHeight: Number(i.imageHeight) || null, errorCode: i.errorCode ?? null,
+    attempts: Number(i.attempts) || 0, completedAt: i.completedAt ?? null};
+}
+
+export function toAiAnalysis(d) {
+  if (!d || typeof d !== 'object' || !Array.isArray(d.inferences)) throw new ApiError('The CivicLens server sent AI results this app could not read.', {code: 'malformed_response'});
+  return {complaintId: String(d.complaintId ?? ''), category: String(d.category ?? ''), ai: toAiStatus(d.ai),
+    routing: {detectors: (Array.isArray(d.routing?.detectors) ? d.routing.detectors : []).map(String)},
+    inferences: d.inferences.map(toAiInference).filter(Boolean), reset: Number.isFinite(d.reset) ? d.reset : null};
+}
+
+export function toRepairAssessment(a) {
+  if (typeof a?.id !== 'string' || !/^ra_[A-Za-z0-9_-]{22}$/.test(a.id)) return null;
+  const details = a.details && typeof a.details === 'object' ? a.details : {};
+  const review = a.review && typeof a.review === 'object' ? a.review : {};
+  return {id: a.id, workOrderId: a.workOrderId ?? null, originalEvidenceId: String(a.originalEvidenceId ?? ''), repairEvidenceId: String(a.repairEvidenceId ?? ''),
+    state: String(a.state ?? ''), suggestedOutcome: OUTCOMES.includes(a.suggestedOutcome) ? a.suggestedOutcome : null,
+    verificationConfidence: unit(a.verificationConfidence),
+    locationCheck: ['match', 'mismatch', 'unverified'].includes(a.locationCheck) ? a.locationCheck : null,
+    gpsDistanceM: typeof a.gpsDistanceM === 'number' && Number.isFinite(a.gpsDistanceM) ? a.gpsDistanceM : null,
+    reasons: (Array.isArray(details.reasons) ? details.reasons : []).map(r => String(r).slice(0, 300)),
+    visualMatch: typeof details.visualMatch === 'string' ? details.visualMatch : null,
+    matchedFeatures: Number(details.alignment?.inliers) || 0,
+    errorCode: a.errorCode ?? null,
+    review: {status: ['pending_review', 'approved', 'rejected'].includes(review.status) ? review.status : 'pending_review',
+      reviewer: review.reviewer ?? null, reviewerName: review.reviewerName ?? null, note: String(review.note ?? ''), reviewedAt: review.reviewedAt ?? null},
+    verifiedResolution: ['verified_repaired', 'verified_not_repaired'].includes(a.verifiedResolution) ? a.verifiedResolution : 'unverified',
+    requestedBy: a.requestedBy ?? null, createdAt: a.createdAt ?? null, completedAt: a.completedAt ?? null};
+}
+
+function toRepairAssessments(d) {
+  if (!d || typeof d !== 'object' || !Array.isArray(d.assessments)) throw new ApiError('The CivicLens server sent repair assessments this app could not read.', {code: 'malformed_response'});
+  return {ai: toAiStatus(d.ai), assessments: d.assessments.map(toRepairAssessment).filter(Boolean)};
 }
