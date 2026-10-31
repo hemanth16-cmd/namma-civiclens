@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from .predict import load_aggregates
+
 
 @dataclass
 class SimulationResult:
@@ -97,3 +99,36 @@ def run_scenarios(
         for name, s in scenarios.items()
     }
 
+
+def suggest_simulation_defaults(store: Any = None) -> dict[str, Any]:
+    """Suggest realistic base demand rate and capacity from historical or live metrics."""
+    # Default fallback
+    base_rate = 100.0
+    capacity = 90.0
+
+    # Try historical aggregates first
+    agg = load_aggregates()
+    monthly = agg.get("by_month") or {}
+    if monthly:
+        counts = list(monthly.values())
+        avg_monthly = sum(counts) / len(counts)
+        # Scaled to a 7-day operational period
+        base_rate = round(avg_monthly * (7.0 / 30.0), 1)
+        capacity = round(base_rate * 0.95, 1)
+    elif store:
+        try:
+            items, _total = store.list_complaints(limit=100, offset=0)
+            if items:
+                base_rate = float(len(items))
+                capacity = float(max(int(base_rate * 0.9), 1))
+        except Exception:
+            pass
+
+    return {
+        "suggested_base_rate": base_rate,
+        "suggested_capacity": capacity,
+        "recommended_runs": 2000,
+        "distribution": "poisson",
+        "horizon": "7_days",
+        "basis": "historical_monthly_scaled" if monthly else "default_operational_estimate",
+    }
