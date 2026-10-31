@@ -11,6 +11,7 @@
 // Backend mode is switched on by intercepting api-config.json in the browser; no repository file changes.
 import {createRequire} from 'node:module';
 import fs from 'node:fs';
+import {createHash} from 'node:crypto';
 
 let chromium;
 try { ({chromium} = await import('playwright')); } catch {
@@ -38,6 +39,15 @@ const hash = p => p.url().split('#')[1] || '';
 const title = p => p.textContent('#page-title, #login-title').then(t => t.trim()).catch(() => '');
 const session = p => p.evaluate(() => sessionStorage.getItem('ncl-session'));
 const residentToken = p => p.evaluate(async () => (await import('/resident-session.js')).residentSession.get()?.token ?? null);
+
+// SHA-256 of the bytes an <img>/<video> on the page is actually showing (read back from its blob: URL).
+const shownSha = (p, sel) => p.evaluate(async sel => {
+  const el = document.querySelector(sel); if (!el) return null;
+  const buf = await (await fetch(el.currentSrc || el.src)).arrayBuffer();
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256', buf))].map(b => b.toString(16).padStart(2, '0')).join('');
+}, sel);
+const sha = b64 => createHash('sha256').update(Buffer.from(b64, 'base64')).digest('hex');
+const seen = {};
 
 // Media made in the page: a real JPEG from a canvas and a real WebM from MediaRecorder.
 async function makeMedia(p) {
@@ -98,6 +108,18 @@ async function anonymousComplaint(media, kind) {
   await go(guest, 'track/' + photo.id, 1500);
   const track = await guest.textContent('#track-outcome');
   check('passerby: public tracking works', track.includes(photo.id));
+  check('passerby: tracking shows no evidence until ownership is proven', !(await guest.$('#owner-evidence img, #owner-evidence video')));
+  await go(guest, 'track/' + video.id, 1500);
+  await guest.fill('#owner-evidence-claim', '00000000-0000-4000-8000-000000000000');
+  await guest.click('#owner-evidence-form button[type=submit]'); await guest.waitForTimeout(1200);
+  check('passerby: a wrong claim code shows no evidence', /not correct/i.test(await guest.textContent('#owner-evidence-status')) && !(await guest.$('#owner-evidence video')));
+  await guest.fill('#owner-evidence-claim', video.claim);
+  await guest.click('#owner-evidence-form button[type=submit]'); await guest.waitForTimeout(2500);
+  const gv = await guest.evaluate(async () => { const v = document.querySelector('#owner-evidence video'); if (!v) return null; v.muted = true; try { await v.play(); } catch (e) { return {error: String(e)}; } await new Promise(r => setTimeout(r, 400)); return {ready: v.readyState, time: v.currentTime, src: v.src.slice(0, 5)}; });
+  check('passerby: the claim code shows their own video, playing from a blob: URL', gv && !gv.error && gv.ready >= 2 && gv.time > 0 && gv.src === 'blob:', JSON.stringify(gv));
+  seen.passerbyVideo = await shownSha(guest, '#owner-evidence video');
+  check('passerby: the claim code never reaches the URL or browser storage', !guest.url().includes(video.claim) && !(await guest.evaluate(() => JSON.stringify({...localStorage}) + JSON.stringify({...sessionStorage}))).includes(video.claim));
+  await guest.screenshot({path: SHOTS + '/1b-passerby-own-video.png'});
   await guest.screenshot({path: SHOTS + '/1-passerby-tracking.png'});
 
   // ---------------- Resident ----------------
@@ -123,6 +145,12 @@ async function anonymousComplaint(media, kind) {
   await res.fill('#claim-id', photo.id.toLowerCase()); await res.fill('#claim-code', photo.claim);
   await res.click('#claim-form button[type=submit]'); await res.waitForTimeout(1500);
   check('resident: the right claim code claims the guest complaint', hash(res) === '/resident/complaints' && (await res.textContent('#complaint-results')).includes(photo.id));
+  await go(res, 'track/' + photo.id, 1500);
+  await res.click('#owner-evidence-account'); await res.waitForTimeout(2500);
+  const ri = await res.evaluate(() => { const i = document.querySelector('#owner-evidence img'); return i ? {w: i.naturalWidth, src: i.src.slice(0, 5)} : null; });
+  check('resident: sees the photo of a claimed complaint from their account', ri && ri.w === 320 && ri.src === 'blob:', JSON.stringify(ri));
+  seen.residentPhoto = await shownSha(res, '#owner-evidence img');
+  await res.screenshot({path: SHOTS + '/3b-resident-own-photo.png'});
   await res.screenshot({path: SHOTS + '/3-resident-my-complaints.png'});
 
   const submitted = await res.evaluate(async () => {
@@ -199,6 +227,7 @@ async function anonymousComplaint(media, kind) {
   await adm.click('#staff-view-evidence'); await adm.waitForTimeout(2000);
   const img = await adm.evaluate(() => { const i = document.querySelector('.evidence-figure img.evidence-media'); return i ? {w: i.naturalWidth, src: i.src.slice(0, 5)} : null; });
   check('admin: views the authorised photo evidence', img && img.w === 320 && img.src === 'blob:', JSON.stringify(img));
+  seen.adminPhoto = await shownSha(adm, '.evidence-figure img.evidence-media');
   await adm.screenshot({path: SHOTS + '/6-admin-photo.png', fullPage: false});
   const sel = await adm.$('#case-status');
   if (sel) {
@@ -232,6 +261,9 @@ async function anonymousComplaint(media, kind) {
     return {ready: v.readyState, time: v.currentTime, src: v.src.slice(0, 5)};
   });
   check('admin: plays the authorised video evidence', vid && !vid.error && vid.ready >= 2 && vid.time > 0 && vid.src === 'blob:', JSON.stringify(vid));
+  seen.adminVideo = await shownSha(adm, '.evidence-figure video.evidence-media');
+  check('same photo file: admin and resident owner see byte-identical evidence', seen.adminPhoto && seen.adminPhoto === seen.residentPhoto && seen.adminPhoto === sha(media.jpeg), JSON.stringify({a: seen.adminPhoto?.slice(0, 12), r: seen.residentPhoto?.slice(0, 12)}));
+  check('same video file: admin and claim-code passerby see byte-identical evidence', seen.adminVideo && seen.adminVideo === seen.passerbyVideo && seen.adminVideo === sha(media.webm), JSON.stringify({a: seen.adminVideo?.slice(0, 12), p: seen.passerbyVideo?.slice(0, 12)}));
   await adm.screenshot({path: SHOTS + '/7-admin-video.png'});
   const unauth = await fetch(`${API}/staff/complaints/${video.id}/evidence`);
   check('admin APIs refuse unauthenticated requests (evidence)', unauth.status === 401);

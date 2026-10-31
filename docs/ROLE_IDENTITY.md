@@ -188,8 +188,7 @@ S3 and Telegram work.
 - **Community issues** has no server endpoint yet. The screen keeps its design and says so instead
   of showing sample data. Resident notifications use the existing device inbox (`#/notifications`),
   not per-account delivery: that belongs to the notification workstream.
-- **Owner view of evidence** is not built: residents see their complaint details, not the uploaded
-  file. Evidence stays staff-only.
+- **Owner view of evidence:** built on the staff retrieval service (claim code or owning resident account); see `backend/README.md`, "Owner evidence viewing".
 - **Merging into `main` / core-platform** needs the recipe in `MIGRATION_RECONCILIATION.md`, which
   moves both version 8s into named migrations.
 - The pre-existing `api-config.json` versus test mismatch, listed above, is unrelated and was left

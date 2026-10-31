@@ -18,6 +18,7 @@ const field = (id, label, control, hint = '') => `<div class="field"><label for=
 
 /** Shown where the original page had a feature that needs data the server does not hold yet. */
 const pending = text => `<p class="micro">${icon('alert', 'mini-icon')} ${text}</p>`;
+const WARD_METHOD = {auto: 'from an imported ward boundary', manual: 'set by a supervisor', unverified: 'unverified'};
 
 function signedOut() {
   staffSession.clear();
@@ -97,7 +98,15 @@ export async function renderServerCase(root, id) {
       <dl class="meta-list">
         <div><dt>Department</dt><dd>${r.assignment.department ? esc(r.assignment.department.name) : 'Not assigned (triage queue)'}</dd></div>
         <div><dt>Assigned to</dt><dd>${r.assignment.assignee ? `${esc(r.assignment.assignee.displayName)} (${esc(r.assignment.assignee.username)})` : 'Nobody yet'}</dd></div>
+        <div><dt>Ward</dt><dd>${r.ward ? `${esc(r.ward.number)} · ${esc(r.ward.name)} <small>${esc(r.ward.zone.name)} zone · ${esc(WARD_METHOD[r.wardAssignmentStatus])}</small>` : 'Unverified: no ward boundary data, so it is not set automatically'}</dd></div>
+        ${r.priority ? `<div><dt>Priority</dt><dd>${esc(r.priority)}${r.dueAt ? ` · due ${fmtDate(r.dueAt)}` : ''}</dd></div>` : ''}
       </dl>
+      ${can(r, 'set_ward') ? `<form id="ward-form" class="stack mt">
+        <h3>${r.ward ? 'Change ward' : 'Set ward'} <span class="optional">Audited · the reported GPS is kept</span></h3>
+        ${field('case-ward', 'Ward', '<select id="case-ward" required><option value="">Loading your wards…</option></select>')}
+        ${field('case-ward-reason', 'How the ward was confirmed', '<input id="case-ward-reason" required maxlength="500" placeholder="For example: GPS point checked against the ward map">')}
+        <div class="row-actions"><button type="submit" class="btn btn-secondary">${icon('pin')}<span>Save ward</span></button></div>
+      </form>` : ''}
       ${transitions.length ? `<form id="case-form" class="stack" novalidate>
         ${field('case-status', 'Lifecycle status', `<select id="case-status" name="to">${transitions.map(t => `<option value="${esc(t.to)}">${esc(t.label || t.to)} → ${esc(t.to)}</option>`).join('')}</select>`, `Now: ${esc(r.status)}. Only the changes the server allows you are listed.`)}
         ${field('case-explanation', 'Public explanation <span class="optional">Shown in public tracking · required for some changes</span>', '<textarea id="case-explanation" rows="2" maxlength="500" placeholder="What the public should know about this change"></textarea>')}
@@ -195,6 +204,9 @@ export async function renderServerCase(root, id) {
         <section class="panel" aria-labelledby="history-title">
           ${panelHead('Assignment history and audit', '', 'Staff only')}
           ${r.assignmentHistory.length ? `<ol class="history-list">${r.assignmentHistory.slice().reverse().map(h => `<li><div class="tl-head"><strong>${esc(h.department)}${h.assignee ? ` · ${esc(h.assignee)}` : ''}</strong><time datetime="${esc(h.at)}">${fmtDateTime(h.at)}</time></div><p class="micro">${h.reason ? esc(h.reason) : 'No reason given'} · by ${esc(h.by)}</p></li>`).join('')}</ol>` : '<p class="micro">Not assigned yet.</p>'}
+          <h3 class="mt">Ward history</h3>
+          ${r.wardHistory.length ? `<ol class="history-list">${r.wardHistory.slice().reverse().map(h => `<li><div class="tl-head"><strong>${h.to ? `Ward ${esc(h.to)}` : 'No ward'} · ${esc(WARD_METHOD[h.method])}</strong><time datetime="${esc(h.at)}">${fmtDateTime(h.at)}</time></div><p class="micro">${h.from ? `From ward ${esc(h.from)} · ` : ''}${esc(h.reason)}${h.by ? ` · by ${esc(h.by)}` : ''}</p></li>`).join('')}</ol>` : '<p class="micro">No ward decision recorded.</p>'}
+          ${r.allocations.length ? `<h3 class="mt">Allocations</h3><ol class="history-list">${r.allocations.slice().reverse().map(a => `<li><div class="tl-head"><strong>${esc(a.kind === 'reallocated' ? 'Reallocated' : 'Allocated')} to ${esc(a.to.assignee || '—')} · ${esc(a.to.priority || '')}${a.to.dueAt ? ` · due ${fmtDate(a.to.dueAt)}` : ''}</strong><time datetime="${esc(a.at)}">${fmtDateTime(a.at)}</time></div><p class="micro">${a.from.assignee ? `Previously ${esc(a.from.assignee)} · ` : ''}${esc(a.reason)} · by ${esc(a.by)}</p></li>`).join('')}</ol>` : ''}
           <h3 class="mt">Evidence access log</h3>
           <div id="staff-access-log"><p class="micro">${r.evidence ? 'Loading…' : 'No evidence, so no access.'}</p></div>
           <h3 class="mt">Audit trail</h3>
@@ -269,6 +281,18 @@ function wire(root, http, r, latest) {
       departments.innerHTML = '<option value="">Choose a department</option>' + list.map(d => `<option value="${esc(d.code)}" ${r.assignment.department?.code === d.code ? 'selected' : ''}>${esc(d.name)}</option>`).join('');
     }).catch(err => fail(err));
   }
+  if ($('ward-form')) {
+    http.supervisorScope(token()).then(scope => {
+      const select = $('case-ward');
+      if (!select?.isConnected) return;
+      select.innerHTML = '<option value="">Choose a ward</option>' + scope.zones.map(z => `<optgroup label="${esc(z.name)} zone">${z.wards.map(w =>
+        `<option value="${w.number}" ${r.ward?.number === w.number ? 'selected' : ''}>${w.number} · ${esc(w.name)}</option>`).join('')}</optgroup>`).join('');
+    }).catch(err => fail(err));
+  }
+  $('ward-form')?.addEventListener('submit', e => {
+    e.preventDefault();
+    run(e.submitter, () => http.setComplaintWard(token(), r.id, {ward: Number(value('case-ward')), reason: value('case-ward-reason')}), 'Ward saved.');
+  });
   $('assign-form')?.addEventListener('submit', e => {
     e.preventDefault();
     run(e.submitter, () => http.assignComplaint(token(), r.id, {department: value('case-department'), assignee: value('case-assignee').toLowerCase() || null,

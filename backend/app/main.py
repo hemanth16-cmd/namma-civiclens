@@ -21,12 +21,14 @@ from .evidence import router as evidence_router
 from .auth import session_ttl
 from .resident_auth import session_ttl as resident_session_ttl_from_env
 from .residents_api import router as residents_router
+from .owner_evidence import router as owner_evidence_router
 from .evidence_storage import EvidenceStorage, LocalEvidenceStorage
 from .notifications import MAX_FAILURES, Notifier
 from .notifications_api import router as notifications_router
 from .push import DEFAULT_ENDPOINT_HOSTS, PushSender, PushSettings, WebPushSender
 from .supabase_storage import SupabaseEvidenceStorage, SupabaseSettings, selected_backend
 from .staff_api import router as staff_router
+from .supervisor_api import router as supervisor_router
 from .quota import EvidenceQuota, quota_from_env
 from .ratelimit import InMemoryRateLimiter, RateLimiter, RateLimitSettings
 from .store import DEFAULT_REPLAY_WINDOW, DEFAULT_UPLOAD_TOKEN_TTL, ComplaintStore
@@ -159,7 +161,9 @@ def create_app(
     router.include_router(evidence_router)
     router.include_router(staff_router)
     router.include_router(residents_router)
+    router.include_router(owner_evidence_router)
     router.include_router(cases_router)
+    router.include_router(supervisor_router)
     router.include_router(notifications_router)
     app.include_router(router)
     return app

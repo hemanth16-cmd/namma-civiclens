@@ -1,6 +1,7 @@
 // Public screens: the three-choice entry, public tracking and demonstration sign-in.
 import {api, esc, DEMO_PASSWORD} from '../services.js';
-import {icon, btn, statusPill, verificationPill, heading, notice, publicTopbar, fmtDate, fmtDateTime, toast, panel, logo} from '../ui.js';
+import {icon, btn, statusPill, verificationPill, heading, notice, publicTopbar, fmtDate, fmtDateTime, toast, panel, logo, categoryIcon, openLightbox} from '../ui.js';
+import {figure, objectURL} from './issue.js';
 import {setSession, viewer} from '../state.js';
 import {navigate, takeResidentDestination} from '../router.js';
 import {reportMode, trackPublic, respondToResolution} from '../report-gateway.js';
@@ -129,9 +130,79 @@ async function renderServerTrack(root, id) {
     slot.innerHTML = (record.mergedInto ? notice(`This report was merged into <a class="inline-link code-inline" href="#/track/${esc(record.mergedInto)}">${esc(record.mergedInto)}</a>, another report of the same issue. Follow that complaint for updates; this record and its history are kept.`, 'info', 'alert', 'mt') : '')
       + trackResult(record, false)
       + (record.status === 'Marked Resolved' && !record.mergedInto ? verifyForm(record) : '')
-      + `<p class="mt"><a class="btn btn-secondary" href="#/notifications/follow/${esc(record.id)}" id="track-notify">${icon('bell')}<span>Get notified about this report</span></a> <span class="micro">Needs the private claim code from the receipt.</span></p>`;
+      + `<p class="mt"><a class="btn btn-secondary" href="#/notifications/follow/${esc(record.id)}" id="track-notify">${icon('bell')}<span>Get notified about this report</span></a> <span class="micro">Needs the private claim code from the receipt.</span></p>`
+      + ownerEvidence(record);  // the reporter's own evidence; a merged duplicate keeps its own record and evidence
     wireVerifyForm(root, record);
+    wireOwnerEvidence(root, record);
   }
+}
+
+// The reporter's own photo or video (server mode). It is private: the server streams it through the same
+// evidence retrieval that staff use, after checking the private claim code (sent once in the request body,
+// never stored or put in the URL) or a resident session whose account owns the complaint. The file is
+// shown from a blob: URL in the same evidence figure the case pages use.
+function ownerEvidence(r) {
+  const signedIn = !!residentSession.get();
+  return `<section class="panel mt" id="owner-evidence" aria-labelledby="owner-evidence-title">
+      <h2 id="owner-evidence-title">Your photo or video</h2>
+      <p class="micro">Only the person who reported this complaint, and CivicLens staff, can see its evidence. It is never shown publicly.</p>
+      <div class="evidence-pair"><figure class="evidence-figure" id="owner-figure"><figcaption><span>Reported issue</span><span class="pill">Private</span></figcaption>
+        <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Private evidence</strong></p>
+          ${signedIn ? btn(icon('eye') + '<span>View from my account</span>', 'id="owner-evidence-account"', 'primary', 'btn-sm') : ''}
+          <form id="owner-evidence-form" class="stack" autocomplete="off">
+            <div class="field"><label for="owner-evidence-claim">${signedIn ? 'Or use the private claim code' : 'Private claim code from your receipt'}</label>
+              <input id="owner-evidence-claim" name="claim" type="password" autocomplete="off" spellcheck="false" maxlength="100" required></div>
+            <button type="submit" class="btn btn-${signedIn ? 'secondary' : 'primary'} btn-sm">${icon('lock')}<span>Show my evidence</span></button>
+          </form>
+        </div></figure></div>
+      <div id="owner-evidence-status" role="status" aria-live="polite"></div>
+    </section>`;
+}
+
+function wireOwnerEvidence(root, r) {
+  const section = root.querySelector('#owner-evidence');
+  if (!section) return;
+  const status = section.querySelector('#owner-evidence-status');
+  const busy = on => section.querySelectorAll('button').forEach(b => { b.disabled = on; });
+  const show = (blob, owned) => {
+    const video = blob.type.startsWith('video/');
+    const fig = section.querySelector('#owner-figure');
+    fig.outerHTML = figure({title: 'Reported issue', url: objectURL(blob), mediaType: video ? 'video' : 'photo', gps: owned?.gps ?? null,
+      emptyGeo: 'Location not shown here', captured: owned?.created ?? null, uploaded: null, label: video ? 'Video' : 'Photo',
+      altText: `The ${video ? 'video' : 'photo'} you reported for ${r.id}`});
+    if (!owned?.gps) section.querySelector('.evidence-figure .geo-caption')?.remove();  // tracking carries no location
+    section.querySelectorAll('[data-enlarge]').forEach(b => { b.onclick = () => openLightbox(b.dataset.enlarge, b.dataset.alt); });
+    status.innerHTML = '';
+  };
+  const fail = err => {
+    busy(false);
+    status.innerHTML = notice(esc(err?.name === 'ApiError' ? err.message : 'Your evidence could not be loaded.'), 'error', 'alert', 'mt');
+  };
+  section.querySelector('#owner-evidence-account')?.addEventListener('click', async () => {
+    busy(true);
+    try {
+      const http = await serverClient();
+      const token = residentSession.get()?.token;
+      const owned = token ? await http.getResidentComplaint(token, r.id) : null;
+      if (!owned) {
+        busy(false);
+        status.innerHTML = notice('This complaint is not in your account. Use its private claim code, or claim it first.', 'info', 'alert', 'mt');
+        return;
+      }
+      show(await http.fetchResidentEvidence(token, r.id), owned);
+    } catch (err) { fail(err); }
+  });
+  section.querySelector('#owner-evidence-form').onsubmit = async e => {
+    e.preventDefault();
+    const input = section.querySelector('#owner-evidence-claim');
+    const claim = input.value.trim();
+    input.value = '';
+    if (!claim) return;
+    busy(true);
+    try {
+      show(await (await serverClient()).fetchOwnEvidenceWithClaim(r.id, claim), null);
+    } catch (err) { fail(err); }
+  };
 }
 
 // Citizen verification (server mode): the reporter confirms or disputes a resolution with the
