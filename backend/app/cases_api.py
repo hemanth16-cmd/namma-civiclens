@@ -12,7 +12,7 @@ from server data. Write methods are POST only, matching the CORS allowlist (GET,
 import re
 import secrets
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 
 from .auth import current_staff
@@ -125,7 +125,8 @@ def list_work_orders(request: Request, response: Response, staff: dict = Depends
 
 
 @router.post("/work-orders/{work_order_id}/evidence", status_code=201, response_model=RepairEvidenceReceipt)
-async def upload_repair_evidence(work_order_id: str, request: Request, response: Response, staff: dict = Depends(current_staff)) -> dict:
+async def upload_repair_evidence(work_order_id: str, request: Request, response: Response, background: BackgroundTasks,
+                                 staff: dict = Depends(current_staff)) -> dict:
     """After-repair photo for a work order, through the same streaming checks as citizen evidence
     (signature sniffing, size limit, SHA-256, quota). Authorised before the body is read."""
     store = _store(request)
@@ -159,6 +160,8 @@ async def upload_repair_evidence(work_order_id: str, request: Request, response:
             await run_in_threadpool(storage.delete, key)  # no file without a row, and no row without a file
             raise
         reservation.commit(pending.size)
+        # After the response: AI analysis of the repair photo and a before/after suggestion (app/ai/service.py).
+        background.add_task(request.app.state.ai.repair_evidence_added, row["evidenceId"])
         return {k: row[k] for k in ("evidenceId", "mediaType", "contentType", "byteSize", "sha256", "capturedAt", "uploadedAt")}
 
 

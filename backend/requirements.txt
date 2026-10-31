@@ -10,3 +10,10 @@ psycopg[binary]==3.3.6
 psycopg-pool==3.3.3
 # Web Push (VAPID signing and aes128gcm payload encryption), used only when VAPID_* keys are set.
 pywebpush==2.5.0
+# AI analysis (app/ai), used only when CIVICLENS_AI_PROVIDER=roboflow. httpx calls Roboflow's HTTPS API
+# (already installed for storage3; pinned because app/ai imports it directly). Pillow decodes, rotates and
+# re-encodes photos without metadata; NumPy and OpenCV (headless, no GUI libraries) match before/after photos.
+httpx==0.28.1
+pillow==13.0.0
+numpy==2.5.4
+opencv-python-headless==5.0.0.93

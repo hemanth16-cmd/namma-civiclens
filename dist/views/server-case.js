@@ -11,6 +11,7 @@ import {ApiError} from '../api-client.js';
 import {staffSession} from '../staff-session.js';
 import {serverClient} from '../server-records.js';
 import {figure, geoBlock, labelOf, objectURL} from './issue.js';
+import {aiSections, mountAiPanels, overlayDetections} from './staff-ai.js';
 
 const $ = id => document.getElementById(id);
 const can = (r, action) => r.allowedActions.some(a => a.action === action);
@@ -183,6 +184,9 @@ export async function renderServerCase(root, id) {
           <h3 class="mt">Verification history</h3>
           ${verificationHistory}
         </section>
+        <section class="panel" id="case-ai" aria-label="AI analysis and repair verification">
+          ${aiSections()}
+        </section>
         <section class="panel" aria-labelledby="reviews-title">
           ${panelHead('Community reviews', pill('Not on the server yet'), 'Neighbourhood perspective')}
           ${empty('Community reviews need resident accounts', 'The CivicLens server has no resident sign-in yet, so neighbours cannot post reviews here. Citizens confirm or dispute a repair from public tracking.')}
@@ -244,6 +248,30 @@ function wire(root, http, r, latest) {
       fail(err, fig.querySelector('.evidence-empty'));
     }
   };
+  // AI analysis and repair verification (app/ai): suggestions for staff, loaded with the staff session.
+  // The before/after viewers use the same staff evidence endpoints, so each view is in the access log.
+  const showInto = async (target, load, evidenceId, alt) => {
+    target.innerHTML = '<p class="micro" role="status">Loading evidence…</p>';
+    try {
+      const blob = await load();
+      if (!target.isConnected) return;
+      const url = objectURL(blob);
+      target.innerHTML = blob.type.startsWith('video/')
+        ? `<video class="receipt-media" controls playsinline src="${url}" aria-label="${esc(alt)}"></video>`
+        : `<img class="receipt-media" src="${url}" alt="${esc(alt)}">`;
+      overlayDetections(target, evidenceId);
+      target.insertAdjacentHTML('beforeend', '<p class="micro">Viewing is recorded in the evidence access log.</p>');
+      loadAccessLog(http, r);
+    } catch (err) {
+      fail(err, target);
+    }
+  };
+  mountAiPanels(http, r, {
+    onError: (err, slot) => fail(err, slot),
+    viewOriginal: (target, evidenceId) => showInto(target, () => http.fetchStaffEvidence(token(), r.id), evidenceId, 'Original evidence'),
+    viewAfter: (target, workOrderId, evidenceId) => showInto(target, () => http.fetchWorkOrderEvidence(token(), workOrderId, evidenceId), evidenceId, 'After-repair evidence')
+  });
+
   root.querySelector('[data-load="before"]')?.addEventListener('click', () => show('figure-before', () => http.fetchStaffEvidence(token(), r.id),
     r.mediaType, r.gps, r.capturedAt, r.uploadedAt, 'Reported', 'Before · reported issue'));
   root.querySelector('[data-load="after"]')?.addEventListener('click', () => show('figure-after', () => http.fetchWorkOrderEvidence(token(), latest.order.id, latest.evidenceId),

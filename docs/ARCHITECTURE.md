@@ -87,9 +87,9 @@ Each technique has one job and an evidence requirement. Adapters exist so a real
 
 | Component | Job | Adapter in prototype | Status |
 | --- | --- | --- | --- |
-| Road-damage vision (YOLO11n proposed) | Detect potholes and cracks in images | `classificationService` → unavailable | Proposed; not connected or trained |
-| Waste-specific vision | Detect visible waste accumulation | none | Proposed; not connected or trained |
-| Before/after repair assessment | Apparent change with uncertainty | Manual comparison and verification states | Implemented; device verification pending for UI. Automated assessment proposed |
+| Road-damage vision | Detect potholes and cracks in images | Server mode: Roboflow `pothole` workflow + `pavement-gvib5/1` model (§7) | Implemented on `feature/roboflow-ai-integration`; tested with a mocked provider only. Local mode: `classificationService` → unavailable |
+| Waste-specific vision | Detect visible waste accumulation | Server mode: Roboflow `garbage` workflow (§7) | Implemented; tested with a mocked provider only |
+| Before/after repair assessment | Apparent change with uncertainty | Server mode: AI-assisted suggestion + supervisor review (§7). Local mode: manual comparison | Implemented; suggestions only, never closes a case |
 | Incident linking | Suggest duplicates or recurrence for review | Recurrence records only | Proposed; never auto-merges |
 | Knowledge graph | Relationships between complaint, incident, evidence, repair | Illustrative SVG graph | Illustrative demo |
 | Priority engine | Normalised weighted score with visible contributions | `assessPriority()` | Implemented and tested; inputs illustrative |
@@ -123,3 +123,44 @@ Production controls still to build: server-side authentication and sessions, has
 - The map basemap uses OpenFreeMap and OpenStreetMap over the network; the sample incidents are approximate neighbourhood positions, not verified locations.
 - Address lookup uses the public Photon demo endpoint configured in `dist/map-config.json`. Self-host it for real use.
 - Real camera, GPS, EXIF from phone photos, video codecs, and mobile layouts on physical devices still need device verification.
+
+## 7. AI analysis (server mode, Roboflow)
+
+Branch `feature/roboflow-ai-integration` (based on `integration/v52-fullstack`, schema 8). Off unless `CIVICLENS_AI_PROVIDER=roboflow` and `ROBOFLOW_API_KEY` are set on the backend. Everything it produces is a suggestion for staff: no AI result changes a complaint's status, its citizen verification or a work order.
+
+```
+citizen photo ──POST /complaints/{id}/evidence──▶ validated, stored privately, evidence row committed, 201 sent
+                                                      │ (after the response: BackgroundTasks)
+                                                      ▼
+                       AiService.evidence_added ─▶ ai_inferences rows (one per routed detector, state 'pending')
+                                                      │ bounded thread pool
+                                                      ▼
+   worker: claim row ─▶ read file via EvidenceStorage.open_read ─▶ decode, rotate, downscale, re-encode (no EXIF/GPS)
+          ─▶ audit 'ai_evidence_sent' ─▶ Roboflow (model or workflow) ─▶ normalise ─▶ row 'completed' / 'failed' + code
+                                                      │
+GET /staff/complaints/{id}/ai ◀───────────────────────┘ staff console: table + boxes over the private evidence viewer
+
+repair photo ──POST /staff/work-orders/{wo}/evidence──▶ same analysis of the repair photo
+                                                      └─▶ repair_assessments row ─▶ waits until both photos have results
+   ─▶ OpenCV alignment (same place?) + EXIF GPS (support only) + photo quality + detections ─▶ suggested outcome
+   ─▶ supervisor approves or rejects (POST …/repair-assessment/{id}/review) ─▶ verified resolution (separate from status)
+```
+
+Modules (`backend/app/ai/`): `model_registry` (environment configuration, category routing, class mapping), `roboflow_service` (HTTPS client for both mechanisms), `result_normalizer`, `images` (private read, validation, metadata stripping, quality), `image_alignment` (ORB + RANSAC homography), `repair_verifier` (decision rules, pure functions), `ai_store` (SQL for the new tables), `service` (scheduling and the worker). Routes: `backend/app/ai_api.py`.
+
+**Detectors and routing.** Four detectors, each a Roboflow *model* (`infer`, `POST /{project}/{version}`) or *workflow* (`run_workflow`, `POST /{workspace}/workflows/{id}` with a `classes` prompt), configured by environment variables:
+
+| Detector | Default | Kind |
+| --- | --- | --- |
+| `pothole` | workflow `general-segmentation-api-18`, classes `potholes` | Prompt-based segmentation workflow in the team's workspace |
+| `pavement` | model `pavement-gvib5/1` | Trained Universe model (spl-project/pavement-gvib5) |
+| `garbage` | workflow `general-segmentation-api-20`, classes `box, garbage, z` | Prompt-based segmentation workflow |
+| `infrastructure` | workflow `general-segmentation-api-19`, classes `pothole, graffiti, damaged-sign, electricity-pole-damage, fallen-trees` | Prompt-based segmentation workflow |
+
+The three workflows are the ones the team tested; they are not the trained models of the Universe projects `cloudcam/garbage-dumping-6avsy`, `rizz-tiu7z/potholes-pxnfg` and `infrastructure-aqfrw/infrastructure-dtiwq`, whose version numbers have not been confirmed (set `ROBOFLOW_<NAME>_MODE=model` and `_MODEL_ID` once they are). Category → detectors: potholes and road cracks → `pothole` + `pavement`; damaged footpaths → `pavement` + `infrastructure`; garbage and illegal dumping → `garbage`; streetlights and other issues → `infrastructure`; drainage and water leakage → none (no configured model sees water). Class names map to CivicLens categories by `CIVICLENS_AI_CLASS_MAP`, else by keyword (`pothole`, `crack`, `garbage`, …); an unmapped class is kept with category `null` and never counts as damage.
+
+**Safety and privacy.** The API key is read from the environment, sent only as `Authorization: Bearer`, and never logged, stored or returned. Only JPEG photos are analysed; a video gets a `skipped` row and is never sent. The provider receives a re-encoded copy with no EXIF (so no GPS). Each send is written to the audit log first. Citizens are told before upload when AI is on (`GET /api/v1/ai`). Provider errors become codes (`auth_failed`, `model_not_found`, `rate_limited`, `timeout`, `provider_unavailable`, `bad_response`, …); at most one retry per call, a `Retry-After` longer than 5 s is not waited for, and a job stops after 5 attempts.
+
+**Durability and idempotency.** Jobs are database rows: unique per (evidence, detector) and per (original, repair) pair, inserted with `ON CONFLICT DO NOTHING`, claimed with a conditional update. The worker is an in-process thread pool (`CIVICLENS_AI_WORKERS`, default 2; queue bound `CIVICLENS_AI_MAX_QUEUE`, default 100). **Limits:** queued work is lost from memory when the process stops but stays `pending` in the database and resumes at the next start (jobs `running` for over 10 minutes are treated as lost); work that did not fit in the queue waits for a retry or restart; on a free host that sleeps (Render), analysis happens only while the server is awake. A dedicated worker process is the production step.
+
+**Repair decision rules** (`repair_verifier.py`). `likely_repaired` needs all of: the photos matched as the same place by image features (OpenCV; GPS within 50 m can support a weak match but never establishes one), a confident detection (≥ `CIVICLENS_AI_MIN_CONFIDENCE`, default 0.5) of the reported kind in the original, no detection of that kind in the after photo (not even a low-confidence one ≥ 0.25), and an after photo that is not dark, overexposed, blurry or tiny. `damage_visible` needs a same-place match and a confident detection in the after photo. Anything else, including GPS more than 200 m apart, is `inconclusive`. An analysis failure marks the assessment `failed` (retryable), not inconclusive. `verification_confidence` measures the comparison and is kept apart from model confidence; it is null when inconclusive. A supervisor or admin who did not upload the repair photo approves or rejects the suggestion; `verifiedResolution` (`verified_repaired`, `verified_not_repaired`, `unverified`) is derived from that review and is separate from the complaint's administrative status.
