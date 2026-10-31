@@ -241,23 +241,6 @@ Test results (2026-10-30):
 
 ## 7. Current implementation phase
 
-**Roboflow AI detection and AI-assisted repair verification: implemented on branch `feature/roboflow-ai-integration`, not committed or pushed yet (awaiting the user's approval).** Based on `integration/v52-fullstack` at `eee7afc`, not on `develop`: `develop` is at schema 6 and has no repair-photo upload, while `integration/v52-fullstack` (develop + Workstream 1) has schema 7 with roles, departments, work orders and `POST /staff/work-orders/{id}/evidence`. The AI tables are schema **8**, so this branch must be merged **after** Workstream 1 reaches `develop`. Design: `docs/ARCHITECTURE.md` §7; API: `docs/api-contract.md` §8.1; setup: `backend/README.md` → "AI analysis (Roboflow)". [verified]
-
-What it does [verified with a fake provider; **not yet verified against Roboflow itself**]: citizen JPEG photos and after-repair photos are analysed after upload by routed detectors (pothole workflow, `pavement-gvib5/1` model, garbage workflow, infrastructure workflow); results are stored in `ai_inferences` and shown in the staff console (table, model confidence, boxes over the private evidence viewer); a repair photo creates a `repair_assessments` row (OpenCV alignment, EXIF GPS as support, photo quality, detections → `likely_repaired` / `damage_visible` / `inconclusive`) that a supervisor approves or rejects. No AI result changes a complaint's status or verification. Off unless `CIVICLENS_AI_PROVIDER=roboflow` and `ROBOFLOW_API_KEY` are set.
-
-| Check (2026-10-30, this sandbox) | Result |
-| --- | --- |
-| Backend pytest, SQLite (PostgreSQL-marked tests against a local PostgreSQL 16) | 462 passed, 4 failed. The 4 failures are pre-existing on `integration/v52-fullstack` (same 4 without this change): `staff_api.stream_evidence` logs an undefined `public_id` (NameError) when evidence is missing or unconfigured [verified] |
-| Backend pytest, whole suite on PostgreSQL 16 | 452 passed, 10 skipped (SQLite-only), 4 failed: the same pre-existing `stream_evidence` failures [verified] |
-| Baseline (`integration/v52-fullstack`, unchanged) | SQLite: 360 passed, 19 skipped, 4 failed (same tests), plus its 19 PostgreSQL-marked tests passed separately; PostgreSQL mode: 371 passed, 8 skipped, 4 failed (same tests) [verified] |
-| New backend tests | 54 unit (`test_ai_unit.py`), 25 API (`test_ai_api.py`), 4 migration (`test_migration_v8.py`), all passing; Roboflow is always mocked [verified] |
-| `npm test` | 164 passed, 1 failed: the pre-existing `api-config` test (fails without this change too) [verified] |
-| `npm run check` | 57 files [verified] |
-| Browser (Chromium, local API with the **fake** provider, scratch DB) | Staff console shows the AI table, boxes on the original photo, the repair suggestion with reasons; supervisor approval shows "Verified repaired" while the status stays In Progress; the capture screen shows the AI disclosure; no console errors [verified] |
-| Live Roboflow calls | **Not run**: the sandbox's network policy refuses `serverless.roboflow.com`. Request formats were copied from inference-sdk 1.8.3's source [unverified against the live API] |
-
-Open items: live smoke test of all four detectors (and `CIVICLENS_AI_CLASS_MAP` for `pavement-gvib5/1`'s real class names); confirm or replace the Universe projects' model versions (only `pavement-gvib5/1` is known); add GPS capture to the repair upload (today only EXIF GPS in the file is used); a dedicated worker process for production; apply schema 8 to Supabase after schema 7.
-
 **Core platform, Workstream 1 — server-side complaint management: implemented on branch `feature/core-platform-development` (from `integration/v52-fullstack` `dca458e`), awaiting review.** Plan and audit: `docs/CORE_PLATFORM_PLAN.md`. Schema 7 (SQLite and PostgreSQL) adds staff roles (official/supervisor/admin), departments, assignment history, internal notes, work orders with before/after evidence, typed public timeline entries and an append-only audit log. The new staff API is `api-contract.md` §3.2, and citizens confirm or dispute with the claim code. The staff console has a case-management panel, and public tracking has the citizen verification form. [verified]
 
 | Check (2026-10-30) | Result |

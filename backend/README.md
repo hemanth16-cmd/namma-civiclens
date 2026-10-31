@@ -1,6 +1,6 @@
 # Namma CivicLens — Backend
 
-**Status (Phase 3.6 + Supabase migration + Web Push):** a FastAPI service backed by SQLite (default) or **PostgreSQL / Supabase Postgres**, and private evidence storage — local files (default) or a private **Supabase Storage** bucket — with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged), and sends **Web Push notifications** about complaints to citizens who follow them and to staff, with a persistent notification history. The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. Owners and the public cannot view uploaded evidence. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
+**Status (Phase 3.6 + Supabase migration + Web Push):** a FastAPI service backed by SQLite (default) or **PostgreSQL / Supabase Postgres**, and private evidence storage — local files (default) or a private **Supabase Storage** bucket — with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged), and sends **Web Push notifications** about complaints to citizens who follow them and to staff, with a persistent notification history. The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. A complaint's owner can view its evidence with the private claim code or from the resident account that owns it; the public cannot. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
 
 > **No user authentication; development-grade abuse protection only.** Anyone who can reach the server can create complaints and look them up by ID. Phase 3.5 added per-IP/per-complaint rate limits, an evidence storage quota and idempotent creation, but the limits live in one process's memory (reset on restart, not shared between workers). Before any public deployment it still needs shared rate limiting, HTTPS, abuse/spam controls and server-side authentication for anything beyond anonymous submit and public tracking.
 
@@ -32,16 +32,6 @@ backend/
     notifications.py   Notification events, history storage and push delivery/failure handling (Notifier)
     notifications_api.py /notifications routes: config, inboxes, follows, devices, history, read state, test
     errors.py          Error envelope {"error": {"code", "message"[, "details"]}}
-    ai/                AI analysis with Roboflow (off by default; see "AI analysis" below)
-      model_registry.py  Configuration from environment: detectors, category routing, class mapping
-      roboflow_service.py HTTPS client for Roboflow models (infer) and workflows (run_workflow); header auth
-      result_normalizer.py Provider responses -> {className, category, confidence, bbox[, polygon]}
-      images.py          Private evidence reads, JPEG validation, metadata stripping, quality metrics
-      image_alignment.py OpenCV ORB + RANSAC: do two photos show the same place?
-      repair_verifier.py Before/after decision rules (likely_repaired / damage_visible / inconclusive)
-      ai_store.py        SQL for ai_inferences, repair_assessments, repair_assessment_inferences (schema 8)
-      service.py         AiService: scheduling, bounded worker pool, startup recovery
-    ai_api.py          /staff/complaints/{id}/ai, /ai/retry, /verify-repair, /repair-assessment[/{id}/review]; public /ai
   tests/
     conftest.py        Gives every test its own temporary database
     test_health.py     Health, routing and error-shape tests
@@ -60,10 +50,6 @@ backend/
     test_deep_stress.py 50 concurrent complaints, 100 tracking, 20 streaming uploads, Kannada/multilingual Unicode, 50 mixed DB workers, rate-limiter memory bounds, quota exhaustion
     test_security_review.py IDOR isolation, staff session revocation, tracking secrecy, sanitization, media exploits (SVG, HTML, PHP, traversal), SQL injection, SSRF prevention
     test_migration_stress.py Full 12-table SQLite-to-PostgreSQL synthetic migration, verification, sequence resets, idempotency, conflict halt
-    test_ai_unit.py    AI configuration, Roboflow client (mocked HTTP), normalisation, images, alignment, decision rules
-    test_ai_api.py     AI end to end over HTTP with a fake provider: detection, failures, retries, scope, repair checks, review
-    test_migration_v8.py Schema 8 upgrade on SQLite and PostgreSQL (JSONB), and SQLite -> PostgreSQL copy of AI rows
-    aiutil.py          Synthetic test photos and the deterministic fake provider
     test_push_stress.py Push failure pruning (410 Gone, 5-failure threshold), unread race conditions, zero-leakage payload verification
   data/                Default database and evidence location (created on first start; git-ignored)
     civiclens.sqlite3  complaints, timeline, verification log, evidence metadata
@@ -264,9 +250,79 @@ Add `--db <path>` to target a database other than `CIVICLENS_DB_PATH` / `backend
 
 Sessions: `Authorization: Bearer <token>`. The token is 256-bit random; only its SHA-256 hash is stored, with an expiry (8 hours, `CIVICLENS_STAFF_SESSION_SECONDS`). A session stops working when it expires, on sign-out, when the account is disabled, or when its password changes; re-enabling an account does not revive old sessions. Upload tokens and staff tokens are not interchangeable. Missing or invalid sessions get `401 unauthorized` with `WWW-Authenticate: Bearer`.
 
-Limits of this design: one role only; no MFA, password-reset flow or lockout beyond rate limits; the access log stores the client IP (personal data, kept indefinitely for now); evidence is still not available to owners or the public; `http://` only in development, so tokens travel unencrypted on anything but localhost.
+Limits of this design: one role only; no MFA, password-reset flow or lockout beyond rate limits; the access log stores the client IP (personal data, kept indefinitely for now); evidence is not available to the public (owners: see "Owner evidence viewing"); `http://` only in development, so tokens travel unencrypted on anything but localhost.
 
 The frontend's staff console is `#/staff` in backend mode (see `docs/IMPLEMENTATION_PROGRESS.md`); it keeps the token in page memory only, so reloading signs the tab out.
+
+## Resident accounts API
+
+Three separate identities use the API. A **passerby** reports and tracks with no account. A
+**resident** has a server account. **Staff** use the staff console API above. Resident accounts are
+their own authentication domain (`app/resident_auth.py`, tables `resident_accounts`,
+`resident_sessions`, `resident_preferences`), built like staff sign-in: scrypt passwords (12+
+characters), 256-bit bearer tokens stored only as SHA-256 hashes, an 8-hour expiry
+(`CIVICLENS_RESIDENT_SESSION_SECONDS`), and revocation on sign-out, password change or disable.
+**A resident token is refused by every `/staff` endpoint, and a staff token by every `/residents`
+endpoint.**
+
+| Method and path | Auth | Result |
+| --- | --- | --- |
+| `POST /api/v1/residents` `{"email", "password", "displayName"}` | none | `201` + a session (`{"token", "expiresAt", "resident"}`). `409 email_taken`; `422` for a bad email or short password. 5 per hour per IP. |
+| `POST /api/v1/residents/sessions` `{"email", "password"}` | none | `200` session. Wrong password and unknown email give the same `401`. Rate-limited per IP and per account before the password check. |
+| `DELETE /api/v1/residents/sessions/current` | resident | `204`; revoked on the server |
+| `GET /api/v1/residents/me`, `PATCH` `{"displayName"}` | resident | `{"residentId", "email", "displayName", "demo", "createdAt"}` |
+| `GET /api/v1/residents/me/complaints?limit&offset` | resident | Only this resident's complaints, newest first: public fields plus their own description and location, `ownedVia` (`submitted` / `claimed`) and `ownedAt`. Never the claim code or hash, tokens, staff notes or storage keys. |
+| `GET /api/v1/residents/me/complaints/{id}` | resident | One owned complaint. Any other ID is `404`, whether or not it exists. |
+| `POST /api/v1/residents/me/claims` `{"id", "claim"}` | resident | Links an **unowned** complaint after checking the private claim code: `200 {"outcome": "claimed" \| "already_yours", "complaint"}`. A wrong ID or code gives one generic `403 invalid_claim`, always after one scrypt check. If another resident owns it: `409 already_claimed` (names nobody). Only the ownership columns change. The claim hash, public timeline, evidence and dates stay as they were, and the claim is written to `audit_log`. 10 per 15 min per IP, 10 per hour per complaint. |
+| `GET` / `PUT /api/v1/residents/me/preferences` `{"updates", "verification", "hotspots"}` | resident | Per-account preferences (booleans only) |
+
+**Ownership.** `POST /api/v1/complaints` stays open to everyone. With no `Authorization` header the
+complaint is anonymous: `owner_resident_pk` stays `NULL` until a claim. With a valid resident token
+the owner is taken **from the session** (`owned_via = 'submitted'`). An `owner` or `role` field in
+the body is rejected (`422`). Any other bearer token (expired, revoked, or a staff token) is refused
+with `401`, not quietly treated as anonymous. The owner is part of the idempotency fingerprint, so
+nobody else can replay a resident's key. Public tracking (`GET /complaints/{id}`) never shows an
+owner.
+
+### Owner evidence viewing
+
+The owner of a complaint sees its original photo or video through the **same retrieval service as staff**
+(`app/evidence_access.py`: same evidence metadata, storage backend selection, file opening and streaming;
+moved unchanged out of `staff_api.py`). Only the authorisation and the access record differ:
+
+| Method and path | Auth | Result |
+| --- | --- | --- |
+| `POST /api/v1/complaints/{id}/evidence/view` `{"claim"}` | the private claim code, in the JSON body only | the file, streamed with the same headers as the staff view (`no-store, private`, `nosniff`, sandbox CSP). A wrong code and an unknown ID give the same `403 invalid_claim` after one scrypt check. |
+| `GET /api/v1/residents/me/complaints/{id}/evidence` | resident session that **owns** the complaint | the same file; any other ID is `404` |
+
+Both are rate-limited before the check (20 per 15 min per IP, 30 per hour per complaint:
+`CIVICLENS_RATE_OWNER_EVIDENCE_IP`, `CIVICLENS_RATE_OWNER_EVIDENCE_COMPLAINT`). Every owner view is written to
+`audit_log` (`owner_evidence_view`, actor `citizen`, how: `claim_code` or `resident`); `evidence_access_log`
+stays staff-only, and an owner's view does not send the "Report under review" notification a staff view sends.
+The browser fetches the bytes and shows them from a `blob:` URL, as the staff console does, so no credential,
+storage key or storage URL is ever placed in a link. Staff tokens, resident tokens and upload tokens remain
+separate: none of them opens another's route.
+
+### Demonstration accounts (local or isolated test databases only)
+
+```sh
+cd backend
+python -m app.demo seed --confirm-demo                    # SQLite (--db, else CIVICLENS_DB_PATH)
+python -m app.demo seed --confirm-demo --allow-postgres   # an isolated PostgreSQL test database only
+python -m app.demo remove --confirm-demo                  # disables both and signs them out
+```
+
+| Role | Sign in with | Password |
+| --- | --- | --- |
+| Resident | `resident@civiclens.demo` | `CivicDemo2026!` |
+| Administrator (staff role `admin`) | `demo_admin` | `CivicDemo2026!` |
+
+**These credentials are public and not production-safe.** The command does nothing without
+`--confirm-demo`. It needs `--allow-postgres` for PostgreSQL and refuses when `CIVICLENS_ENV` is
+`production`. It never prints the password and is idempotent: a rerun leaves working accounts and
+their sessions alone, and repairs a changed password, role or disabled flag. The API never creates
+these accounts, and the frontend never contains the credentials. The admin is made with the same
+store methods as `python -m app.staff`, so the role lives only on the server.
 
 ## Web Push notifications
 
@@ -483,83 +539,6 @@ The frontend reads `dist/api-config.json`:
 - Any other value, or a backend `baseUrl` that is not an absolute http(s) URL, blocks reporting and tracking with an error instead of guessing.
 
 Reload the page after changing the file. Full details are in `../docs/IMPLEMENTATION_PROGRESS.md` (Phase 3.3).
-
-## AI analysis (Roboflow)
-
-Photos uploaded by citizens, and after-repair photos uploaded to work orders, can be analysed by Roboflow in
-the background. Staff see the detections (category, model confidence, boxes over the evidence) and a
-before/after repair suggestion that a supervisor approves or rejects. **Nothing is decided automatically:**
-AI never changes a complaint's status, its citizen verification or a work order. Design and rules:
-`docs/ARCHITECTURE.md` section 7; API: `docs/api-contract.md` section 8.1.
-
-### Enable it
-
-```
-export CIVICLENS_AI_PROVIDER=roboflow
-export ROBOFLOW_API_KEY=...          # Roboflow -> Settings -> API Keys. SECRET: backend environment only.
-python -m app
-```
-
-Without both variables AI is off (`GET /api/v1/ai` says so, the staff console shows why) and complaints work
-exactly as before. The key is sent only in the `Authorization: Bearer` header (inference-sdk's
-`api_key_transport="header"`), never in URLs, logs, the database or responses. The server needs outbound HTTPS
-to `serverless.roboflow.com` (or `ROBOFLOW_API_URL`).
-
-### Detectors, models and workflows
-
-| Detector | Default | Variables |
-| --- | --- | --- |
-| `pothole` | workflow `mohammed-arshad-nb1p3/general-segmentation-api-18`, classes `potholes` | `ROBOFLOW_POTHOLE_MODE`, `_WORKFLOW_ID`, `_CLASSES` (or `_MODEL_ID` in model mode) |
-| `pavement` | model `pavement-gvib5/1` | `ROBOFLOW_PAVEMENT_MODE`, `_MODEL_ID` |
-| `garbage` | workflow `general-segmentation-api-20`, classes `box, garbage, z` | `ROBOFLOW_GARBAGE_*` |
-| `infrastructure` | workflow `general-segmentation-api-19`, classes `pothole, graffiti, damaged-sign, electricity-pole-damage, fallen-trees` | `ROBOFLOW_INFRASTRUCTURE_*` |
-
-`ROBOFLOW_WORKSPACE` (default `mohammed-arshad-nb1p3`) applies to workflows. To switch a detector to a trained
-Universe model, e.g. garbage: `ROBOFLOW_GARBAGE_MODE=model` and `ROBOFLOW_GARBAGE_MODEL_ID=garbage-dumping-6avsy/<version>`,
-using the exact ID from the project's Deploy tab; no version is assumed by the code. `CIVICLENS_AI_DETECTORS`
-limits which detectors run. Which detectors run per complaint category, and how class names map to categories,
-can be overridden with `CIVICLENS_AI_CATEGORY_ROUTES` and `CIVICLENS_AI_CLASS_MAP` (JSON; examples in
-`.env.example`). A malformed value stops startup with a message naming the variable.
-
-**What has been tested:** the request formats were taken from inference-sdk 1.8.3's source, and every adapter is
-tested against mocked HTTP responses. **None of the four detectors has been called for real from this code yet**
-(the development sandbox could not reach Roboflow), so the real response shape of each workflow, and the class
-names `pavement-gvib5/1` returns, still need a live check: run the smoke test below and adjust
-`CIVICLENS_AI_CLASS_MAP` if a class shows up with category `null`.
-
-### Live smoke test (needs the key and network access)
-
-```
-CIVICLENS_AI_PROVIDER=roboflow ROBOFLOW_API_KEY=... python -c "
-from app.ai.model_registry import AiSettings; from app.ai.roboflow_service import RoboflowClient
-from app.ai.images import prepare; from app.ai.result_normalizer import normalise
-s = AiSettings.from_env(); c = RoboflowClient(s); p = prepare(open('pothole.jpg','rb').read(), s.max_side_px)
-for name, spec in s.detectors.items():
-    try: r = normalise(c.detect(spec, p.upload_jpeg), s, p.upload_size, (p.width, p.height)); print(name, r['topClass'], r['topCategory'], r['topConfidence'], r['confidenceMeta']['returned'])
-    except Exception as e: print(name, 'FAILED', getattr(e, 'code', type(e).__name__))
-"
-```
-
-### How it runs
-
-After an upload is committed and answered, a background task creates one `ai_inferences` row per routed
-detector and hands the photo to a small in-process thread pool (`CIVICLENS_AI_WORKERS`, default 2; at most
-`CIVICLENS_AI_MAX_QUEUE` queued). The worker reads the file through the private storage backend, re-encodes it
-without metadata (no GPS leaves the server), records `ai_evidence_sent` in the audit log, calls Roboflow
-(30 s timeout, at most one retry) and stores the normalised result or an error code. Videos are never sent
-(`skipped`, `unsupported_media`). A repair photo also creates a `repair_assessments` row that is computed once
-both photos have results. Jobs are rows, so a restart resumes pending work; a stuck `running` job is retried
-after 10 minutes; `POST /staff/complaints/{id}/ai/retry` re-runs failed jobs (up to 5 attempts).
-
-### Schema 8
-
-`ai_inferences` (one row per evidence file and detector: provider, mechanism, model/workflow ID, version, class
-prompt, state, top class and category, confidence, normalised predictions and confidence metadata as JSON —
-JSONB on PostgreSQL —, image size, error code, attempts, timestamps), `repair_assessments` (original and repair
-evidence, work order, suggested outcome, verification confidence, location check, GPS distance, details JSON,
-requester, review status, reviewer, note, timestamps) and `repair_assessment_inferences` (which inference rows
-an assessment compared). Applied automatically at startup on SQLite and PostgreSQL; `python -m app.db_migrate`
-copies the new tables too.
 
 ## Test
 
@@ -799,4 +778,4 @@ Migration 7 upgrades an existing database in place and keeps every row. Existing
 
 ## Not included yet
 
-Authentication and sessions for residents, shared (multi-process) rate limiting, claiming complaints, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (needs an agreed interface with the notification work), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.
+Shared (multi-process) rate limiting, **public** evidence viewing (staff and owners can view; never permanent public links), MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (needs an agreed interface with the notification work), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.

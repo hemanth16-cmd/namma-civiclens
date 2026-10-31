@@ -332,8 +332,6 @@ async def upload_evidence(public_id: str, request: Request, response: Response, 
             return _same_or_conflict(row, meta["sha256"], response)
         reservation.commit(pending.size)
         background.add_task(request.app.state.notifier.evidence_uploaded, public_id, kind.media_type)
-        # After the response: AI analysis reads the committed file from private storage (app/ai/service.py).
-        background.add_task(request.app.state.ai.evidence_added, row["evidenceId"])
         return _receipt(row, "uploaded")
 
 

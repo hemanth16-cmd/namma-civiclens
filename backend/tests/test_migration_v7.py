@@ -70,7 +70,7 @@ def test_sqlite_version_6_is_upgraded_in_place(tmp_path):
     store = ComplaintStore(path)
     store.initialize()
     store.initialize()  # idempotent
-    assert SQLiteDatabase(path).schema_version() == SCHEMA_VERSION == 8
+    assert SQLiteDatabase(path).schema_version() == SCHEMA_VERSION == 7
 
     def raw(sql, params, write=False):
         with closing(sqlite3.connect(path)) as conn:

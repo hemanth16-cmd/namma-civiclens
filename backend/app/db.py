@@ -10,6 +10,9 @@ differ between the engines:
   BEGIN IMMEDIATE; PostgreSQL row locks taken by the caller with `FOR UPDATE`),
 - schema creation and numbered migrations (SQLite PRAGMA user_version; PostgreSQL a
   civiclens_schema table, guarded by an advisory lock so concurrent starts cannot race),
+- named migrations ("features", recorded by name in civiclens_features), applied after the
+  numbered ones. Branches that each added their own "version 8" made a version number ambiguous;
+  a named migration is applied exactly once whatever numbered history a database has,
 - one set of exception classes (DB_ERRORS, INTEGRITY_ERRORS) for both drivers.
 
 Configuration:
@@ -23,6 +26,8 @@ import os
 import re
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -45,6 +50,27 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "civiclens.sqli
 
 DB_ERRORS: tuple = (sqlite3.Error, *_PG_ERRORS)
 INTEGRITY_ERRORS: tuple = (sqlite3.IntegrityError, *_PG_INTEGRITY)
+
+
+FEATURE_TABLE = "civiclens_features"
+
+
+@dataclass(frozen=True)
+class Feature:
+    """A named migration: applied once, after the numbered migrations, and recorded by name.
+
+    `adopt_if` names a table whose presence means an earlier numbered migration (from another branch)
+    already created this feature's objects; the feature is then recorded as "adopted" without running
+    its SQL, so nothing is created twice and no data is touched."""
+
+    name: str
+    sqlite: str
+    postgres: str
+    adopt_if: str | None = None
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class DatabaseConfigError(ValueError):
@@ -121,7 +147,7 @@ class SQLiteDatabase:
     def connect(self) -> _SQLiteConnection:
         return _SQLiteConnection(self.path)
 
-    def apply_schema(self, schema: str, migrations: dict[int, str]) -> None:
+    def apply_schema(self, schema: str, migrations: dict[int, str], features: tuple = ()) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = self.connect()
         try:
@@ -148,6 +174,47 @@ class SQLiteDatabase:
                     if conn.raw.in_transaction:
                         conn.raw.execute("ROLLBACK")
                     raise
+            self._apply_features(conn.raw, features)
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _apply_features(raw: sqlite3.Connection, features: tuple) -> None:
+        if not features:
+            return
+        raw.execute(f"CREATE TABLE IF NOT EXISTS {FEATURE_TABLE} (name TEXT PRIMARY KEY, how TEXT NOT NULL "
+                    "CHECK (how IN ('applied', 'adopted')), applied_at TEXT NOT NULL)")
+        if raw.in_transaction:
+            raw.execute("COMMIT")
+        done = {r[0] for r in raw.execute(f"SELECT name FROM {FEATURE_TABLE}")}
+        pending = [f for f in features if f.name not in done]
+        if not pending:
+            return
+        raw.isolation_level = None
+        raw.execute("PRAGMA foreign_keys = OFF")
+        for feature in pending:
+            try:
+                adopt = feature.adopt_if is not None and raw.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (feature.adopt_if,)).fetchone() is not None
+                raw.executescript("BEGIN;\n" + ("" if adopt else feature.sqlite))
+                problems = raw.execute("PRAGMA foreign_key_check").fetchall()
+                if problems:
+                    raise sqlite3.IntegrityError(f"Feature {feature.name} would leave {len(problems)} broken foreign key(s)")
+                raw.execute(f"INSERT INTO {FEATURE_TABLE} (name, how, applied_at) VALUES (?, ?, ?)",
+                            (feature.name, "adopted" if adopt else "applied", _now()))
+                raw.execute("COMMIT")
+            except BaseException:
+                if raw.in_transaction:
+                    raw.execute("ROLLBACK")
+                raise
+
+    def features(self) -> dict[str, str]:
+        """{name: "applied" | "adopted"} for the named migrations recorded in this database."""
+        conn = self.connect()
+        try:
+            if conn.raw.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (FEATURE_TABLE,)).fetchone() is None:
+                return {}
+            return {r[0]: r[1] for r in conn.raw.execute(f"SELECT name, how FROM {FEATURE_TABLE}")}
         finally:
             conn.close()
 
@@ -234,9 +301,9 @@ class PostgresDatabase:
             self.pool = self._new_pool()
         return _PostgresConnection(self.pool, self.pool.getconn())
 
-    def apply_schema(self, schema: str, migrations: dict[int, str], base_version: int) -> None:
-        """Create the schema at `base_version` on an empty database, then apply newer migrations.
-        All of it runs in one transaction under an advisory lock."""
+    def apply_schema(self, schema: str, migrations: dict[int, str], base_version: int, features: tuple = ()) -> None:
+        """Create the schema at `base_version` on an empty database, then apply newer migrations and
+        pending named migrations. All of it runs in one transaction under an advisory lock."""
         conn = self.connect()
         try:
             with conn.raw.transaction():
@@ -252,6 +319,30 @@ class PostgresDatabase:
                 for target in sorted(v for v in migrations if v > version):
                     conn.raw.execute(migrations[target])
                     conn.raw.execute(f"UPDATE {SCHEMA_TABLE} SET version = %s", (target,))
+                if not features:
+                    return
+                conn.raw.execute(f"CREATE TABLE IF NOT EXISTS {FEATURE_TABLE} (name TEXT PRIMARY KEY, how TEXT NOT NULL "
+                                 "CHECK (how IN ('applied', 'adopted')), applied_at TEXT NOT NULL)")
+                done = {r[0] for r in conn.raw.execute(f"SELECT name FROM {FEATURE_TABLE}").fetchall()}
+                for feature in features:
+                    if feature.name in done:
+                        continue
+                    adopt = feature.adopt_if is not None and conn.raw.execute(
+                        "SELECT to_regclass(%s) IS NOT NULL", (feature.adopt_if,)).fetchone()[0]
+                    if not adopt:
+                        conn.raw.execute(feature.postgres)
+                    conn.raw.execute(f"INSERT INTO {FEATURE_TABLE} (name, how, applied_at) VALUES (%s, %s, %s)",
+                                     (feature.name, "adopted" if adopt else "applied", _now()))
+        finally:
+            conn.close()
+
+    def features(self) -> dict[str, str]:
+        """{name: "applied" | "adopted"} for the named migrations recorded in this database."""
+        conn = self.connect()
+        try:
+            if not conn.raw.execute("SELECT to_regclass(%s) IS NOT NULL", (FEATURE_TABLE,)).fetchone()[0]:
+                return {}
+            return {r[0]: r[1] for r in conn.raw.execute(f"SELECT name, how FROM {FEATURE_TABLE}").fetchall()}
         finally:
             conn.close()
 

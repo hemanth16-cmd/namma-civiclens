@@ -5,11 +5,28 @@ import {state, viewer, setSession, readPrefs, writePrefs, readLastRead, writeLas
 import {navigate} from '../router.js';
 import {filterRecords, sortRecords, readFilters} from '../filters.js';
 import {mountCityMap} from './map.js';
+import {workspaceRecords, usesServerRecords, dailyActivity, serverClient, isServerResident} from '../server-records.js';
+import {staffSession} from '../staff-session.js';
+import {residentSession} from '../resident-session.js';
+import {endStaffSession} from './staff.js';
+import {ApiError} from '../api-client.js';
+import {mountInbox} from './notifications.js';
 
 const isAdmin = () => viewer().role === 'official';
 
 export async function loadRecords() {
-  state.records = await api.list(viewer());
+  try {
+    state.records = await workspaceRecords(viewer());
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {  // server mode: the staff or resident session ended
+      const resident = viewer().role === 'resident';
+      (resident ? residentSession : staffSession).clear();
+      setSession(null);
+      navigate(resident ? 'login/resident' : 'login/official');
+      throw new Error(resident ? 'Your resident session has ended. Sign in again.' : 'Your staff session has ended. Sign in again.');
+    }
+    throw err;
+  }
   return state.records;
 }
 
@@ -19,11 +36,23 @@ function mount(root, title, body) {
 }
 
 export function wireWorkspace(root) {
-  root.querySelector('[data-action="logout"]').onclick = () => {
+  root.querySelector('[data-action="logout"]').onclick = async () => {
+    const server = state.session?.server === true;
+    const resident = server && state.session?.role === 'resident';
+    if (resident) await endResidentSession();  // revokes the resident session on the server
+    else if (server) await endStaffSession();  // revokes the server session and staff push on this device
     setSession(null);
-    toast('You have signed out of this demonstration workspace.');
+    toast(resident ? 'Signed out of your resident account.' : server ? 'Signed out of CivicLens staff.' : 'You have signed out of this demonstration workspace.');
     navigate('home');
   };
+}
+
+/** Sign the resident out on the server (best-effort) and forget the token held in memory. */
+export async function endResidentSession() {
+  const token = residentSession.get()?.token;  // read before any await: app.js also clears it on this click
+  residentSession.clear();
+  if (!token) return;
+  try { await (await serverClient())?.residentSignOut(token); } catch { /* the token expires on its own */ }
 }
 
 // ---------- Shared pieces ----------
@@ -61,6 +90,7 @@ export async function renderOverview(root) {
   const v = viewer();
   const admin = isAdmin();
   const records = await loadRecords();
+  const server = admin && await usesServerRecords();
   if (admin) {
     const open = records.filter(r => r.status !== 'Marked Resolved');
     const needsReview = records.filter(r => ['Submitted', 'Under Review'].includes(r.status));
@@ -69,7 +99,9 @@ export async function renderOverview(root) {
     const ranked = sortRecords(records.map(r => ({...r, priority: r.priority ?? assessPriority(r)})), 'priority').slice(0, 6);
     mount(root, 'Overview', `
       ${heading({eyebrow: 'City operations', title: 'Operational overview', lead: 'Cases needing review, disputed repairs and the next actions for your teams.', actions: link(icon('pin') + '<span>Open city map</span>', '#/official/map', 'secondary')})}
-      ${notice('Sample incidents and the activity series are illustrative. Browser-local reports appear alongside them. No municipal system is connected.', 'info', 'alert')}
+      ${server
+        ? notice(`Showing <strong>${records.length}</strong> ${records.length === 1 ? 'complaint' : 'complaints'} stored on the CivicLens server. Open a case to view its evidence, change its status, assign it and manage work orders.`, 'info', 'alert')
+        : notice('Sample incidents and the activity series are illustrative. Browser-local reports appear alongside them. No municipal system is connected.', 'info', 'alert')}
       <div class="stats" role="list">
         ${stat('Total cases', records.length, 'Across the workspace')}
         ${stat('Awaiting first review', needsReview.length, 'Submitted or under review', 'stat-navy')}
@@ -82,16 +114,18 @@ export async function renderOverview(root) {
           <p class="micro">Scores are illustrative baselines from documented inputs. They support, not replace, emergency procedures.</p>`, 'panel-main')}
         <div class="stack">
           ${panel(`${panelHead('City map', link('Open map', '#/official/map', 'ghost'))}<div class="map-compact" id="overview-map"></div>`)}
-          ${panel(`${panelHead('Reporting activity', badgeSample())}${sampleChart()}`)}
+          ${panel(server ? `${panelHead('Reporting activity', '<span class="pill">Server data</span>')}${activityChart(records)}` : `${panelHead('Reporting activity', badgeSample())}${sampleChart()}`)}
         </div>
       </div>`);
   } else {
+    const account = await isServerResident(v);
     const mine = records.filter(r => r.mine);
     const open = mine.filter(r => r.status !== 'Marked Resolved').length;
     const resolved = mine.filter(r => r.status === 'Marked Resolved').length;
     const challenged = mine.filter(r => ['Disputed', 'Reinspection Required'].includes(r.verification)).length;
     mount(root, 'Overview', `
       ${heading({eyebrow: 'Your neighbourhood', title: `Hello, ${esc(v.name || 'neighbour')}`, lead: 'Your reports, what has changed, and where your neighbours are reporting.', actions: link(icon('camera') + '<span>Report an issue</span>', '#/camera', 'primary')})}
+      ${account ? notice(`Signed in as <strong>${esc(v.email)}</strong>. Complaints you submitted while signed in, and anonymous reports you claimed with their claim code, come from your resident account on the CivicLens server.`, 'info', 'user') : ''}
       <div class="stats" role="list">
         ${stat('My reports', mine.length, mine.length ? 'Claimed or submitted by you' : 'Claim a report to add it here')}
         ${stat('Open', open, 'Waiting for civic action', 'stat-navy')}
@@ -117,6 +151,14 @@ export async function renderOverview(root) {
 function badgeSample() {
   return '<span class="pill">Illustrative sample</span>';
 }
+/** Complaints received per day over the last 12 days, from server records (measured, not illustrative). */
+function activityChart(records) {
+  const days = dailyActivity(records);
+  const peak = Math.max(1, ...days.map(d => d.count));
+  const total = days.reduce((a, d) => a + d.count, 0);
+  return `<figure class="chart" aria-label="Complaints received per day over the last 12 days: ${total} in total"><div class="chart-bars">${days.map(d => `<div class="chart-bar" style="height:${Math.max(4, Math.round(d.count / peak * 100))}%" title="${esc(d.day)}: ${d.count}"><span>${esc(d.day.slice(8))}</span></div>`).join('')}</div><figcaption class="micro">${total} ${total === 1 ? 'complaint' : 'complaints'} received in the last 12 days (UTC dates), from the CivicLens server.</figcaption></figure>`;
+}
+
 function sampleChart() {
   const bars = [40, 65, 51, 84, 70, 92, 64, 78, 58, 86, 100, 73];
   const labels = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'];
@@ -125,6 +167,10 @@ function sampleChart() {
 
 // ---------- Complaint lists ----------
 export async function renderComplaints(root, mode) {
+  if (mode === 'community' && await isServerResident(viewer())) return renderNeedsAccounts(root, 'Community issues',
+    'Neighbourhood reports you can read and review.',
+    'Community issues are not on the server yet', 'The CivicLens server does not publish a neighbourhood list or take reviews yet, so this screen has nothing real to show. Public tracking works for any report ID, and your own complaints are under My complaints.',
+    `<div class="row-actions">${link('Track by ID', '#/home', 'secondary')}${link('Report an issue', '#/camera', 'primary')}</div>`);
   const records = await loadRecords();
   const admin = isAdmin();
   const base = admin ? records : mode === 'community' ? records : records.filter(r => r.mine);
@@ -176,7 +222,15 @@ export async function renderComplaints(root, mode) {
 }
 
 // ---------- Claim ----------
-export function renderClaim(root) {
+/** Server mode, resident: a screen whose data needs resident accounts keeps its place and says so. */
+function renderNeedsAccounts(root, title, lead, emptyTitle, emptyText, actions) {
+  mount(root, title, `
+    ${heading({eyebrow: 'Your workspace', title, lead})}
+    <section class="panel">${empty(emptyTitle, emptyText, actions)}</section>`);
+}
+
+export async function renderClaim(root) {
+  const account = await isServerResident(viewer());
   mount(root, 'Claim a complaint', `
     ${heading({eyebrow: 'Anonymous report, resident follow-through', title: 'Claim a complaint', lead: 'Link a report to your resident profile. You need both its public ID and its private claim code. Both are on the receipt.'})}
     <div class="narrow-panel">
@@ -187,7 +241,9 @@ export function renderClaim(root) {
           <div id="claim-error" role="alert"></div>
           <button class="btn btn-primary btn-lg" type="submit">${icon('lock')}<span>Claim report</span></button>
         </form>
-        ${notice('Sample report: public ID <span class="code-inline">NCL-2026-DEMO01</span> with claim code <span class="code-inline">DEMO-CLAIM-01</span>. Demonstration data only.', 'info', 'alert', 'mt')}
+        ${account
+          ? notice('The CivicLens server checks the claim code. Only a report that is not already linked to another account can be claimed, and its history stays as it was.', 'info', 'lock', 'mt')
+          : notice('Sample report: public ID <span class="code-inline">NCL-2026-DEMO01</span> with claim code <span class="code-inline">DEMO-CLAIM-01</span>. Demonstration data only.', 'info', 'alert', 'mt')}
       </section>
     </div>`);
   root.querySelector('#claim-form').onsubmit = async e => {
@@ -196,11 +252,21 @@ export function renderClaim(root) {
     const submit = e.target.querySelector('button[type=submit]');
     submit.disabled = true;
     try {
-      const claimed = await api.claim(String(fd.get('id')).trim().toUpperCase(), String(fd.get('code')).trim(), viewer().email);
-      toast(`${claimed.id} is now linked to your profile.`, 'success');
+      const id = String(fd.get('id')).trim().toUpperCase();
+      const code = String(fd.get('code')).trim();
+      if (account) {
+        const result = await (await serverClient()).claimComplaint(residentSession.get().token, id, code);
+        e.target.reset();
+        toast(result.outcome === 'already_yours' ? `${id} is already in your account.` : `${id} is now linked to your resident account.`, 'success');
+      } else {
+        const claimed = await api.claim(id, code, viewer().email);
+        toast(`${claimed.id} is now linked to your profile.`, 'success');
+      }
       navigate('resident/complaints');
     } catch (err) {
       submit.disabled = false;
+      e.target.querySelector('#claim-code').value = '';
+      if (err instanceof ApiError && err.status === 401) { residentSession.clear(); setSession(null); return navigate('login/resident'); }
       document.getElementById('claim-error').innerHTML = notice(esc(err.message), 'error', 'alert');
     }
   };
@@ -208,6 +274,7 @@ export function renderClaim(root) {
 
 // ---------- Notifications ----------
 export async function renderNotifications(root) {
+  if (isAdmin() && await usesServerRecords()) return renderStaffInbox(root);
   const prefs = readPrefs();
   const lastRead = readLastRead();
   const events = await api.notificationsFor(viewer(), prefs, lastRead);
@@ -230,11 +297,21 @@ export async function renderNotifications(root) {
 }
 
 // ---------- Preferences ----------
-export function renderSettings(root) {
-  const prefs = readPrefs();
+export async function renderSettings(root) {
   const admin = isAdmin();
+  // A signed-in resident's preferences belong to the account on the server; everyone else keeps them in this browser.
+  const account = !admin && await isServerResident(viewer());
+  const http = account ? await serverClient() : null;
+  let prefs;
+  try {
+    prefs = account ? await http.getResidentPreferences(residentSession.get().token) : readPrefs();
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) { residentSession.clear(); setSession(null); return navigate('login/resident'); }
+    throw err;
+  }
+  const v = viewer();
   mount(root, 'Preferences', `
-    ${heading({eyebrow: 'Your workspace', title: 'Preferences', lead: 'Choose what this browser shows you. Preferences are stored on this device for your account.'})}
+    ${heading({eyebrow: 'Your workspace', title: 'Preferences', lead: account ? 'Choose what your workspace shows you. Preferences are saved to your resident account on the CivicLens server.' : 'Choose what this browser shows you. Preferences are stored on this device for your account.'})}
     <div class="split">
       <section class="panel">
         ${panelHead('Notifications')}
@@ -245,18 +322,36 @@ export function renderSettings(root) {
         </form>
         <p class="micro mt" id="prefs-status" role="status"></p>
       </section>
-      <section class="panel">
+      ${account ? `<section class="panel" data-panel="account">
+        ${panelHead('Your account')}
+        <dl class="meta-list"><div><dt>Name</dt><dd>${esc(v.name)}</dd></div><div><dt>Email</dt><dd>${esc(v.email)}</dd></div></dl>
+        ${residentSession.get()?.resident?.demo ? notice('This is a <strong>demonstration</strong> account with a public password. Do not store anything private in it.', 'warn', 'alert', 'mt') : ''}
+        <p class="micro mt">Your session ends when you sign out, close or reload this tab, or after a few hours.</p>
+      </section>` : `<section class="panel">
         ${panelHead('Demonstration data')}
         <p>Reset clears reports, evidence files, video reviews and profile claims from this browser, then restores the sample workspace. It does not affect other devices.</p>
         ${btn(icon('refresh') + '<span>Reset sample workspace</span>', 'data-action="reset"', 'secondary')}
         ${notice('Local data is visible to anyone who can use this browser. Production data would be governed by server-side access control and retention rules.', 'warn', 'lock', 'mt')}
-      </section>
+      </section>`}
     </div>`);
-  root.querySelector('#prefs-form').addEventListener('change', e => {
-    const next = {...readPrefs(), [e.target.name]: e.target.checked};
-    const ok = writePrefs(next);
-    document.getElementById('prefs-status').textContent = ok ? 'Preference saved on this device.' : 'Preference could not be saved: browser storage is blocked.';
+  root.querySelector('#prefs-form').addEventListener('change', async e => {
+    const status = document.getElementById('prefs-status');
+    if (!account) {
+      const ok = writePrefs({...readPrefs(), [e.target.name]: e.target.checked});
+      status.textContent = ok ? 'Preference saved on this device.' : 'Preference could not be saved: browser storage is blocked.';
+      return;
+    }
+    prefs = {...prefs, [e.target.name]: e.target.checked};
+    try {
+      prefs = await http.putResidentPreferences(residentSession.get()?.token, prefs);
+      status.textContent = 'Preference saved to your account.';
+    } catch (err) {
+      e.target.checked = !e.target.checked;
+      if (err instanceof ApiError && err.status === 401) { residentSession.clear(); setSession(null); return navigate('login/resident'); }
+      status.textContent = 'Preference could not be saved: ' + (err?.message || 'the server did not answer.');
+    }
   });
+  if (account) return;
   root.querySelector('[data-action="reset"]').onclick = async () => {
     const yes = await confirmDialog({title: 'Reset the demonstration workspace?', message: 'This removes every locally created report, evidence file and video review in this browser. It cannot be undone.', confirmLabel: 'Reset workspace'});
     if (!yes) return;
@@ -273,6 +368,7 @@ export function renderSettings(root) {
 // ---------- Work orders (admin) ----------
 export async function renderWorkOrders(root) {
   const records = await loadRecords();
+  if (await usesServerRecords()) return renderServerWorkOrders(root, records);
   const cases = await Promise.all(records.map(r => api.detail(r.id, viewer())));
   const orders = cases.flatMap(c => (c?.workOrders || []).map(w => ({...w, caseId: c.id, title: c.title, status_: c.status})));
   const today = new Date().toISOString().slice(0, 10);
@@ -315,6 +411,101 @@ export async function renderWorkOrders(root) {
       document.getElementById('work-error').innerHTML = notice(esc(err.message), 'error', 'alert');
     }
   };
+}
+
+// Server mode: the original work-orders page on the complaint-management API. Cases can take a work order
+// once assigned (the server enforces this); start, complete and cancel follow the server's rules.
+async function renderServerWorkOrders(root, records) {
+  const http = await serverClient();
+  const token = staffSession.get()?.token;
+  let orders = [];
+  let loadError = '';
+  try {
+    orders = (await http.listWorkOrders(token, {limit: 100})).items;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) { staffSession.clear(); setSession(null); return navigate('login/official'); }
+    loadError = err instanceof ApiError ? err.message : 'Work orders could not be loaded.';
+  }
+  const byId = new Map(records.map(r => [r.id, r]));
+  const assignable = records.filter(r => ['Assigned', 'In Progress'].includes(r.status));
+  const awaiting = records.filter(r => ['Submitted', 'Under Review'].includes(r.status));
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = orders.map(w => {
+    const c = byId.get(w.complaintId);
+    return `<tr data-work-order="${esc(w.id)}" data-status="${esc(w.status)}"><td><a href="#/issue/${esc(w.complaintId)}">${esc(c?.title || w.complaintId)}</a><small class="code-inline">${esc(w.complaintId)}</small></td>
+      <td>${esc(w.team)}<small>${esc(w.status)}</small></td>
+      <td>${w.dueAt ? fmtDate(w.dueAt) : 'Not set'}${w.overdue ? ' <span class="pill pill-red">Overdue</span>' : ''}</td>
+      <td>${esc(w.description || '—')}</td><td>${w.createdAt ? fmtDate(w.createdAt) : '—'}</td>
+      <td class="row-actions">${w.status === 'Open' ? btn('Start', 'data-wo-to="In Progress"', 'secondary', 'btn-sm') : ''}${w.status === 'In Progress' ? btn('Complete', 'data-wo-to="Completed"', 'secondary', 'btn-sm') : ''}${['Open', 'In Progress'].includes(w.status) ? btn('Cancel', 'data-wo-to="Cancelled"', 'ghost', 'btn-sm') : ''}</td></tr>`;
+  }).join('');
+  mount(root, 'Work orders', `
+    ${heading({eyebrow: 'From insight to action', title: 'Work orders', lead: 'Assign a responsible team and a target date. The assignment is recorded in the public timeline.'})}
+    ${loadError ? notice(esc(loadError), 'error', 'alert') : ''}
+    <div class="split">
+      <section class="panel" aria-labelledby="wo-form-title">
+        ${panelHead('Create a work order')}
+        ${assignable.length ? `<form id="work-form" class="stack">
+          <div class="field"><label for="wo-case">Case</label><select id="wo-case" name="id" required>${assignable.map(r => `<option value="${esc(r.id)}">${esc(r.id)} · ${esc(r.title)}</option>`).join('')}</select><small class="micro">Only assigned cases can take a work order.</small></div>
+          <div class="field"><label for="wo-team">Responsible team</label><input id="wo-team" name="team" required maxlength="120" placeholder="Ward maintenance team"></div>
+          <div class="field"><label for="wo-due">Target date</label><input id="wo-due" name="due" type="date" min="${today}"></div>
+          <div class="field"><label for="wo-instructions">Instructions for the team</label><textarea id="wo-instructions" name="instructions" rows="3" maxlength="1000" placeholder="Scope, safety precautions and how to confirm completion."></textarea></div>
+          <div id="work-error" role="alert"></div>
+          <button class="btn btn-primary" type="submit">${icon('plus')}<span>Create work order</span></button>
+        </form>` : empty('No assigned cases', 'Assign a case to a department from its case page first; then it can take a work order.')}
+      </section>
+      <div class="stack">
+        ${panel(`${panelHead('Awaiting assignment', '', 'Submitted or under review')}
+          ${awaiting.length ? `<ul class="issue-list">${awaiting.slice(0, 6).map(issueRow).join('')}</ul>` : '<p class="micro">Nothing is waiting for assignment.</p>'}`)}
+      </div>
+    </div>
+    <section class="panel panel-flush mt">
+      ${panelHead('Open and closed work orders')}
+      ${rows ? `<div class="table-wrap"><table class="data-table" id="work-orders"><caption class="sr-only">Work orders</caption><thead><tr><th scope="col">Case</th><th scope="col">Team</th><th scope="col">Target date</th><th scope="col">Instructions</th><th scope="col">Created</th><th scope="col">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <div class="field mt"><label for="wo-note">Completion note or cancellation reason</label><input id="wo-note" maxlength="1000"><small class="micro">Required to complete or cancel. Kept with the work order.</small></div>
+        <div id="wo-error" role="alert"></div>`
+        : empty('No work orders yet', 'Create one above. Work orders stay linked to their case.')}
+    </section>`);
+  root.querySelector('#work-form')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    const f = readFilters(e.target);
+    const submit = e.target.querySelector('button[type=submit]');
+    submit.disabled = true;
+    try {
+      await http.createWorkOrder(token, f.id, {team: f.team, dueAt: f.due || null, description: f.instructions || ''});
+      toast('Work order created.', 'success');
+      renderWorkOrders(root);
+    } catch (err) {
+      submit.disabled = false;
+      root.querySelector('#work-error').innerHTML = notice(esc(err instanceof ApiError ? err.message : 'The work order could not be created.'), 'error', 'alert');
+    }
+  });
+  root.querySelector('#work-orders')?.addEventListener('click', async e => {
+    const button = e.target.closest('[data-wo-to]');
+    const row = e.target.closest('[data-work-order]');
+    if (!button || !row) return;
+    button.disabled = true;
+    try {
+      await http.changeWorkOrder(token, row.dataset.workOrder, {to: button.dataset.woTo, expectedStatus: row.dataset.status, note: (root.querySelector('#wo-note')?.value || '').trim()});
+      toast(`Work order ${button.dataset.woTo === 'In Progress' ? 'started' : button.dataset.woTo.toLowerCase()}.`, 'success');
+      renderWorkOrders(root);
+    } catch (err) {
+      button.disabled = false;
+      root.querySelector('#wo-error').innerHTML = notice(esc(err instanceof ApiError ? err.message : 'The work order could not be changed.'), 'error', 'alert');
+    }
+  });
+}
+
+// Server mode: the staff inbox (new complaints, new evidence) inside the dashboard, using the same inbox
+// component as before (views/notifications.js).
+async function renderStaffInbox(root) {
+  mount(root, 'Notifications', `
+    ${heading({eyebrow: 'Stay in the loop', title: 'Notifications', lead: 'New complaints and new evidence on the CivicLens server. Turn notifications on to get them on this device, even when CivicLens is closed.'})}
+    <section class="panel"><div id="staff-notifications" role="status" aria-live="polite"><p class="micro">Loading…</p></div></section>`);
+  return mountInbox(root.querySelector('#staff-notifications'), {http: await serverClient(), audience: 'staff', token: staffSession.get().token, onUnauthorized: () => {
+    staffSession.clear();
+    setSession(null);
+    navigate('login/official');
+  }});
 }
 
 export {isAdmin, fmtDate, btn, link, panel, panelHead, notice, empty, icon, statusPill, verificationPill, priorityPill};

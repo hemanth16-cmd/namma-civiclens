@@ -9,7 +9,7 @@ globalThis.sessionStorage = shim;
 
 const {mediaDB} = await import('../dist/services.js');
 const {submitReport, rememberedServerReports, rememberServerReport, forgetServerReport} = await import('../dist/report-gateway.js');
-const {serverModeRoute} = await import('../dist/router.js');
+const {serverModeRoute, serverWorkspaceAccess} = await import('../dist/router.js');
 
 mediaDB.put = async () => {};
 
@@ -76,14 +76,113 @@ test('unavailable browser storage never breaks a submission', async () => {
   assert.equal(saved.id, 'NCL-2026-NOSTOR');
 });
 
-test('in server mode, demonstration workspaces never stand in for server data', () => {
-  assert.equal(serverModeRoute(['official']), 'staff');
-  for (const page of ['complaints', 'map', 'workorders', 'intelligence', 'settings']) assert.equal(serverModeRoute(['official', page]), 'staff');
-  assert.equal(serverModeRoute(['official', 'video-review']), null, 'video review keeps footage in this browser only');
-  assert.equal(serverModeRoute(['resident']), 'my-reports');
-  for (const page of ['complaints', 'community', 'map', 'claim', 'settings']) assert.equal(serverModeRoute(['resident', page]), 'my-reports');
-  assert.equal(serverModeRoute(['resident', 'notifications']), 'notifications');
-  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123']), 'track/NCL-2026-ABC123');
-  assert.equal(serverModeRoute(['issue']), 'my-reports');
+test('in server mode, the original workspaces stay for signed-in staff and residents', () => {
+  for (const page of [undefined, 'complaints', 'map', 'workorders', 'intelligence', 'video-review', 'notifications']) {
+    assert.equal(serverModeRoute(page ? ['official', page] : ['official'], {staff: true}), null);
+  }
+  for (const page of [undefined, 'complaints', 'community', 'map', 'claim', 'settings']) {
+    assert.equal(serverModeRoute(page ? ['resident', page] : ['resident']), null, 'the resident shell (app.js admits only a server resident)');
+  }
+  assert.equal(serverModeRoute(['resident', 'notifications']), 'notifications', 'the citizen inbox page');
+  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123'], {staff: true}), null, 'staff open the original case page');
+  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123']), 'track/NCL-2026-ABC123', 'everyone else gets public tracking');
+  assert.equal(serverModeRoute(['issue'], {staff: true}), 'official/complaints');
+  assert.equal(serverModeRoute(['issue']), 'resident');
   for (const head of ['camera', 'track', 'staff', 'receipt', 'home', 'my-reports']) assert.equal(serverModeRoute([head, 'x']), null);
+});
+
+const {toWorkspaceRecord, loadServerRecords, dailyActivity} = await import('../dist/server-records.js');
+const {createApiClient} = await import('../dist/api-client.js');
+
+const listItem = (n, extra = {}) => ({
+  id: `NCL-2026-${String(n).padStart(6, '0')}`, title: 'Potholes reported by a citizen', category: 'Potholes', area: 'Hebbal',
+  status: 'Submitted', verification: 'Pending Verification', department: 'Awaiting civic review', created: '2026-10-30T04:00:00.000Z',
+  updated: '2026-10-30T04:00:00.000Z', mediaType: 'photo', hasEvidence: true, gps: {lat: 13.03, lng: 77.59, accuracy: 12, sourceType: 'gps'}, ...extra
+});
+
+test('server complaints become workspace rows the dashboard and map can use', () => {
+  const row = toWorkspaceRecord(listItem(1));
+  assert.equal(row.server, true);
+  assert.equal(row.sample, false);
+  assert.deepEqual(row.gps, {lat: 13.03, lng: 77.59, accuracy: 12, sourceType: 'gps'});
+  assert.ok(row.priority && Number.isFinite(row.priority.score), 'the existing baseline priority is shown');
+  assert.equal(toWorkspaceRecord(listItem(2, {title: '', gps: null})).title, 'Potholes reported by a citizen');
+  assert.equal(toWorkspaceRecord(listItem(3, {gps: null})).gps, null);
+});
+
+test('the staff list client keeps valid locations only', async () => {
+  const items = [listItem(1), listItem(2, {gps: {lat: 200, lng: 77}}), listItem(3, {gps: {lat: 'x', lng: 77}}), listItem(4, {gps: null})];
+  const http = createApiClient({baseUrl: 'http://api.test/api/v1', fetchImpl: async () => json(200, {items, total: 4, limit: 100, offset: 0})});
+  const {items: mapped} = await http.listStaffComplaints('t'.repeat(30));
+  assert.deepEqual(mapped.map(i => i.gps && i.gps.lat), [13.03, null, null, null]);
+  assert.equal(mapped[0].title, 'Potholes reported by a citizen');
+  assert.equal(mapped[0].department, 'Awaiting civic review');
+});
+
+test('every server page is loaded, and failures are not hidden', async () => {
+  const all = Array.from({length: 230}, (_, i) => listItem(i));
+  const seen = [];
+  const http = {listStaffComplaints: async (token, {limit, offset}) => { seen.push(offset); return {items: all.slice(offset, offset + limit), total: all.length}; }};
+  const rows = await loadServerRecords(http, 'token');
+  assert.equal(rows.length, 230);
+  assert.deepEqual(seen, [0, 100, 200]);
+  await assert.rejects(loadServerRecords({listStaffComplaints: async () => { throw new Error('timeout'); }}, 'token'), /timeout/);
+});
+
+test('reporting activity counts complaints per day', () => {
+  const now = Date.parse('2026-10-30T12:00:00Z');
+  const rows = [{created: '2026-10-30T01:00:00Z'}, {created: '2026-10-30T09:00:00Z'}, {created: '2026-10-28T09:00:00Z'}, {created: '2026-09-01T00:00:00Z'}];
+  const days = dailyActivity(rows, 12, now);
+  assert.equal(days.length, 12);
+  assert.deepEqual(days.at(-1), {day: '2026-10-30', count: 2});
+  assert.equal(days.find(d => d.day === '2026-10-28').count, 1);
+  assert.equal(days.reduce((a, d) => a + d.count, 0), 3, 'older complaints are outside the window');
+});
+
+test('the staff case keeps its verification history (used by the restored case page)', async () => {
+  const {toStaffComplaint} = await import('../dist/api-client.js');
+  const r = toStaffComplaint({
+    id: 'NCL-2026-ABC123', category: 'Potholes', gps: {lat: 13, lng: 77}, timeline: [],
+    verificationLog: [{id: 'v1', date: '2026-10-31T00:00:00Z', type: 'response', response: 'Still Present', by: 'citizen', actor: 'Citizen', note: '', secret: 'x'}]
+  });
+  assert.deepEqual(r.verificationLog, [{id: 'v1', date: '2026-10-31T00:00:00Z', type: 'response', from: null, to: null, response: 'Still Present', by: 'citizen', actor: 'Citizen', note: ''}]);
+  assert.deepEqual(toStaffComplaint({id: 'NCL-2026-ABC124', gps: {lat: 13, lng: 77}, timeline: []}).verificationLog, []);
+});
+
+// ---------- Role boundaries in server mode (passerby / resident / staff) ----------
+const STAFF = {token: 's'.repeat(43), staff: {username: 'demo_admin', displayName: 'Demo admin', role: 'admin'}};
+const RESIDENT = {token: 'r'.repeat(43), resident: {email: 'resident@civiclens.demo', displayName: 'Demo resident'}};
+
+test('a passerby opening #/resident gets the sign-in page, never a resident identity', () => {
+  for (const page of [undefined, 'complaints', 'community', 'map', 'claim', 'settings', 'notifications']) {
+    const access = serverWorkspaceAccess('resident', {session: null});
+    assert.equal(access.redirect, 'login/resident', `#/resident/${page ?? ''}`);
+    assert.equal(access.identity, undefined, 'no identity is created');
+  }
+});
+
+test('the old "this device" pseudo-resident and local demo profiles do not open the resident workspace', () => {
+  const device = {role: 'resident', name: 'This device', email: '', server: true, device: true};
+  const demo = {role: 'resident', name: 'Demo resident', email: 'resident@civiclens.demo'};
+  for (const session of [device, demo]) {
+    assert.deepEqual(serverWorkspaceAccess('resident', {session}), {redirect: 'login/resident', clear: true});
+  }
+});
+
+test('only a server resident session opens the resident workspace', () => {
+  const access = serverWorkspaceAccess('resident', {resident: RESIDENT, session: null});
+  assert.equal(access.redirect, undefined);
+  assert.deepEqual(access.identity, {role: 'resident', name: 'Demo resident', email: 'resident@civiclens.demo', server: true});
+  assert.deepEqual(serverWorkspaceAccess('resident', {resident: RESIDENT, session: access.identity}), {});
+});
+
+test('a staff session does not open the resident workspace, and a resident session does not open the admin one', () => {
+  assert.equal(serverWorkspaceAccess('resident', {staff: STAFF, session: {role: 'official', server: true}}).redirect, 'login/resident');
+  assert.equal(serverWorkspaceAccess('official', {resident: RESIDENT, session: {role: 'resident', server: true}}).redirect, 'login/official');
+  assert.equal(serverWorkspaceAccess('official', {session: {role: 'official', email: 'official@civiclens.demo'}}).clear, true, 'a demo admin identity is dropped');
+});
+
+test('a passerby opening a case URL is sent to public tracking', () => {
+  assert.deepEqual(serverWorkspaceAccess('issue', {session: null}), {});
+  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123']), 'track/NCL-2026-ABC123');
 });

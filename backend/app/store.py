@@ -28,7 +28,7 @@ from collections.abc import Callable
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
-from .db import DB_ERRORS, DB_PATH_ENV, DEFAULT_DB_PATH, INTEGRITY_ERRORS, SQLiteDatabase, database_from_env, resolve_db_path  # noqa: F401
+from .db import DB_ERRORS, DB_PATH_ENV, DEFAULT_DB_PATH, INTEGRITY_ERRORS, Feature, SQLiteDatabase, database_from_env, resolve_db_path  # noqa: F401
 from .claims import hash_claim_code, hash_upload_token, new_claim_code, new_public_id, new_upload_token, upload_token_matches
 from . import lifecycle as lc
 from .lifecycle import RuleViolation
@@ -36,7 +36,7 @@ from .lifecycle import RuleViolation
 logger = logging.getLogger("civiclens.store")
 
 MAX_ID_ATTEMPTS = 5
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 7
 DEFAULT_UPLOAD_TOKEN_TTL = timedelta(hours=1)
 
 INITIAL_STATUS = "Submitted"
@@ -407,82 +407,6 @@ CREATE TRIGGER staff_notes_no_update BEFORE UPDATE ON staff_notes BEGIN SELECT R
 CREATE TRIGGER staff_notes_no_delete BEFORE DELETE ON staff_notes BEGIN SELECT RAISE(ABORT, 'staff_notes is append-only'); END;
 CREATE TRIGGER work_order_events_no_update BEFORE UPDATE ON work_order_events BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
 CREATE TRIGGER work_order_events_no_delete BEFORE DELETE ON work_order_events BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
-""",    8: """
--- AI-assisted analysis (app/ai, docs/ARCHITECTURE.md "AI analysis"). Everything here is a suggestion for
--- staff: nothing in these tables changes a complaint's status or citizen verification. JSON columns are
--- TEXT here and JSONB on PostgreSQL.
-
--- One row per (evidence file, detector). The UNIQUE key makes scheduling idempotent: a retry re-runs
--- the same row instead of adding another.
-CREATE TABLE ai_inferences (
-    pk                 INTEGER PRIMARY KEY,
-    inference_id       TEXT NOT NULL UNIQUE,
-    complaint_pk       INTEGER NOT NULL REFERENCES complaints(pk),
-    evidence_pk        INTEGER NOT NULL REFERENCES evidence(pk),
-    detector           TEXT NOT NULL,
-    provider           TEXT NOT NULL,
-    mechanism          TEXT NOT NULL CHECK (mechanism IN ('model', 'workflow')),
-    model_id           TEXT NOT NULL,
-    model_version      TEXT,
-    class_prompt       TEXT,
-    state              TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed', 'skipped')),
-    original_class     TEXT,
-    detected_category  TEXT,
-    top_confidence     REAL CHECK (top_confidence IS NULL OR (top_confidence >= 0 AND top_confidence <= 1)),
-    detection_count    INTEGER NOT NULL DEFAULT 0,
-    predictions        TEXT NOT NULL DEFAULT '[]',
-    confidence_meta    TEXT NOT NULL DEFAULT '{}',
-    image_width        INTEGER,
-    image_height       INTEGER,
-    error_code         TEXT,
-    attempts           INTEGER NOT NULL DEFAULT 0,
-    created_at         TEXT NOT NULL,
-    started_at         TEXT,
-    completed_at       TEXT,
-    updated_at         TEXT NOT NULL,
-    UNIQUE (evidence_pk, detector)
-);
-CREATE INDEX ai_inferences_by_complaint ON ai_inferences (complaint_pk, pk);
-CREATE INDEX ai_inferences_by_state ON ai_inferences (state, updated_at);
-
--- Before/after comparison of one original and one repair photo. The AI suggestion (suggested_outcome,
--- verification_confidence) is kept apart from the human review (review_status), and both are apart from
--- the complaint's administrative status.
-CREATE TABLE repair_assessments (
-    pk                       INTEGER PRIMARY KEY,
-    assessment_id            TEXT NOT NULL UNIQUE,
-    complaint_pk             INTEGER NOT NULL REFERENCES complaints(pk),
-    work_order_pk            INTEGER REFERENCES work_orders(pk),
-    original_evidence_pk     INTEGER NOT NULL REFERENCES evidence(pk),
-    repair_evidence_pk       INTEGER NOT NULL REFERENCES evidence(pk),
-    state                    TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed')),
-    suggested_outcome        TEXT CHECK (suggested_outcome IS NULL OR suggested_outcome IN ('likely_repaired', 'damage_visible', 'inconclusive')),
-    verification_confidence  REAL CHECK (verification_confidence IS NULL OR (verification_confidence >= 0 AND verification_confidence <= 1)),
-    location_check           TEXT CHECK (location_check IS NULL OR location_check IN ('match', 'mismatch', 'unverified')),
-    gps_distance_m           REAL,
-    details                  TEXT NOT NULL DEFAULT '{}',
-    error_code               TEXT,
-    attempts                 INTEGER NOT NULL DEFAULT 0,
-    requested_by_staff_pk    INTEGER REFERENCES staff_accounts(pk),
-    review_status            TEXT NOT NULL DEFAULT 'pending_review' CHECK (review_status IN ('pending_review', 'approved', 'rejected')),
-    reviewer_staff_pk        INTEGER REFERENCES staff_accounts(pk),
-    review_note              TEXT NOT NULL DEFAULT '',
-    reviewed_at              TEXT,
-    created_at               TEXT NOT NULL,
-    completed_at             TEXT,
-    updated_at               TEXT NOT NULL,
-    UNIQUE (original_evidence_pk, repair_evidence_pk)
-);
-CREATE INDEX repair_assessments_by_complaint ON repair_assessments (complaint_pk, pk);
-
--- Which inference results an assessment compared.
-CREATE TABLE repair_assessment_inferences (
-    pk             INTEGER PRIMARY KEY,
-    assessment_pk  INTEGER NOT NULL REFERENCES repair_assessments(pk),
-    inference_pk   INTEGER NOT NULL REFERENCES ai_inferences(pk),
-    phase          TEXT NOT NULL CHECK (phase IN ('original', 'repair')),
-    UNIQUE (assessment_pk, inference_pk)
-);
 """,
 }
 
@@ -799,91 +723,92 @@ CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log FOR EACH STATE
 CREATE TRIGGER complaint_assignments_append_only BEFORE UPDATE OR DELETE ON complaint_assignments FOR EACH ROW EXECUTE FUNCTION civiclens_append_only();
 CREATE TRIGGER staff_notes_append_only BEFORE UPDATE OR DELETE ON staff_notes FOR EACH ROW EXECUTE FUNCTION civiclens_append_only();
 CREATE TRIGGER work_order_events_append_only BEFORE UPDATE OR DELETE ON work_order_events FOR EACH ROW EXECUTE FUNCTION civiclens_append_only();
-""",    8: """
--- AI-assisted analysis (app/ai): the same tables as SQLite MIGRATIONS[8], with JSONB for JSON columns.
-
--- One row per (evidence file, detector). The UNIQUE key makes scheduling idempotent: a retry re-runs
--- the same row instead of adding another.
-CREATE TABLE ai_inferences (
-    pk                 BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    inference_id       TEXT NOT NULL UNIQUE,
-    complaint_pk       BIGINT NOT NULL REFERENCES complaints(pk),
-    evidence_pk        BIGINT NOT NULL REFERENCES evidence(pk),
-    detector           TEXT NOT NULL,
-    provider           TEXT NOT NULL,
-    mechanism          TEXT NOT NULL CHECK (mechanism IN ('model', 'workflow')),
-    model_id           TEXT NOT NULL,
-    model_version      TEXT,
-    class_prompt       TEXT,
-    state              TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed', 'skipped')),
-    original_class     TEXT,
-    detected_category  TEXT,
-    top_confidence     REAL CHECK (top_confidence IS NULL OR (top_confidence >= 0 AND top_confidence <= 1)),
-    detection_count    INTEGER NOT NULL DEFAULT 0,
-    predictions        JSONB NOT NULL DEFAULT '[]'::jsonb,
-    confidence_meta    JSONB NOT NULL DEFAULT '{}'::jsonb,
-    image_width        INTEGER,
-    image_height       INTEGER,
-    error_code         TEXT,
-    attempts           INTEGER NOT NULL DEFAULT 0,
-    created_at         TEXT NOT NULL,
-    started_at         TEXT,
-    completed_at       TEXT,
-    updated_at         TEXT NOT NULL,
-    UNIQUE (evidence_pk, detector)
-);
-CREATE INDEX ai_inferences_by_complaint ON ai_inferences (complaint_pk, pk);
-CREATE INDEX ai_inferences_by_state ON ai_inferences (state, updated_at);
-
--- Before/after comparison of one original and one repair photo. The AI suggestion (suggested_outcome,
--- verification_confidence) is kept apart from the human review (review_status), and both are apart from
--- the complaint's administrative status.
-CREATE TABLE repair_assessments (
-    pk                       BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    assessment_id            TEXT NOT NULL UNIQUE,
-    complaint_pk             BIGINT NOT NULL REFERENCES complaints(pk),
-    work_order_pk            BIGINT REFERENCES work_orders(pk),
-    original_evidence_pk     BIGINT NOT NULL REFERENCES evidence(pk),
-    repair_evidence_pk       BIGINT NOT NULL REFERENCES evidence(pk),
-    state                    TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed')),
-    suggested_outcome        TEXT CHECK (suggested_outcome IS NULL OR suggested_outcome IN ('likely_repaired', 'damage_visible', 'inconclusive')),
-    verification_confidence  REAL CHECK (verification_confidence IS NULL OR (verification_confidence >= 0 AND verification_confidence <= 1)),
-    location_check           TEXT CHECK (location_check IS NULL OR location_check IN ('match', 'mismatch', 'unverified')),
-    gps_distance_m           REAL,
-    details                  JSONB NOT NULL DEFAULT '{}'::jsonb,
-    error_code               TEXT,
-    attempts                 INTEGER NOT NULL DEFAULT 0,
-    requested_by_staff_pk    BIGINT REFERENCES staff_accounts(pk),
-    review_status            TEXT NOT NULL DEFAULT 'pending_review' CHECK (review_status IN ('pending_review', 'approved', 'rejected')),
-    reviewer_staff_pk        BIGINT REFERENCES staff_accounts(pk),
-    review_note              TEXT NOT NULL DEFAULT '',
-    reviewed_at              TEXT,
-    created_at               TEXT NOT NULL,
-    completed_at             TEXT,
-    updated_at               TEXT NOT NULL,
-    UNIQUE (original_evidence_pk, repair_evidence_pk)
-);
-CREATE INDEX repair_assessments_by_complaint ON repair_assessments (complaint_pk, pk);
-
--- Which inference results an assessment compared.
-CREATE TABLE repair_assessment_inferences (
-    pk             BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    assessment_pk  BIGINT NOT NULL REFERENCES repair_assessments(pk),
-    inference_pk   BIGINT NOT NULL REFERENCES ai_inferences(pk),
-    phase          TEXT NOT NULL CHECK (phase IN ('original', 'repair')),
-    UNIQUE (assessment_pk, inference_pk)
-);
 """,
 }
 
 # Tables in foreign-key order (parents first): used by the SQLite → PostgreSQL migration tool.
 # Staff accounts and departments come first because complaints (schema 7) reference them.
-TABLES = ("staff_accounts", "departments", "staff_departments",
+# Named migrations (db.Feature), applied after the numbered ones and recorded by name in
+# civiclens_features. New schema changes go here, not into MIGRATIONS: origin/main and
+# origin/feature/core-platform-development each shipped a different MIGRATIONS[8], so a numbered
+# version above 7 no longer identifies a schema (docs/MIGRATION_RECONCILIATION.md).
+RESIDENT_ACCOUNTS_SQLITE = """
+-- Resident accounts (server-backed sign-in), separate from staff accounts and from anonymous reporting.
+-- A complaint's owner is set only from a validated resident session: when a signed-in resident submits
+-- it (owned_via 'submitted') or claims it with its private claim code ('claimed'). Existing complaints
+-- keep owner_resident_pk NULL: a passerby's report is never assigned to anyone automatically.
+CREATE TABLE resident_accounts (
+    pk             INTEGER PRIMARY KEY,
+    resident_id    TEXT NOT NULL UNIQUE,
+    email          TEXT NOT NULL UNIQUE CHECK (email = lower(email) AND length(email) BETWEEN 3 AND 254),
+    display_name   TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 80),
+    password_hash  TEXT NOT NULL,
+    is_demo        INTEGER NOT NULL DEFAULT 0 CHECK (is_demo IN (0, 1)),
+    created_at     TEXT NOT NULL,
+    disabled_at    TEXT
+);
+CREATE TABLE resident_sessions (
+    pk           INTEGER PRIMARY KEY,
+    token_hash   TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+    resident_pk  INTEGER NOT NULL REFERENCES resident_accounts(pk) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    revoked_at   TEXT
+);
+CREATE TABLE resident_preferences (
+    pk           INTEGER PRIMARY KEY,
+    resident_pk  INTEGER NOT NULL UNIQUE REFERENCES resident_accounts(pk) ON DELETE CASCADE,
+    preferences  TEXT NOT NULL DEFAULT '{}',
+    updated_at   TEXT NOT NULL
+);
+ALTER TABLE complaints ADD COLUMN owner_resident_pk INTEGER REFERENCES resident_accounts(pk);
+ALTER TABLE complaints ADD COLUMN owned_via TEXT CHECK (owned_via IS NULL OR owned_via IN ('submitted', 'claimed'));
+ALTER TABLE complaints ADD COLUMN owned_at TEXT;
+CREATE INDEX complaints_by_owner ON complaints (owner_resident_pk, pk);
+"""
+
+RESIDENT_ACCOUNTS_POSTGRES = """
+-- Resident accounts: the same tables and columns as RESIDENT_ACCOUNTS_SQLITE.
+CREATE TABLE resident_accounts (
+    pk             BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    resident_id    TEXT NOT NULL UNIQUE,
+    email          TEXT NOT NULL UNIQUE CHECK (email = lower(email) AND length(email) BETWEEN 3 AND 254),
+    display_name   TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 80),
+    password_hash  TEXT NOT NULL,
+    is_demo        INTEGER NOT NULL DEFAULT 0 CHECK (is_demo IN (0, 1)),
+    created_at     TEXT NOT NULL,
+    disabled_at    TEXT
+);
+CREATE TABLE resident_sessions (
+    pk           BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    token_hash   TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+    resident_pk  BIGINT NOT NULL REFERENCES resident_accounts(pk) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    revoked_at   TEXT
+);
+CREATE TABLE resident_preferences (
+    pk           BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    resident_pk  BIGINT NOT NULL UNIQUE REFERENCES resident_accounts(pk) ON DELETE CASCADE,
+    preferences  TEXT NOT NULL DEFAULT '{}',
+    updated_at   TEXT NOT NULL
+);
+ALTER TABLE complaints ADD COLUMN owner_resident_pk BIGINT REFERENCES resident_accounts(pk);
+ALTER TABLE complaints ADD COLUMN owned_via TEXT CHECK (owned_via IS NULL OR owned_via IN ('submitted', 'claimed'));
+ALTER TABLE complaints ADD COLUMN owned_at TEXT;
+CREATE INDEX complaints_by_owner ON complaints (owner_resident_pk, pk);
+"""
+
+FEATURES: tuple[Feature, ...] = (
+    Feature("resident_accounts", RESIDENT_ACCOUNTS_SQLITE, RESIDENT_ACCOUNTS_POSTGRES),
+)
+
+TABLES = ("staff_accounts", "departments", "staff_departments", "resident_accounts",
           "complaints", "complaint_timeline", "verification_log", "evidence", "idempotency_keys",
           "staff_sessions", "evidence_access_log",
           "notification_recipients", "notification_follows", "push_subscriptions", "notifications",
           "complaint_assignments", "staff_notes", "work_orders", "work_order_events", "work_order_evidence", "audit_log",
-          "ai_inferences", "repair_assessments", "repair_assessment_inferences")
+          "resident_sessions", "resident_preferences")
 
 CREATE_SCOPE = "create_complaint"
 DEFAULT_REPLAY_WINDOW = timedelta(hours=24)
@@ -907,6 +832,10 @@ class _IdempotencyExists(Exception):
 
 class StaffExists(Exception):
     """A staff account with that username already exists."""
+
+
+class ResidentExists(Exception):
+    """A resident account with that email address already exists."""
 
 
 STAFF_LIST_MAX = 100
@@ -976,9 +905,9 @@ class ComplaintStore:
         """Create the database (and schema) if missing and apply pending migrations. Safe to repeat."""
         try:
             if self.db.backend == "postgres":
-                self.db.apply_schema(POSTGRES_SCHEMA, POSTGRES_MIGRATIONS, POSTGRES_BASE_VERSION)
+                self.db.apply_schema(POSTGRES_SCHEMA, POSTGRES_MIGRATIONS, POSTGRES_BASE_VERSION, FEATURES)
             else:
-                self.db.apply_schema(SCHEMA, MIGRATIONS)
+                self.db.apply_schema(SCHEMA, MIGRATIONS, FEATURES)
         except (OSError, *DB_ERRORS) as exc:
             raise StoreError("Could not initialise the complaint database") from exc
 
@@ -989,7 +918,7 @@ class ComplaintStore:
     def _token_expiry(self) -> str:
         return iso(datetime.now(timezone.utc) + self.upload_token_ttl)
 
-    def create(self, data: dict, idempotency: dict | None = None) -> tuple[dict, str]:
+    def create(self, data: dict, idempotency: dict | None = None, owner_resident_pk: int | None = None) -> tuple[dict, str]:
         """Insert a complaint. Returns (stored record, plaintext claim code).
 
         `data` holds validated fields from ComplaintCreate. The claim code is
@@ -998,6 +927,8 @@ class ComplaintStore:
         it as `uploadToken` / `uploadTokenExpiresAt` (only the hash is stored).
         With `idempotency` ({"keyHash", "fingerprint"}) the key row is inserted in the
         same transaction, so a failed create leaves no key behind.
+        `owner_resident_pk` comes only from a validated resident session (never from the request
+        body); without it the complaint is anonymous and stays unowned until a claim.
         """
         claim = new_claim_code()
         claim_hash = hash_claim_code(claim)
@@ -1032,6 +963,8 @@ class ComplaintStore:
             "verification": INITIAL_VERIFICATION,
             "department": INITIAL_DEPARTMENT,
         }
+        if owner_resident_pk is not None:
+            row.update({"owner_resident_pk": owner_resident_pk, "owned_via": "submitted", "owned_at": now})
         columns = ", ".join(["public_id", *row])
         placeholders = ", ".join(["?"] * (len(row) + 1))
         insert_sql = f"INSERT INTO complaints ({columns}) VALUES ({placeholders})"
@@ -1082,7 +1015,7 @@ class ComplaintStore:
         ).fetchone()
 
     def create_idempotent(self, data: dict, key_hash: str, fingerprint: str,
-                          replay_window: timedelta = DEFAULT_REPLAY_WINDOW) -> tuple[str, dict, str]:
+                          replay_window: timedelta = DEFAULT_REPLAY_WINDOW, owner_resident_pk: int | None = None) -> tuple[str, dict, str]:
         """Create a complaint once per idempotency key. Returns ("created" | "replayed", record, claim).
 
         A replay (same key, same fingerprint) returns the same complaint with a NEWLY ISSUED claim code
@@ -1096,7 +1029,7 @@ class ComplaintStore:
                 existing = self._find_key(conn, key_hash)
             if existing is None:
                 try:
-                    record, claim = self.create(data, {"keyHash": key_hash, "fingerprint": fingerprint})
+                    record, claim = self.create(data, {"keyHash": key_hash, "fingerprint": fingerprint}, owner_resident_pk)
                     return "created", record, claim
                 except _IdempotencyExists:
                     pass
@@ -1295,12 +1228,177 @@ class ComplaintStore:
         self._write("UPDATE staff_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
                     (utc_now(), token_hash), "Staff session revocation")
 
+    # ---------- Resident accounts, sessions, ownership and preferences ----------
+    # Separate from staff accounts: a resident session is looked up only in resident_sessions and a
+    # staff session only in staff_sessions, so neither token can stand in for the other.
+
+    def create_resident(self, email: str, display_name: str, password_hash: str, is_demo: bool = False) -> dict:
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                conn.execute("INSERT INTO resident_accounts (resident_id, email, display_name, password_hash, is_demo, created_at) "
+                             "VALUES (?, ?, ?, ?, ?, ?)",
+                             ("res_" + secrets.token_urlsafe(12), email, display_name, password_hash, 1 if is_demo else 0, utc_now()))
+                return dict(conn.execute("SELECT * FROM resident_accounts WHERE email = ?", (email,)).fetchone())
+        except INTEGRITY_ERRORS as exc:
+            raise ResidentExists(email) from exc
+        except DB_ERRORS as exc:
+            raise StoreError("Resident account could not be created") from exc
+
+    def get_resident(self, email: str) -> dict | None:
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute("SELECT * FROM resident_accounts WHERE email = ?", (email,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Resident account could not be read") from exc
+        return dict(row) if row else None
+
+    def update_resident(self, email: str, *, display_name: str | None = None, password_hash: str | None = None,
+                        disabled: bool | None = None, is_demo: bool | None = None) -> bool:
+        """Changing the password or disabling the account revokes its open sessions."""
+        sets, params = [], []
+        for column, value in (("display_name", display_name), ("password_hash", password_hash),
+                              ("is_demo", None if is_demo is None else int(is_demo))):
+            if value is not None:
+                sets.append(f"{column} = ?")
+                params.append(value)
+        if disabled is not None:
+            sets.append("disabled_at = ?")
+            params.append(utc_now() if disabled else None)
+        if not sets:
+            return self.get_resident(email) is not None
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                cur = conn.execute(f"UPDATE resident_accounts SET {', '.join(sets)} WHERE email = ?", (*params, email))
+                if password_hash is not None or disabled:
+                    conn.execute("UPDATE resident_sessions SET revoked_at = ? WHERE revoked_at IS NULL AND resident_pk = "
+                                 "(SELECT pk FROM resident_accounts WHERE email = ?)", (utc_now(), email))
+                return cur.rowcount == 1
+        except DB_ERRORS as exc:
+            raise StoreError("Resident account could not be updated") from exc
+
+    def create_resident_session(self, resident_pk: int, token_hash: str, expires_at: str) -> None:
+        self._write("INSERT INTO resident_sessions (token_hash, resident_pk, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                    (token_hash, resident_pk, utc_now(), expires_at), "Resident session creation")
+
+    def get_resident_session(self, token_hash: str) -> dict | None:
+        """The session's resident account, or None if the token is unknown, expired, revoked or the account is disabled."""
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    "SELECT a.pk, a.resident_id, a.email, a.display_name, a.is_demo, a.created_at, s.expires_at FROM resident_sessions s "
+                    "JOIN resident_accounts a ON a.pk = s.resident_pk "
+                    "WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND a.disabled_at IS NULL",
+                    (token_hash, utc_now()),
+                ).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Resident session could not be read") from exc
+        return dict(row) if row else None
+
+    def revoke_resident_session(self, token_hash: str) -> None:
+        self._write("UPDATE resident_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
+                    (utc_now(), token_hash), "Resident session revocation")
+
+    def owner_of(self, public_id: str) -> int | None:
+        """The owning resident's pk, or None (unowned or no such complaint)."""
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute("SELECT owner_resident_pk FROM complaints WHERE public_id = ?", (public_id,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Complaint could not be read") from exc
+        return row[0] if row else None
+
+    def resident_complaints(self, resident_pk: int, limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
+        """The resident's own complaints, newest first, with ownership details. Returns (records, total)."""
+        limit = max(1, min(int(limit), STAFF_LIST_MAX))
+        try:
+            with closing(self._connect()) as conn:
+                total = conn.execute("SELECT COUNT(*) FROM complaints WHERE owner_resident_pk = ?", (resident_pk,)).fetchone()[0]
+                rows = conn.execute("SELECT public_id, owned_via, owned_at, pk FROM complaints WHERE owner_resident_pk = ? "
+                                    "ORDER BY pk DESC LIMIT ? OFFSET ?", (resident_pk, limit, max(0, int(offset)))).fetchall()
+                out = []
+                for r in rows:
+                    record = self._load(conn, r["public_id"])
+                    has_evidence = conn.execute("SELECT 1 FROM evidence WHERE complaint_pk = ? AND role = 'original'", (r["pk"],)).fetchone()
+                    out.append({**record, "ownedVia": r["owned_via"], "ownedAt": r["owned_at"], "hasEvidence": has_evidence is not None})
+                return out, int(total)
+        except DB_ERRORS as exc:
+            raise StoreError("Resident complaints could not be read") from exc
+
+    def resident_complaint(self, resident_pk: int, public_id: str) -> dict | None:
+        """One complaint, only if this resident owns it."""
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute("SELECT pk, owned_via, owned_at FROM complaints WHERE public_id = ? AND owner_resident_pk = ?",
+                                   (public_id, resident_pk)).fetchone()
+                if row is None:
+                    return None
+                has_evidence = conn.execute("SELECT 1 FROM evidence WHERE complaint_pk = ? AND role = 'original'", (row["pk"],)).fetchone()
+                return {**self._load(conn, public_id), "ownedVia": row["owned_via"], "ownedAt": row["owned_at"], "hasEvidence": has_evidence is not None}
+        except DB_ERRORS as exc:
+            raise StoreError("Complaint could not be read") from exc
+
+    def claim_complaint(self, public_id: str, resident: dict, client_ip: str | None = None) -> str:
+        """Attach an unowned complaint to `resident`. The caller has ALREADY verified the claim code.
+        Returns "claimed", or "already_yours". Raises RuleViolation 409 when another resident owns it.
+        Only the ownership columns change: the claim hash, timeline, evidence and dates stay as they were,
+        and the claim is recorded in the audit log (never in the public timeline)."""
+        now = utc_now()
+
+        def run(conn):
+            row = conn.execute("SELECT pk, owner_resident_pk FROM complaints WHERE public_id = ?" + self.db.for_update, (public_id,)).fetchone()
+            if row is None:
+                raise RuleViolation(404, "not_found", "No complaint was found with that ID.")
+            if row["owner_resident_pk"] == resident["pk"]:
+                return "already_yours"
+            if row["owner_resident_pk"] is not None:
+                raise RuleViolation(409, "already_claimed", "This complaint is already linked to another resident account.")
+            # Using the claim code counts as using the receipt's credentials (as an upload-token renewal does),
+            # so an idempotent replay can no longer re-issue a new claim code for this complaint.
+            conn.execute("UPDATE complaints SET owner_resident_pk = ?, owned_via = 'claimed', owned_at = ?, "
+                         "credentials_used_at = COALESCE(credentials_used_at, ?) WHERE pk = ? AND owner_resident_pk IS NULL",
+                         (resident["pk"], now, now, row["pk"]))
+            self._audit(conn, row["pk"], None, "resident_claim", {"residentId": resident["residentId"]}, client_ip, now, actor_type="citizen")
+            return "claimed"
+
+        return self._mutate("Complaint claim", run)
+
+    def log_owner_evidence_view(self, complaint_pk: int, evidence_id: str, via: str, resident_id: str | None,
+                                client_ip: str | None) -> None:
+        """Record that a complaint's owner viewed its original evidence (claim code or resident session).
+        Written to audit_log, which staff can read; evidence_access_log is for staff views only."""
+        details = {"evidenceId": evidence_id, "via": via, **({"residentId": resident_id} if resident_id else {})}
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                self._audit(conn, complaint_pk, None, "owner_evidence_view", details, client_ip, utc_now(), actor_type="citizen")
+        except DB_ERRORS as exc:
+            raise StoreError("Evidence view could not be logged") from exc
+
+    def get_resident_preferences(self, resident_pk: int) -> dict:
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute("SELECT preferences FROM resident_preferences WHERE resident_pk = ?", (resident_pk,)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Preferences could not be read") from exc
+        return json.loads(row[0]) if row else {}
+
+    def set_resident_preferences(self, resident_pk: int, preferences: dict) -> dict:
+        body = json.dumps(preferences, sort_keys=True, separators=(",", ":"))
+        try:
+            with closing(self._connect()) as conn, conn.transaction():
+                conn.execute("INSERT INTO resident_preferences (resident_pk, preferences, updated_at) VALUES (?, ?, ?) "
+                             "ON CONFLICT (resident_pk) DO UPDATE SET preferences = excluded.preferences, updated_at = excluded.updated_at",
+                             (resident_pk, body, utc_now()))
+        except DB_ERRORS as exc:
+            raise StoreError("Preferences could not be saved") from exc
+        return preferences
+
     # ---------- Staff views of complaints ----------
 
     def list_complaints(self, limit: int = 50, offset: int = 0, staff_pk: int | None = None) -> tuple[list[dict], int]:
-        """Newest first. Returns (records, total). Records come from _load plus an evidence summary.
-        With `staff_pk`, an official sees only their scope (lifecycle.in_scope): their departments, their
-        own assignments and the unassigned triage queue."""
+        """Newest first. Returns (summaries, total). With `staff_pk`, an official sees only their scope
+        (lifecycle.in_scope): their departments, their own assignments and the unassigned triage queue.
+        A fixed number of queries whatever the page size: the list must not cost a round trip per
+        complaint (the database can be far from the API)."""
         limit = max(1, min(int(limit), STAFF_LIST_MAX))
         try:
             with closing(self._connect()) as conn:
@@ -1309,16 +1407,25 @@ class ComplaintStore:
                     actor = self._actor(conn, staff_pk)
                     if not lc.has_role(actor, "supervisor"):
                         marks = ", ".join("?" * len(actor["departmentPks"])) or "NULL"
-                        where = f" WHERE department_pk IS NULL OR department_pk IN ({marks}) OR assigned_staff_pk = ?"
+                        where = f" WHERE c.department_pk IS NULL OR c.department_pk IN ({marks}) OR c.assigned_staff_pk = ?"
                         params = (*actor["departmentPks"], actor["pk"])
-                total = conn.execute("SELECT COUNT(*) FROM complaints" + where, params).fetchone()[0]
-                ids = [r[0] for r in conn.execute("SELECT public_id FROM complaints" + where + " ORDER BY pk DESC LIMIT ? OFFSET ?",
-                                                  (*params, limit, max(0, int(offset))))]
-                return [self._staff_record(conn, i) for i in ids], total
+                total = conn.execute("SELECT COUNT(*) FROM complaints c" + where, params).fetchone()[0]
+                rows = conn.execute(
+                    "SELECT c.public_id, c.title, c.category, c.area, c.status, c.verification, c.department, c.created_at, "
+                    "c.updated_at, c.media_type, c.gps_lat, c.gps_lng, c.gps_accuracy, c.gps_source_type, "
+                    "EXISTS (SELECT 1 FROM evidence e WHERE e.complaint_pk = c.pk AND e.role = 'original') AS has_evidence "
+                    "FROM complaints c" + where + " ORDER BY c.pk DESC LIMIT ? OFFSET ?",
+                    (*params, limit, max(0, int(offset)))).fetchall()
         except RuleViolation:
             raise
         except DB_ERRORS as exc:
             raise StoreError("Complaints could not be listed") from exc
+        return [{
+            "id": r["public_id"], "title": r["title"], "category": r["category"], "area": r["area"], "status": r["status"],
+            "verification": r["verification"], "department": r["department"], "created": r["created_at"],
+            "updated": r["updated_at"], "mediaType": r["media_type"], "hasEvidence": bool(r["has_evidence"]),
+            "gps": {"lat": r["gps_lat"], "lng": r["gps_lng"], "accuracy": r["gps_accuracy"], "sourceType": r["gps_source_type"]},
+        } for r in rows], total
 
     def require_case_scope(self, public_id: str, staff_pk: int) -> None:
         """Raises RuleViolation 403 when an official may not see this complaint (lifecycle.in_scope)."""

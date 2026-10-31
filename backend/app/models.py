@@ -200,16 +200,27 @@ class StaffGps(BaseModel):
     address: str | None
 
 
+class StaffListGps(BaseModel):
+    """Location for the staff map. Staff may see precise coordinates (as in StaffComplaint)."""
+    lat: float
+    lng: float
+    accuracy: float | None
+    sourceType: str
+
+
 class StaffComplaintSummary(BaseModel):
     id: str
+    title: str
     category: str
     area: str
     status: str
     verification: str
+    department: str
     created: str
     updated: str
     mediaType: str
     hasEvidence: bool
+    gps: StaffListGps
 
 
 class StaffComplaintList(BaseModel):
@@ -524,3 +535,90 @@ class RepairEvidenceReceipt(BaseModel):
     sha256: str
     capturedAt: str | None
     uploadedAt: str
+
+
+# ---------- Resident accounts (resident_auth.py, residents_api.py) ----------
+
+class ResidentRegister(_Strict):
+    email: Annotated[str, Field(min_length=3, max_length=254)]
+    password: Annotated[str, Field(min_length=1, max_length=256)]
+    displayName: Annotated[str, Field(min_length=1, max_length=80)]
+
+
+class ResidentSignIn(_Strict):
+    email: Annotated[str, Field(min_length=1, max_length=254)]
+    password: Annotated[str, Field(min_length=1, max_length=256)]
+
+
+class ResidentIdentity(BaseModel):
+    """The signed-in resident's own profile. Never returned to anyone else."""
+    residentId: str
+    email: str
+    displayName: str
+    demo: bool = False
+    createdAt: str | None = None
+
+
+class ResidentSessionOut(BaseModel):
+    token: str
+    expiresAt: str
+    resident: ResidentIdentity
+
+
+class ResidentProfileUpdate(_Strict):
+    displayName: Annotated[str, Field(min_length=1, max_length=80)]
+
+
+class OwnerGps(BaseModel):
+    lat: float
+    lng: float
+    accuracy: float | None = None
+    sourceType: str | None = None
+    address: str | None = None
+
+
+class ResidentComplaint(BaseModel):
+    """A complaint as its owning resident sees it: the public fields plus the resident's own description
+    and location. Never the claim code or hash, upload tokens, staff notes, assignees or storage keys."""
+    id: str
+    title: str
+    category: str
+    area: str
+    description: str
+    mediaType: str
+    shareEvidence: bool
+    hasEvidence: bool
+    gps: OwnerGps
+    created: str
+    updated: str
+    status: str
+    verification: str
+    department: str
+    ownedVia: Literal["submitted", "claimed"]
+    ownedAt: str | None
+    timeline: list[TimelineEntry]
+    verificationLog: list[VerificationEntry]
+
+
+class ResidentComplaintList(BaseModel):
+    items: list[ResidentComplaint]
+    total: int
+    limit: int
+    offset: int
+
+
+class ClaimRequest(_Strict):
+    id: Annotated[str, Field(min_length=1, max_length=40)]
+    claim: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class ClaimResult(BaseModel):
+    outcome: Literal["claimed", "already_yours"]
+    complaint: ResidentComplaint
+
+
+class ResidentPreferences(_Strict):
+    """Preferences the resident workspace already offers (Preferences screen). Stored per account."""
+    updates: bool = True
+    verification: bool = True
+    hotspots: bool = False

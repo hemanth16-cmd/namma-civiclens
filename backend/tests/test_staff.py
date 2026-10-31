@@ -241,6 +241,40 @@ def test_list_is_newest_first_paginated_and_free_of_secrets(api, token):
     assert api.get("/api/v1/staff/complaints?limit=1000", headers=bearer(token)).status_code == 422
 
 
+def test_list_carries_map_fields_and_costs_two_queries_whatever_its_length(api, token):
+    """The list feeds the admin dashboard and map, and must not cost a database round trip per complaint
+    (from Render to Supabase each query takes ~0.2 s, so per-complaint queries hit the 10 s browser timeout)."""
+    for _ in range(6):
+        new_complaint(api)
+    store = api.app.state.store
+    real_connect = store.db.connect
+    executed = []
+
+    class Counting:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=()):
+            executed.append(sql)
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    store.db.connect = lambda: Counting(real_connect())
+    try:
+        items, total = store.list_complaints(100, 0)
+    finally:
+        store.db.connect = real_connect
+    assert total == 6 and len(items) == 6 and len(executed) == 2, executed
+    body = api.get("/api/v1/staff/complaints?limit=3", headers=bearer(token)).json()
+    first = body["items"][0]
+    assert set(first) == {"id", "title", "category", "area", "status", "verification", "department", "created", "updated",
+                          "mediaType", "hasEvidence", "gps"}
+    assert set(first["gps"]) == {"lat", "lng", "accuracy", "sourceType"} and first["hasEvidence"] is True
+    assert first["gps"]["lat"] == payload()["gps"]["lat"] and first["gps"]["lng"] == payload()["gps"]["lng"]
+
+
 def test_detail_has_operational_fields_but_no_secrets(api, token, isolated_db_path):
     receipt = new_complaint(api)
     response = api.get(f"/api/v1/staff/complaints/{receipt['id']}", headers=bearer(token))

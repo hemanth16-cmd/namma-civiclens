@@ -2,7 +2,7 @@
 
 **Status: mostly proposed.** This document describes the HTTP API a FastAPI backend would expose so that the browser prototype's rules move to the server without changing the screens. In local mode (the default) the same operations run in `dist/services.js` against `localStorage` and IndexedDB, and the functions are named to match these endpoints.
 
-**Implemented in `backend/` so far** (see `backend/README.md` for exact request and response shapes): `GET /api/v1/health`, `POST /api/v1/complaints`, `GET /api/v1/complaints/{publicId}`, `POST /api/v1/complaints/{publicId}/upload-token` `POST /api/v1/complaints/{publicId}/evidence` (section 5) the staff console endpoints under `/api/v1/staff` (section 3.1), complaint management (section 3.2: lifecycle, assignment, work orders, notes, citizen verification, audit) and Web Push notifications under `/api/v1/notifications` (section 9.1), with per-IP/per-complaint rate limits (`429 rate_limited` + `Retry-After`), an evidence storage quota (`507 storage_quota_exceeded`) and `Idempotency-Key` support on complaint creation (section 2.1). Everything else below is still proposed. Evidence files can be stored on local disk (default) or in a private Supabase Storage bucket (`EVIDENCE_STORAGE_BACKEND=supabase`), and complaint data in SQLite (default) or PostgreSQL / Supabase Postgres (`DATABASE_BACKEND=postgres`); the API contract is identical in every combination. Resident accounts and shared (multi-process) rate limiting are not built.
+**Implemented in `backend/` so far** (see `backend/README.md` for exact request and response shapes): `GET /api/v1/health`, `POST /api/v1/complaints`, `GET /api/v1/complaints/{publicId}`, `POST /api/v1/complaints/{publicId}/upload-token` `POST /api/v1/complaints/{publicId}/evidence` (section 5) the staff console endpoints under `/api/v1/staff` (section 3.1), complaint management (section 3.2: lifecycle, assignment, work orders, notes, citizen verification, audit) and Web Push notifications under `/api/v1/notifications` (section 9.1), with per-IP/per-complaint rate limits (`429 rate_limited` + `Retry-After`), an evidence storage quota (`507 storage_quota_exceeded`) and `Idempotency-Key` support on complaint creation (section 2.1). Everything else below is still proposed. Evidence files can be stored on local disk (default) or in a private Supabase Storage bucket (`EVIDENCE_STORAGE_BACKEND=supabase`), and complaint data in SQLite (default) or PostgreSQL / Supabase Postgres (`DATABASE_BACKEND=postgres`); the API contract is identical in every combination. Resident accounts are implemented under `/api/v1/residents` (section 2.2). Shared (multi-process) rate limiting is not built.
 
 Conventions: JSON over HTTPS under `/api/v1`. Times are ISO 8601 in UTC; the UI displays Asia/Kolkata. Errors use `{ "error": { "code": "...", "message": "..." } }`. Every mutation is authorised on the server, never by the client's role guard.
 
@@ -26,11 +26,11 @@ Claim codes are hashed server-side and shown once, to the submitting client, at 
 | --- | --- | --- | --- |
 | `POST /api/v1/complaints` | Anonymous or signed-in | Create a case from capture or validated gallery upload. Returns public ID and a one-time claim code. Requires coordinates; gallery uploads are validated for JPEG EXIF GPS server-side. | `api.create()` |
 | `GET /api/v1/complaints/{publicId}` | Anonymous | Public tracking projection | `api.publicRecord()` |
-| `GET /api/v1/complaints?scope=mine` | Signed-in owner | Owner's cases with filters | `api.list(viewer)` |
+| `GET /api/v1/residents/me/complaints` | Signed-in resident | Owner's cases (implemented, section 2.2) | `api.list(viewer)` |
 | `GET /api/v1/complaints?scope=community` | Signed-in user | Community projection with filters | `api.list(viewer)` with community scope |
 | `GET /api/v1/complaints/{id}` | Role-dependent | Detail, projected by principal | `api.detail(id, viewer)` |
 | `GET /api/v1/complaints/{id}/receipt` | Submitter only | Receipt, including claim-code presence and evidence copy metadata | `api.receipt(id)` |
-| `POST /api/v1/complaints/claim` | Signed-in user | Claim by public ID and private code. Rate-limited; generic error on mismatch | `api.claim()` |
+| `POST /api/v1/residents/me/claims` | Signed-in resident | Claim by public ID and private code. Rate-limited; generic error on mismatch (implemented, section 2.2) | `api.claim()` |
 | `POST /api/v1/complaints/{id}/share` | Owner | Set `shareEvidence` for original evidence and location | `api.shareOriginal()` |
 | `PUT /api/v1/complaints/{id}/follow` | Signed-in user | Per-account follow state | `api.toggleFollow()` |
 
@@ -44,6 +44,20 @@ Claim codes are hashed server-side and shown once, to the submitting client, at 
 - Concurrent requests with one key create one complaint.
 
 Rate limits (per client IP unless stated; configurable, in-process, reset on restart): create 5 per 10 min; tracking 60 per min; upload-token 5 per 15 min per IP and 10 per hour per complaint; evidence 30 per hour per IP before authorisation and 10 authorised attempts per hour per complaint. Exceeded → `429 rate_limited` with `Retry-After`. Forwarded headers are honoured only from configured trusted proxies.
+
+### 2.2 Implemented: resident accounts and ownership
+
+Implemented in `backend/app/residents_api.py` (exact shapes: `backend/README.md`, "Resident accounts API").
+Passerby, resident and staff are separate principals:
+
+| Principal | How it is established | Complaint ownership |
+| --- | --- | --- |
+| Passerby | No credentials | None. The complaint stays unowned until claimed. |
+| Resident | `POST /residents/sessions` (or registration), then a resident bearer token | Taken from the session on `POST /complaints`, or set by `POST /residents/me/claims` with the private claim code |
+| Staff | `POST /staff/sessions`, then a staff bearer token; role and departments come from the server | Staff act on complaints but never own them |
+
+Tokens are not interchangeable: a resident token is `401` on `/staff/*`, a staff token is `401` on
+`/residents/*` and on `POST /complaints`. The server never reads `owner` or `role` from a request body.
 
 ## 3. Staff operations
 
@@ -66,7 +80,7 @@ Staff authenticate with server accounts created by an administrator (`python -m 
 | `POST /api/v1/staff/sessions` | Anyone with credentials | Sign in; returns a short-lived bearer token (8 h; only its hash is stored). Same `401` for wrong password and unknown user; rate-limited per IP and per username before the password check. | Implemented and tested |
 | `DELETE /api/v1/staff/sessions/current` | Official | Sign out (revokes the session server-side) | Implemented and tested |
 | `GET /api/v1/staff/me` | Official | Signed-in identity | Implemented and tested |
-| `GET /api/v1/staff/complaints` | Official | Newest-first list with paging (`limit` ≤ 100, `offset`) and an evidence flag | Implemented and tested |
+| `GET /api/v1/staff/complaints` | Official | Newest-first list with paging (`limit` ≤ 100, `offset`). Each item: `id`, `title`, `category`, `area`, `status`, `verification`, `department`, `created`, `updated`, `mediaType`, `hasEvidence`, and `gps` (`lat`, `lng`, `accuracy`, `sourceType`) for the admin map. Two database queries per page, however long. | Implemented and tested |
 | `GET /api/v1/staff/complaints/{id}` | Official | Operational projection: description, precise location, timeline, evidence metadata. Never claim code, hashes, upload tokens or storage keys. | Implemented and tested |
 | `GET /api/v1/staff/complaints/{id}/evidence` | Official | Streams the original file (`no-store`, `nosniff`). Each view is written to an append-only access log before any byte is sent; no log, no bytes. Errors: `404 evidence_not_found` (nothing uploaded), `404 evidence_unavailable` (the record exists but this server's storage confirms the file is absent, or it is in a storage backend this server is not configured for; nothing is logged), `503 storage_unavailable` (storage unreachable; retry). | Implemented and tested |
 | `GET /api/v1/staff/complaints/{id}/evidence/access` | Official | Who viewed the evidence and when | Implemented and tested |
@@ -161,58 +175,11 @@ Lifecycle and verification are independent fields with separate append-only logs
 | --- | --- | --- |
 | `GET /api/v1/priority/{complaintId}` | Normalised priority score with visible contributions (severity, exposure, unresolved time, recurrence) and separate evidence confidence | Implemented in the prototype; inputs illustrative |
 | `GET /api/v1/hotspots/outlook` | 30-day ward/category activity versus historical baseline | Proposed; not connected or trained |
-| `POST /api/v1/vision/road-damage` | Road-damage detection on images | Superseded by §8.1 (detection runs on stored evidence, not on an open endpoint) |
+| `POST /api/v1/vision/road-damage` | Road-damage detection on images (YOLO11n proposed) | Proposed; not connected or trained |
 | `POST /api/v1/incidents/link-suggestions` | Suggested duplicates for human review; never auto-merges | Proposed; not connected |
 | `POST /api/v1/scenarios/run` | Seeded Monte Carlo over labelled assumptions | Illustrative demo; exploratory |
 
 Techniques are not causal claims. Every response must carry its method, inputs, version and an uncertainty note, and no response may state a detection or confidence without a model behind it.
-
-### 8.1 Implemented (branch `feature/roboflow-ai-integration`): AI analysis and repair verification
-
-Staff routes need a staff bearer session; officials see only complaints in their scope (403 otherwise). Responses are `Cache-Control: no-store` and never contain storage keys, API keys, provider responses or the photos' EXIF data. Nothing here changes a complaint's status, verification or work orders. Errors use the usual envelope `{"error": {"code", "message"}}`.
-
-| Method and path | Who | Result |
-| --- | --- | --- |
-| `GET /api/v1/ai` | Public | `{enabled, disclosure}`: whether uploaded photos may be analysed by an external AI service, and the notice to show before upload |
-| `GET /api/v1/staff/complaints/{id}/ai` | Staff in scope | `{complaintId, category, ai, routing, inferences[]}` |
-| `POST /api/v1/staff/complaints/{id}/ai/retry` | Staff in scope | 202, same shape plus `reset` (failed jobs re-queued; missing ones created). 503 `ai_unavailable` when AI is off; 409 `no_evidence` |
-| `POST /api/v1/staff/complaints/{id}/verify-repair` | Staff in scope | Body `{}` or `{"repairEvidenceId": "ev_…"}` (default: latest repair photo). 202 `{complaintId, ai, assessments[]}`. The same pair is assessed once. 409 `no_original_evidence` / `no_repair_evidence`, 404 unknown repair photo, 422 `unsupported_media` (video original), 503 `ai_unavailable` |
-| `GET /api/v1/staff/complaints/{id}/repair-assessment` | Staff in scope | `{complaintId, ai, assessments[]}`, newest first |
-| `POST /api/v1/staff/complaints/{id}/repair-assessment/{assessmentId}/review` | Supervisor or admin, not the repair photo's uploader | Body `{"decision": "approved"|"rejected", "note"}` (note required to reject). Returns the assessment. 409 `assessment_not_ready` / `already_reviewed` |
-
-Repair photos are uploaded with the existing `POST /api/v1/staff/work-orders/{id}/evidence`; that upload now also schedules the analysis and an assessment automatically.
-
-Inference (`inferences[]`):
-
-```json
-{"id": "ai_…", "evidenceId": "ev_…", "evidenceRole": "original", "detector": "pavement", "provider": "roboflow",
- "mechanism": "model", "modelId": "pavement-gvib5/1", "modelVersion": "1", "classPrompt": null,
- "state": "completed", "originalClass": "pothole", "detectedCategory": "Potholes", "topConfidence": 0.91,
- "detectionCount": 1, "imageWidth": 1000, "imageHeight": 750, "errorCode": null, "attempts": 1,
- "detections": [{"className": "pothole", "category": "Potholes", "confidence": 0.91,
-                 "bbox": {"x": 425.0, "y": 367.5, "width": 150.0, "height": 90.0}, "polygon": [[x, y], …]}],
- "confidence": {"max": 0.91, "mean": 0.91, "returned": 1, "mapped": 1, "present": 1, "presentThreshold": 0.5, "lowThreshold": 0.25},
- "createdAt": "…", "startedAt": "…", "completedAt": "…"}
-```
-
-`state`: `pending`, `running`, `completed`, `failed` (with `errorCode`), `skipped` (e.g. `unsupported_media` for videos). `bbox` is the top-left corner and size in pixels of the upright original photo; `polygon` appears for segmentation results. For workflows, `modelId` is `<workspace>/<workflow_id>` and `modelVersion` is null.
-
-Assessment (`assessments[]`):
-
-```json
-{"id": "ra_…", "workOrderId": "wo_…", "originalEvidenceId": "ev_…", "repairEvidenceId": "ev_…",
- "state": "completed", "suggestedOutcome": "likely_repaired", "verificationConfidence": 0.74,
- "locationCheck": "match", "gpsDistanceM": 4.1, "errorCode": null, "attempts": 1, "requestedBy": null,
- "details": {"reasons": ["…"], "gps": {"status": "match", "distanceM": 4.1, "reference": "complaint", "repairHasGps": true},
-             "visualMatch": "strong", "alignment": {"inliers": 952, "inlierRatio": 0.945, …},
-             "quality": {"original": {…}, "repair": {"brightness": 140.2, "sharpness": 210.0, "problems": [], "acceptable": true}},
-             "comparison": [{"detector": "pavement", "originalPresent": 1, "repairPresent": 0, …}],
-             "overlapsOriginalDamage": null, "thresholds": {…}},
- "review": {"status": "pending_review", "reviewer": null, "reviewerName": null, "note": "", "reviewedAt": null},
- "verifiedResolution": "unverified", "createdAt": "…", "completedAt": "…", "updatedAt": "…"}
-```
-
-`suggestedOutcome`: `likely_repaired`, `damage_visible`, `inconclusive` (null until completed). `state` `failed` with `errorCode` `inference_failed` means an analysis it needed failed; `POST …/ai/retry` re-runs both. `requestedBy` is null when the assessment was created automatically by a repair upload. `verificationConfidence` is about the comparison, not the model, and is null for `inconclusive`. `verifiedResolution` is `verified_repaired` only after a supervisor approves a `likely_repaired` suggestion; it never changes `status`.
 
 ## 9. Notifications
 
