@@ -687,8 +687,16 @@ class ReasonIn(_Strict):
 
 # ---------- Public community list ----------
 
+class PublicMapPoint(BaseModel):
+    """Approximate public position (geo.public_map_point): rounded to about 110 m, never the exact GPS fix."""
+    lat: float
+    lng: float
+    precision: Literal["approx-110m"]
+
+
 class PublicComplaintSummary(BaseModel):
-    """One row of the community list: the public-tracking allowlist without the timeline."""
+    """One row of the community list: the public-tracking allowlist without the timeline, plus an
+    approximate map point for the community and neighbourhood maps."""
     id: str
     title: str
     category: str
@@ -698,6 +706,7 @@ class PublicComplaintSummary(BaseModel):
     department: str
     created: str
     updated: str
+    mapPoint: PublicMapPoint | None = None
 
 
 class Facet(BaseModel):

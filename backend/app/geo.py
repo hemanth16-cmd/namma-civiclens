@@ -16,6 +16,18 @@ EARTH_RADIUS_M = 6_371_008.8      # IUGG mean Earth radius
 # Bengaluru service area: the same box as dist/exif.js SERVICE_AREA (south, north, west, east).
 SERVICE_AREA = {"south": 12.75, "north": 13.3, "west": 77.35, "east": 77.9}
 METRES_PER_DEGREE_LAT = math.pi * EARTH_RADIUS_M / 180
+# Public map points are rounded to this many decimal places: 3 ≈ 110 m north-south (about a city block),
+# so the public map shows where an issue is without publishing the exact spot a report was made from.
+PUBLIC_POINT_DECIMALS = 3
+PUBLIC_POINT_PRECISION = "approx-110m"
+
+
+def public_map_point(lat, lng) -> dict | None:
+    """An approximate, public map position for a complaint, or None when the stored coordinates are not
+    usable (missing, non-finite or out of range). Precise coordinates are never returned."""
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (lat, lng)) or abs(lat) > 90 or abs(lng) > 180:
+        return None
+    return {"lat": round(lat, PUBLIC_POINT_DECIMALS), "lng": round(lng, PUBLIC_POINT_DECIMALS), "precision": PUBLIC_POINT_PRECISION}
 
 
 def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:

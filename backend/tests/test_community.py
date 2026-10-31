@@ -38,7 +38,9 @@ def test_lists_every_bengaluru_complaint_newest_first_with_public_fields_only(cl
     file(client, lat=12.2958, lng=76.6394, neighbourhood="Mysuru")   # outside the Bengaluru service area
     data = listing(client)
     assert [i["id"] for i in data["items"]] == [b["id"], a["id"]] and data["total"] == 2
-    assert set(data["items"][0]) == {"id", "title", "category", "area", "status", "verification", "department", "created", "updated"}
+    assert set(data["items"][0]) == {"id", "title", "category", "area", "status", "verification", "department", "created", "updated",
+                                     "mapPoint"}
+    assert data["items"][1]["mapPoint"] == {"lat": 12.972, "lng": 77.595, "precision": "approx-110m"}, "rounded, not the exact fix"
     raw = json.dumps(data)
     for private in ("SECRET description", a["claim"], "12.9716", "77.5946", "gps", "evidence", "uploadToken"):
         assert private not in raw, private

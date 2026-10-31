@@ -62,17 +62,55 @@ export function toResidentRow(c) {
   return row;
 }
 
-/** The signed-in resident's complaints from GET /residents/me/complaints. Throws ApiError (401 when the session ended). */
-export async function residentRecords(http, token) {
+/** My Complaints: only the signed-in resident's complaints, from GET /residents/me/complaints (ownership is
+ * decided by the server from the session). Throws ApiError (401 when the session ended). */
+export async function loadMyComplaints(http, token) {
   const {items} = await http.listResidentComplaints(token, {limit: 100});
   return items.map(toResidentRow);
+}
+export const residentRecords = loadMyComplaints;  // earlier name, kept for existing callers
+
+/** One public community-list item as a workspace/map row. `gps` is the approximate public point (about
+ * 110 m), flagged `approximate`; precise coordinates are never in the public API. */
+export function toPublicRow(item) {
+  const row = {
+    id: item.id, title: item.title || `${item.category} reported by a citizen`, category: item.category, area: item.area,
+    status: item.status, verification: item.verification, department: item.department || '', team: null,
+    created: item.created, updated: item.updated,
+    gps: item.mapPoint ? {lat: item.mapPoint.lat, lng: item.mapPoint.lng, accuracy: null, sourceType: null, approximate: true} : null,
+    sample: false, server: true, public: true, recurrence: 0, reviewCount: 0, shareEvidence: false, mine: false, following: false
+  };
+  row.priority = assessPriority(row);
+  return row;
+}
+
+/**
+ * Community page and neighbourhood map: every public complaint across Bengaluru from GET /complaints,
+ * whoever reported it (residents A and B, anonymous passers-by). Independent of the viewer's own
+ * complaints. Throws ApiError on failure: no local fallback.
+ */
+export async function loadPublicCommunityComplaints(http, filters = {}) {
+  const rows = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const {items, total} = await http.listPublicComplaints({...filters, limit: PAGE, offset: page * PAGE});
+    rows.push(...items.map(toPublicRow));
+    if (!items.length || rows.length >= total) break;
+  }
+  return rows;
+}
+
+/** Records for a map: the public Bengaluru-wide dataset for a signed-in resident in server mode, else the
+ * same records as the workspace (staff list for staff, the local store in local mode). */
+export async function mapRecords(viewer) {
+  if (await isServerResident(viewer)) return loadPublicCommunityComplaints(await serverClient());
+  return workspaceRecords(viewer);
 }
 
 /** Records for the workspace screens: server complaints for signed-in staff, the resident's own complaints
  * for a signed-in resident in server mode, else the local demonstration store. */
 export async function workspaceRecords(viewer) {
   if (viewer?.role === 'official' && await usesServerRecords()) return loadServerRecords(await serverClient(), staffSession.get().token);
-  if (await isServerResident(viewer)) return residentRecords(await serverClient(), residentSession.get().token);
+  if (await isServerResident(viewer)) return loadMyComplaints(await serverClient(), residentSession.get().token);
   return api.list(viewer);
 }
 

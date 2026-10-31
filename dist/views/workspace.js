@@ -5,7 +5,7 @@ import {state, viewer, setSession, readPrefs, writePrefs, readLastRead, writeLas
 import {navigate} from '../router.js';
 import {filterRecords, sortRecords, readFilters} from '../filters.js';
 import {mountCityMap} from './map.js';
-import {workspaceRecords, usesServerRecords, dailyActivity, serverClient, isServerResident} from '../server-records.js';
+import {workspaceRecords, usesServerRecords, dailyActivity, serverClient, isServerResident, loadPublicCommunityComplaints} from '../server-records.js';
 import {staffSession} from '../staff-session.js';
 import {residentSession} from '../resident-session.js';
 import {endStaffSession} from './staff.js';
@@ -143,7 +143,18 @@ export async function renderOverview(root) {
   }
   const container = root.querySelector('#overview-map');
   if (container) {
-    const map = await mountCityMap(container, {records, compact: true});
+    // A signed-in resident's neighbourhood map shows every public report, not only their own.
+    let mapData = records;
+    if (!admin && await isServerResident(v)) {
+      try {
+        mapData = await loadPublicCommunityComplaints(await serverClient());
+      } catch {
+        container.innerHTML = '<p class="micro">The neighbourhood map could not load public reports right now.</p>';
+        return;
+      }
+    }
+    if (!container.isConnected) return;
+    const map = await mountCityMap(container, {records: mapData, compact: true});
     addCleanup(() => map.destroy());
   }
 }

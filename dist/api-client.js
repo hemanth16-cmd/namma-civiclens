@@ -342,7 +342,8 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
         total: Number(d.total) || 0,
         items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
           id: i.id, title: String(i.title ?? ''), category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
-          verification: String(i.verification ?? ''), department: String(i.department ?? ''), created: i.created ?? null, updated: i.updated ?? null})),
+          verification: String(i.verification ?? ''), department: String(i.department ?? ''), created: i.created ?? null, updated: i.updated ?? null,
+          mapPoint: toMapPoint(i.mapPoint)})),
         facets: {categories: facet(d.facets?.categories), areas: facet(d.facets?.areas)}
       };
     },
@@ -432,6 +433,13 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
 }
 
 const bearer = token => ({Authorization: 'Bearer ' + token});
+
+/** The public list's approximate position (about 110 m), or null when missing or not a valid coordinate. */
+export function toMapPoint(p) {
+  const ok = v => typeof v === 'number' && Number.isFinite(v);
+  if (!p || !ok(p.lat) || !ok(p.lng) || Math.abs(p.lat) > 90 || Math.abs(p.lng) > 180) return null;
+  return {lat: p.lat, lng: p.lng, precision: String(p.precision ?? 'approximate')};
+}
 
 function toResident(r) {
   if (!r || typeof r.email !== 'string') throw new ApiError('The CivicLens server sent an account this app could not read.', {code: 'malformed_response'});

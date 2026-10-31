@@ -1524,7 +1524,8 @@ class ComplaintStore:
             with closing(self._connect()) as conn:
                 total = conn.execute(f"SELECT COUNT(*) {where}", params).fetchone()[0]
                 rows = conn.execute(
-                    f"SELECT c.public_id, c.title, c.category, c.area, c.status, c.verification, c.department, c.created_at, c.updated_at "
+                    f"SELECT c.public_id, c.title, c.category, c.area, c.status, c.verification, c.department, c.created_at, c.updated_at, "
+                    f"c.gps_lat, c.gps_lng "
                     f"{where} ORDER BY c.pk DESC LIMIT ? OFFSET ?", (*params, limit, max(0, int(offset)))).fetchall()
                 categories = conn.execute(f"SELECT c.category, COUNT(*) {base} GROUP BY c.category ORDER BY COUNT(*) DESC, c.category",
                                           base_params).fetchall()
@@ -1534,7 +1535,7 @@ class ComplaintStore:
         return {
             "items": [{"id": r["public_id"], "title": r["title"], "category": r["category"], "area": r["area"], "status": r["status"],
                        "verification": r["verification"], "department": r["department"], "created": r["created_at"],
-                       "updated": r["updated_at"]} for r in rows],
+                       "updated": r["updated_at"], "mapPoint": geo.public_map_point(r["gps_lat"], r["gps_lng"])} for r in rows],
             "total": total, "limit": limit, "offset": max(0, int(offset)),
             "facets": {"categories": [{"name": r[0], "count": r[1]} for r in categories],
                        "areas": [{"name": r[0], "count": r[1]} for r in areas]},
