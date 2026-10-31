@@ -861,3 +861,20 @@ dialog.dialog::backdrop { background: #0F2236B3; }
 .notification-text p { margin: 0 0 4px; overflow-wrap: anywhere; }
 .notification-title { display: flex; align-items: center; gap: 8px; }
 .unread-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--coral); flex: none; }
+
+/* My Complaints (resident account, server mode): complaint cards with the resident's own evidence. */
+.mc-grid { list-style: none; margin: 16px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.mc-card { background: var(--white); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+.mc-thumb { aspect-ratio: 4 / 3; background: var(--surface-quiet); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--slate); border-bottom: 1px solid var(--line); text-align: center; padding: 8px; }
+.mc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mc-thumb:has(img) { padding: 0; }
+.mc-thumb svg { width: 28px; height: 28px; color: var(--navy); }
+.mc-thumb-video { background: #0F2236; color: var(--white); }
+.mc-thumb-video svg { color: var(--white); }
+.mc-thumb-failed { background: var(--amber-tint); color: var(--amber-ink); }
+.mc-thumb-msg { font-size: 13px; }
+.mc-body { padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.mc-meta { margin: 0; font-size: 13px; color: var(--slate); }
+.mc-title { margin: 0; font-size: 17px; }
+.mc-desc { margin: 0; overflow-wrap: anywhere; }
+.mc-evidence-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; margin-top: 14px; }

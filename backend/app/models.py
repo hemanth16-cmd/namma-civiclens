@@ -596,9 +596,21 @@ class OwnerGps(BaseModel):
     address: str | None = None
 
 
+class OwnerEvidence(BaseModel):
+    """Evidence metadata for the complaint's owner. The file itself is fetched with the resident session from
+    GET /residents/me/complaints/{id}/evidence/{evidenceId}; never a storage key, path or public URL."""
+    evidenceId: str
+    role: Literal["original", "repair"]
+    mediaType: str
+    contentType: str
+    byteSize: int
+    capturedAt: str | None
+    uploadedAt: str
+
+
 class ResidentComplaint(BaseModel):
-    """A complaint as its owning resident sees it: the public fields plus the resident's own description
-    and location. Never the claim code or hash, upload tokens, staff notes, assignees or storage keys."""
+    """A complaint as its owning resident sees it: the public fields plus the resident's own description,
+    location and evidence list. Never the claim code or hash, upload tokens, staff notes, assignees or storage keys."""
     id: str
     title: str
     category: str
@@ -617,6 +629,7 @@ class ResidentComplaint(BaseModel):
     ownedAt: str | None
     timeline: list[TimelineEntry]
     verificationLog: list[VerificationEntry]
+    evidence: list[OwnerEvidence] = []
 
 
 class ResidentComplaintList(BaseModel):

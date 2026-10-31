@@ -106,9 +106,10 @@ def view_evidence(public_id: str, request: Request, background: BackgroundTasks,
     return streamed
 
 
-def stream_evidence(request: Request, evidence: dict, staff: dict, basename: str, background: BackgroundTasks | None = None) -> StreamingResponse:
-    """Stream one evidence file to signed-in staff. The view is logged before any byte is sent; if
-    logging fails, nothing is sent. `evidence` needs pk, storageBackend, storageKey, contentType, byteSize."""
+def stream_evidence(request: Request, evidence: dict, staff: dict | None, basename: str, background: BackgroundTasks | None = None) -> StreamingResponse:
+    """Stream one evidence file. For staff the view is logged before any byte is sent; if logging fails,
+    nothing is sent. `staff` is None when a resident opens their own complaint's evidence (the access log
+    records staff views of citizens' evidence). `evidence` needs pk, storageBackend, storageKey, contentType, byteSize."""
     store = request.app.state.store
     # Read from the backend that stored this file (local evidence stays readable after switching to Supabase Storage).
     storage = request.app.state.evidence_storages.get(evidence["storageBackend"])
@@ -124,7 +125,8 @@ def stream_evidence(request: Request, evidence: dict, staff: dict, basename: str
             raise ApiProblem(404, "evidence_unavailable", MISSING_FILE)
         raise  # → 503 storage_unavailable (e.g. Supabase unreachable)
     try:
-        store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
+        if staff is not None:
+            store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
     except BaseException:
         handle.close()
         raise

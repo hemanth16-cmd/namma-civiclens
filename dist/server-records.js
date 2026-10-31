@@ -55,7 +55,7 @@ export function toResidentRow(c) {
     id: c.id, title: c.title, category: c.category, area: c.area, status: c.status, verification: c.verification,
     department: c.department, team: null, created: c.created, updated: c.updated, mediaType: c.mediaType, hasEvidence: c.hasEvidence,
     gps: c.gps ? {lat: c.gps.lat, lng: c.gps.lng, accuracy: c.gps.accuracy, sourceType: c.gps.sourceType} : null,
-    description: c.description, ownedVia: c.ownedVia, ownedAt: c.ownedAt, timeline: c.timeline,
+    description: c.description, ownedVia: c.ownedVia, ownedAt: c.ownedAt, timeline: c.timeline, evidence: c.evidence || [],
     sample: false, server: true, recurrence: 0, reviewCount: 0, shareEvidence: c.shareEvidence, mine: true, following: false
   };
   row.priority = assessPriority(row);

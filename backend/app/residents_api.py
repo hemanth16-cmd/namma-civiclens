@@ -18,6 +18,8 @@ from .models import (ClaimRequest, ClaimResult, ResidentComplaint, ResidentCompl
 from .ratelimit import client_ip, enforce
 from .resident_auth import (current_resident, email_problem, hash_password, new_session, normalise_email, password_problem,
                             resident_identity, sign_in)
+from .cases_api import EVIDENCE_ID
+from .staff_api import stream_evidence
 from .store import ResidentExists
 
 router = APIRouter(prefix="/residents", tags=["residents"])
@@ -94,6 +96,19 @@ def my_complaint(public_id: str, request: Request, response: Response, resident:
         raise ApiProblem(404, "not_found", "None of your complaints has that ID.")
     _no_store(response)
     return record
+
+
+@router.get("/me/complaints/{public_id}/evidence/{evidence_id}")
+def my_evidence(public_id: str, evidence_id: str, request: Request, resident: dict = Depends(current_resident)):
+    """Stream a photo or video of a complaint this resident owns (the original report or an after-repair
+    photo), through the API with the resident session: the bucket stays private and no URL is issued.
+    Any other complaint or file is 404, whether or not it exists."""
+    evidence = None
+    if PUBLIC_ID_PATTERN.fullmatch(public_id) and EVIDENCE_ID.fullmatch(evidence_id):
+        evidence = request.app.state.store.resident_evidence(resident["pk"], public_id, evidence_id)
+    if evidence is None:
+        raise ApiProblem(404, "evidence_not_found", "None of your complaints has that evidence file.")
+    return stream_evidence(request, evidence, None, f"{public_id}-{evidence['role']}")
 
 
 @router.post("/me/claims", response_model=ClaimResult)
