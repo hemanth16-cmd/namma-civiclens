@@ -140,3 +140,68 @@ def score_incident(
         computed_at=now.isoformat(),
     )
 
+
+def score_complaints(store: Any, limit: int = 100) -> dict[str, Any]:
+    """Score all live complaints from the store and return a prioritized queue."""
+    try:
+        raw_items, _total = store.list_complaints(limit=limit, offset=0)
+    except Exception:
+        raw_items = []
+
+    scored_items = []
+    now = datetime.now(timezone.utc)
+
+    for c in raw_items:
+        created_dt = None
+        created_raw = c.get("created")
+        if created_raw:
+            try:
+                created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            except Exception:
+                pass
+
+        recurrence = c.get("recurrence", 0)
+        corroboration = c.get("corroboration", 1)
+
+        result = score_incident(
+            category=c.get("category", ""),
+            description=c.get("description", "") or c.get("title", ""),
+            status=c.get("status", ""),
+            created_at=created_dt,
+            recurrence_count=recurrence,
+            corroboration_count=corroboration,
+            now=now,
+        )
+
+        scored_items.append({
+            "id": c.get("id"),
+            "title": c.get("title") or f"{c.get('category')} reported by citizen",
+            "category": c.get("category"),
+            "area": c.get("area") or c.get("ward"),
+            "status": c.get("status"),
+            "created": c.get("created"),
+            "priority": {
+                "score": result.score,
+                "level": result.level,
+                "factors": result.factors,
+                "overrides": result.overrides,
+                "explanation": result.explanation,
+                "computed_at": result.computed_at,
+            },
+        })
+
+    # Sort descending by priority score
+    scored_items.sort(key=lambda x: x["priority"]["score"], reverse=True)
+
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for item in scored_items:
+        lvl = item["priority"]["level"]
+        if lvl in counts:
+            counts[lvl] += 1
+
+    return {
+        "items": scored_items,
+        "total": len(scored_items),
+        "summary": counts,
+        "policy": "configurable_weights_v1",
+    }

@@ -598,6 +598,57 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
     async sendTestNotification(token) {
       const d = await request('POST', '/notifications/test', {}, {headers: bearer(token)});
       return {pushEnabled: d.pushEnabled === true};
+    },
+
+    // ---------- Civic Intelligence Engine ----------
+
+    async getIntelligenceSummary(token) {
+      return await request('GET', '/intelligence/summary', undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligencePredictions(token) {
+      return await request('GET', '/intelligence/predictions', undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligenceHotspots(token, options) {
+      const radius = (options && options.radius) || 150;
+      const topWards = (options && options.topWards) || 15;
+      const q = '?radius=' + encodeURIComponent(radius) + '&top_wards=' + encodeURIComponent(topWards);
+      return await request('GET', '/intelligence/hotspots' + q, undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligenceGraph(token, options) {
+      const limit = (options && options.limit) || 50;
+      let q = '?limit=' + encodeURIComponent(limit);
+      if (options && options.complaintId) q += '&complaint_id=' + encodeURIComponent(options.complaintId);
+      if (options && options.ward) q += '&ward=' + encodeURIComponent(options.ward);
+      return await request('GET', '/intelligence/graph' + q, undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligenceFcm(token) {
+      return await request('GET', '/intelligence/fcm/live', undefined, {headers: bearer(token)});
+    },
+
+    async runFcmScenario(token, body) {
+      return await request('POST', '/intelligence/fcm/scenario', {base: (body && body.base) || {}, deltas: (body && body.deltas) || {}}, {headers: bearer(token)});
+    },
+
+    async getSimulationDefaults(token) {
+      return await request('GET', '/intelligence/simulations/defaults', undefined, {headers: bearer(token)});
+    },
+
+    async runSimulation(token, body) {
+      return await request('POST', '/intelligence/simulations/run', {base_rate: (body && body.baseRate) || 100, capacity: (body && body.capacity) || null, n_runs: (body && body.nRuns) || 2000, seed: (body && body.seed) || 42}, {headers: bearer(token)});
+    },
+
+    async getPriorityScore(token, body) {
+      const q = '?category=' + encodeURIComponent((body && body.category) || '') + '&description=' + encodeURIComponent((body && body.description) || '') + '&recurrence_count=' + encodeURIComponent((body && body.recurrenceCount) || 0) + '&corroboration_count=' + encodeURIComponent((body && body.corroborationCount) || 1);
+      return await request('GET', '/intelligence/priority/score' + q, undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligencePriorityQueue(token, options) {
+      const limit = (options && options.limit) || 100;
+      return await request('GET', '/intelligence/priority/queue?limit=' + encodeURIComponent(limit), undefined, {headers: bearer(token)});
     }
   };
 }

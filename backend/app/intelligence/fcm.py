@@ -110,3 +110,42 @@ def scenario(base: dict[str, float], deltas: dict[str, float]) -> dict[str, Any]
         "assumptions": r0.assumptions,
     }
 
+
+def derive_live_activations(store: Any) -> dict[str, float]:
+    """Derive initial concept activations from actual complaint database metrics."""
+    defaults = {
+        "complaint_frequency": 0.45,
+        "recent_growth": 0.35,
+        "issue_severity": 0.50,
+        "public_safety_impact": 0.40,
+        "historical_recurrence": 0.30,
+        "service_backlog": 0.40,
+        "resolution_delay_risk": 0.35,
+        "geographic_concentration": 0.45,
+        "infrastructure_vulnerability": 0.50,
+        "operational_capacity": 0.65,
+    }
+
+    try:
+        items, _total = store.list_complaints(limit=200, offset=0)
+        if not items:
+            return defaults
+
+        total = len(items)
+        active = sum(1 for c in items if c.get("status") not in ("Marked Resolved", "Work Completed"))
+        severe = sum(1 for c in items if any(k in (c.get("category") or "").lower() for k in ("pothole", "drain", "electrical")))
+        recurrent = sum(1 for c in items if c.get("recurrence", 0) > 0)
+
+        # Scale into [0.1, 0.9] range
+        freq = min(max(active / 50.0, 0.1), 0.95)
+        sev = min(max(severe / max(total, 1), 0.1), 0.95)
+        rec = min(max(recurrent / max(total, 1), 0.1), 0.95)
+
+        derived = dict(defaults)
+        derived["complaint_frequency"] = round(freq, 2)
+        derived["issue_severity"] = round(sev, 2)
+        derived["historical_recurrence"] = round(rec, 2)
+        derived["service_backlog"] = round(min(max(active / max(total, 1), 0.1), 0.9), 2)
+        return derived
+    except Exception:
+        return defaults
