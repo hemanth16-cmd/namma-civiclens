@@ -1,5 +1,4 @@
 import re
-import sqlite3
 import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -8,11 +7,13 @@ from itertools import chain, repeat
 import pytest
 from fastapi.testclient import TestClient
 
+from tests import dbutil
+
 from app.claims import ID_ALPHABET, verify_claim_code
 from app.main import create_app
 from app.store import ComplaintStore, IdAllocationError, resolve_db_path
 
-PUBLIC_KEYS = {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog"}
+PUBLIC_KEYS = {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog", "publicEvidence"}
 GENERATED_ID = re.compile(rf"^NCL-\d{{4}}-[{ID_ALPHABET}]{{6}}$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
@@ -63,7 +64,7 @@ def api(db_path):
 
 
 def rows(db_path, sql, params=()):
-    with closing(sqlite3.connect(db_path)) as conn:
+    with closing(dbutil.connect(db_path)) as conn:
         return conn.execute(sql, params).fetchall()
 
 
@@ -282,8 +283,9 @@ def test_exhausted_id_retries_fail_generically_and_store_nothing_new(db_path):
         store.create(payload(capturedAt=None))
 
 
+@pytest.mark.sqlite_only
 def test_failed_transaction_leaves_no_partial_complaint(api, db_path):
-    with closing(sqlite3.connect(db_path)) as conn:
+    with closing(dbutil.connect(db_path)) as conn:
         conn.execute("CREATE TRIGGER fail_timeline BEFORE INSERT ON complaint_timeline "
                      "BEGIN SELECT RAISE(ABORT, 'simulated timeline failure'); END")
         conn.commit()
@@ -295,6 +297,7 @@ def test_failed_transaction_leaves_no_partial_complaint(api, db_path):
     assert count(db_path, "complaint_timeline") == 0
 
 
+@pytest.mark.sqlite_only
 def test_unreadable_database_returns_storage_error_without_details(tmp_path):
     not_a_db = tmp_path / "broken.sqlite3"
     not_a_db.write_bytes(b"this is not a sqlite database" * 100)
@@ -314,6 +317,7 @@ def test_tests_use_a_temporary_database(isolated_db_path):
     assert "pytest" in str(isolated_db_path).lower() or "tmp" in str(isolated_db_path).lower()
 
 
+@pytest.mark.sqlite_only
 def test_separate_database_files_do_not_share_complaints(tmp_path):
     with TestClient(create_app(tmp_path / "a.sqlite3")) as a, TestClient(create_app(tmp_path / "b.sqlite3")) as b:
         public_id = a.post("/api/v1/complaints", json=payload()).json()["id"]

@@ -1,11 +1,12 @@
 import secrets
-import sqlite3
 import threading
 from contextlib import closing
 from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests import dbutil
 
 from app.claims import verify_claim_code
 from app.complaints import request_fingerprint
@@ -30,12 +31,12 @@ def post(api, body, key):
 
 
 def count(db_path, table="complaints"):
-    with closing(sqlite3.connect(db_path)) as conn:
+    with closing(dbutil.connect(db_path)) as conn:
         return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
 
 def claim_hash(db_path, public_id):
-    with closing(sqlite3.connect(db_path)) as conn:
+    with closing(dbutil.connect(db_path)) as conn:
         return conn.execute("SELECT claim_hash FROM complaints WHERE public_id = ?", (public_id,)).fetchone()[0]
 
 
@@ -125,14 +126,15 @@ def test_different_keys_create_different_complaints(api, isolated_db_path):
     assert count(isolated_db_path) == 2
 
 
+@pytest.mark.sqlite_only
 def test_failed_creation_leaves_no_idempotency_record(api, isolated_db_path):
-    with closing(sqlite3.connect(isolated_db_path)) as conn:
+    with closing(dbutil.connect(isolated_db_path)) as conn:
         conn.execute("CREATE TRIGGER fail BEFORE INSERT ON complaint_timeline BEGIN SELECT RAISE(ABORT, 'boom'); END")
         conn.commit()
     key, body = new_key(), payload()
     assert post(api, body, key).status_code == 503
     assert count(isolated_db_path) == 0 and count(isolated_db_path, "idempotency_keys") == 0
-    with closing(sqlite3.connect(isolated_db_path)) as conn:
+    with closing(dbutil.connect(isolated_db_path)) as conn:
         conn.execute("DROP TRIGGER fail")
         conn.commit()
     retry = post(api, body, key)

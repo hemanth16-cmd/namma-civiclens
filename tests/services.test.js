@@ -201,3 +201,13 @@ test('public tracking of the sample record never exposes restricted fields', asy
   assert.equal(pub.verification, 'Disputed');
   for (const key of ['claim', 'owner', 'gps', 'internal', 'description', 'followers', 'repairs']) assert.equal(pub[key], undefined, key);
 });
+
+test('citizen evidence limits match the backend upload limits (25 MB photo, 50 MB video)', async () => {
+  const {MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MAX_REVIEW_VIDEO_BYTES} = await import('../dist/services.js');
+  assert.equal(MAX_PHOTO_BYTES, 26214400);
+  assert.equal(MAX_VIDEO_BYTES, 52428800);
+  assert.ok(MAX_REVIEW_VIDEO_BYTES > MAX_VIDEO_BYTES, 'local-only admin review may allow larger clips');
+  await api.reset();
+  const tooBig = new Blob([new Uint8Array(MAX_VIDEO_BYTES + 1)], {type: 'video/webm'});
+  await assert.rejects(api.create(newReport({mediaType: 'video'}), tooBig), /too large/);
+});

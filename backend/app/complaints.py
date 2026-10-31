@@ -10,12 +10,13 @@ import json
 import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 
 from .claims import verify_claim_code
 from .errors import ApiProblem
-from .models import ComplaintCreate, ComplaintReceipt, PublicComplaint, UploadTokenRequest, UploadTokenResponse
-from .ratelimit import enforce
+from .models import CitizenResponseIn, CitizenResponseOut, ComplaintCreate, ComplaintReceipt, PublicComplaint, UploadTokenRequest, UploadTokenResponse
+from .ratelimit import client_ip, enforce
+from .resident_auth import optional_resident
 from .store import ComplaintStore, IdempotencyCompleted, IdempotencyConflict, iso
 
 router = APIRouter(prefix="/complaints", tags=["complaints"])
@@ -46,7 +47,12 @@ def request_fingerprint(data: dict) -> str:
 
 
 @router.post("", status_code=201, response_model=ComplaintReceipt, dependencies=[Depends(_limit_create)])
-def create_complaint(payload: ComplaintCreate, request: Request, response: Response) -> dict:
+def create_complaint(payload: ComplaintCreate, request: Request, response: Response, background: BackgroundTasks,
+                     resident: dict | None = Depends(optional_resident)) -> dict:
+    """Anyone may report; no account is needed and the complaint is then unowned. With a valid resident
+    bearer token the complaint belongs to that resident (taken from the session, never from the body).
+    Any other bearer token (expired, revoked, staff) is refused rather than treated as anonymous."""
+    owner_pk = resident["pk"] if resident else None
     data = payload.model_dump()
     if payload.capturedAt is not None:
         data["capturedAt"] = iso(payload.capturedAt)
@@ -57,14 +63,16 @@ def create_complaint(payload: ComplaintCreate, request: Request, response: Respo
 
     key = request.headers.get("idempotency-key")
     if key is None:
-        record, claim = store.create(data)
+        record, claim = store.create(data, owner_resident_pk=owner_pk)
         replayed = False
     else:
         if not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
             raise ApiProblem(400, "invalid_idempotency_key", "Idempotency-Key must be 22–128 URL-safe characters (at least 128 random bits).")
         key_hash = hashlib.sha256(key.encode("ascii")).hexdigest()
         try:
-            outcome, record, claim = store.create_idempotent(data, key_hash, request_fingerprint(data), request.app.state.replay_window)
+            # The owner is part of the fingerprint: the same key replayed by someone else is a different request.
+            fingerprint = request_fingerprint(data if owner_pk is None else {**data, "_owner": resident["residentId"]})
+            outcome, record, claim = store.create_idempotent(data, key_hash, fingerprint, request.app.state.replay_window, owner_pk)
         except IdempotencyConflict:
             raise ApiProblem(409, "idempotency_key_conflict", "This Idempotency-Key was already used for a different request.")
         except IdempotencyCompleted as done:
@@ -75,18 +83,21 @@ def create_complaint(payload: ComplaintCreate, request: Request, response: Respo
         if replayed:
             response.status_code = 200
             response.headers["Idempotent-Replayed"] = "true"
+    if not replayed:  # staff are told once, after the response (see notifications.py)
+        background.add_task(request.app.state.notifier.complaint_created, record["id"], record["category"])
     response.headers["Location"] = f"{request.url.path}/{record['id']}"
     return {**record, "claim": claim, "replayed": replayed}
 
 
 @router.get("/{public_id}", response_model=PublicComplaint, dependencies=[Depends(_limit_track)])
-def get_public_complaint(public_id: str, request: Request) -> dict:
+def get_public_complaint(public_id: str, request: Request, response: Response) -> dict:
     if not PUBLIC_ID_PATTERN.fullmatch(public_id):
         raise HTTPException(status_code=404, detail=NOT_FOUND)
     record = _store(request).get(public_id)
     if record is None:
         raise HTTPException(status_code=404, detail=NOT_FOUND)
-    return record
+    response.headers["Cache-Control"] = "no-store"
+    return {**record, "publicEvidence": _store(request).public_evidence(public_id)}
 
 
 @router.post("/{public_id}/upload-token", response_model=UploadTokenResponse)
@@ -109,3 +120,34 @@ def renew_upload_token(public_id: str, payload: UploadTokenRequest, request: Req
         raise HTTPException(status_code=404, detail=NOT_FOUND)
     response.headers["Cache-Control"] = "no-store"
     return {"uploadToken": issued[0], "uploadTokenExpiresAt": issued[1]}
+
+
+@router.post("/{public_id}/citizen-responses", response_model=CitizenResponseOut)
+def citizen_response(public_id: str, payload: CitizenResponseIn, request: Request, response: Response) -> dict:
+    """A citizen's view of a resolution: Appears Resolved, Still Present or Cannot Confirm. Proven
+    with the private claim code in the JSON body, never the URL. Changes only the verification state,
+    under the rules in docs/api-contract.md §6; the operational status never changes. Rate-limited
+    per IP and per complaint before the database lookup and the scrypt check."""
+    enforce(request, "citizen_response_per_ip", "ip")
+    if not PUBLIC_ID_PATTERN.fullmatch(public_id):
+        raise HTTPException(status_code=404, detail=NOT_FOUND)
+    enforce(request, "citizen_response_per_complaint", public_id)
+    store = _store(request)
+    record = store.get(public_id)
+    if record is None or not verify_claim_code(payload.claim, record["claimHash"]):
+        # One message for both cases, so the endpoint cannot be used to discover which IDs exist.
+        raise ApiProblem(401, "unauthorized", "The complaint ID and claim code do not match.")
+    response.headers["Cache-Control"] = "no-store"
+    return store.citizen_response(public_id, payload.response, client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
+
+
+@router.get("/{public_id}/public-evidence/{evidence_id}", dependencies=[Depends(_limit_track)])
+def public_evidence(public_id: str, evidence_id: str, request: Request):
+    """Only approved public evidence, streamed from private storage without disclosing its URL."""
+    from .evidence_access import open_and_stream
+    if not PUBLIC_ID_PATTERN.fullmatch(public_id) or not re.fullmatch(r"ev_[A-Za-z0-9_-]{22}", evidence_id):
+        raise ApiProblem(404, "evidence_not_found", "No public evidence was found.")
+    evidence = _store(request).case_evidence(public_id, evidence_id)
+    if evidence is None:
+        raise ApiProblem(404, "evidence_not_found", "No public evidence was found.")
+    return open_and_stream(request, evidence, f"{public_id}-{evidence['role']}", lambda: None)

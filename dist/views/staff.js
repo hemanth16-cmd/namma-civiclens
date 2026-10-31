@@ -1,15 +1,20 @@
-// Staff console for server mode (#/staff): server sign-in, the server's complaint list, case detail
-// and private evidence viewing. Every evidence view is logged by the server with the staff name.
+// Staff console for server mode (#/staff): server sign-in, the server's complaint list, case detail,
+// private evidence viewing and case management (status, assignment, work orders, notes, reinspection,
+// audit trail). Every evidence view is logged by the server with the staff name. Management controls
+// are drawn only from the server's `allowedActions`; the server re-checks every request anyway.
 // The session token lives only in memory (staff-session.js). Local mode keeps the existing
 // demonstration workspaces; this screen only explains that it needs server mode.
 
 import {esc} from '../services.js';
 import {icon, btn, heading, notice, publicTopbar, statusPill, verificationPill, fmtDate, fmtDateTime, coords, toast} from '../ui.js';
-import {addCleanup} from '../state.js';
+import {addCleanup, state, setSession} from '../state.js';
 import {navigate} from '../router.js';
 import {loadApiConfig} from '../api-config.js';
 import {ApiError, createApiClient} from '../api-client.js';
 import {staffSession} from '../staff-session.js';
+import {residentSession} from '../resident-session.js';
+import {mountInbox} from './notifications.js';
+import {disablePush, registeredDevice, takePendingStaffReads} from '../push-client.js';
 
 const PAGE_SIZE = 25;
 const SAMPLE = /^NCL-\d{4}-[A-Z0-9]{6}$/;
@@ -20,10 +25,23 @@ const $ = id => document.getElementById(id);
 function page(root, body, {signedIn = false} = {}) {
   const session = staffSession.get();
   root.innerHTML = `<div class="page">
-    ${publicTopbar({fallback: 'home', right: signedIn && session ? `<span class="micro">${esc(session.staff.displayName)}</span> ${btn(icon('lock') + '<span>Sign out</span>', 'id="staff-sign-out"', 'ghost')}` : ''})}
+    ${publicTopbar({fallback: 'home', right: signedIn && session ? `<a class="btn btn-ghost" href="#/staff/notifications" id="staff-notifications-link">${icon('bell')}<span>Notifications</span><span id="staff-unread" class="count-badge" hidden></span></a> <span class="micro">${esc(session.staff.displayName)}</span> ${btn(icon('lock') + '<span>Sign out</span>', 'id="staff-sign-out"', 'ghost')}` : ''})}
     <main id="main" class="narrow" tabindex="-1" data-staff-console="server">${body}</main>
   </div>`;
   $('staff-sign-out')?.addEventListener('click', () => signOut(root));
+  if (signedIn && session) showUnread(session.token);
+}
+
+async function showUnread(token) {
+  try {
+    const count = await (await client())?.unreadCount(token);
+    const badge = $('staff-unread');
+    if (badge && count) {
+      badge.hidden = false;
+      badge.textContent = String(count);
+      badge.setAttribute('aria-label', `${count} unread`);
+    }
+  } catch { /* the badge is optional */ }
 }
 
 async function client() {
@@ -31,7 +49,7 @@ async function client() {
   return config.mode === 'backend' ? createApiClient({baseUrl: config.baseUrl}) : null;
 }
 
-/** Routes: #/staff (list) and #/staff/<publicId> (detail). */
+/** Routes: #/staff (list), #/staff/notifications and #/staff/<publicId> (detail). */
 export async function renderStaff(root, id = '') {
   const http = await client();
   if (!http) {
@@ -40,8 +58,14 @@ export async function renderStaff(root, id = '') {
     return;
   }
   if (!staffSession.get()) return renderSignIn(root, http);
+  return navigate(dashboardRoute(id));
+}
+
+/** Where a staff-console link leads once signed in: the dashboard keeps the original design. */
+export function dashboardRoute(id = '') {
+  if (id === 'notifications') return 'official/notifications';
   const publicId = decodeURIComponent(id || '').trim().toUpperCase();
-  return publicId ? renderDetail(root, http, publicId) : renderList(root, http);
+  return SAMPLE.test(publicId) ? 'issue/' + publicId : 'official/complaints';
 }
 
 function renderSignIn(root, http, message = '') {
@@ -60,8 +84,12 @@ function renderSignIn(root, http, message = '') {
     button.disabled = true;
     try {
       staffSession.set(await http.staffSignIn(String(form.get('username')), String(form.get('password'))));
+      residentSession.clear();  // one identity per tab
       listOffset = 0;
-      renderList(root, http);
+      // Notifications opened before signing in (sessions are memory-only) are marked read now.
+      for (const nid of takePendingStaffReads()) http.markNotification(staffSession.get().token, nid, true).catch(() => {});
+      setSession({role: 'official', name: staffSession.get().staff.displayName, email: staffSession.get().staff.username, server: true});
+      navigate(dashboardRoute(location.hash.replace(/^#\/staff\/?/, '')));  // e.g. a notification's complaint or the inbox
     } catch (err) {
       button.disabled = false;
       $('staff-password').value = '';
@@ -79,124 +107,24 @@ function handleError(root, http, err, slot) {
   slot.innerHTML = notice(esc(err instanceof ApiError ? err.message : 'The request failed.'), 'error', 'alert');
 }
 
-async function renderList(root, http) {
-  page(root, `${heading({eyebrow: 'CivicLens staff · server', title: 'Server complaints', lead: 'Complaints stored on the CivicLens server, newest first. Reports kept in local mode on residents’ devices are not here.'})}
-    <div id="staff-list" role="status" aria-live="polite"><p class="micro">Loading complaints…</p></div>`, {signedIn: true});
-  const slot = $('staff-list');
-  try {
-    const {items, total} = await http.listStaffComplaints(staffSession.get().token, {limit: PAGE_SIZE, offset: listOffset});
-    if (!slot.isConnected) return;
-    if (!items.length) {
-      slot.innerHTML = notice(listOffset ? 'No more complaints.' : 'No complaints have been stored on the server yet.', 'info', 'alert');
-      return;
+/** Ends the staff session everywhere it is used (console and admin workspace). Never throws. */
+export async function endStaffSession() {
+  const session = staffSession.get();
+  staffSession.clear();
+  if (state.session?.server) setSession(null);  // the workspace identity came from this staff session
+  const http = await client();
+  if (session && http) {
+    // A signed-out browser (for example a shared computer) must stop receiving staff notifications.
+    if (registeredDevice('staff')) {
+      try { await disablePush({http, token: session.token, audience: 'staff'}); } catch { /* deleted at a later failed delivery at worst */ }
     }
-    const rows = items.map(i => `<tr>
-      <td><a class="inline-link code-inline" href="#/staff/${esc(i.id)}">${esc(i.id)}</a></td>
-      <td>${esc(i.category)}</td><td>${esc(i.area)}</td>
-      <td>${statusPill(i.status)} ${verificationPill(i.verification)}</td>
-      <td>${i.created ? fmtDate(i.created) : '—'}</td>
-      <td>${i.hasEvidence ? `${icon(i.mediaType === 'video' ? 'video' : 'image', 'mini-icon')} Uploaded` : 'Not uploaded'}</td></tr>`).join('');
-    const from = listOffset + 1, to = listOffset + items.length;
-    slot.innerHTML = `<div class="table-wrap"><table class="data-table" id="staff-table">
-        <thead><tr><th scope="col">Complaint</th><th scope="col">Category</th><th scope="col">Area</th><th scope="col">Status</th><th scope="col">Created</th><th scope="col">Evidence</th></tr></thead>
-        <tbody>${rows}</tbody></table></div>
-      <div class="row-actions mt"><span class="micro">${from}–${to} of ${total}</span>
-        ${listOffset > 0 ? btn('<span>Previous</span>', 'id="staff-prev"', 'ghost') : ''}${to < total ? btn('<span>Next</span>', 'id="staff-next"', 'secondary') : ''}</div>`;
-    $('staff-prev')?.addEventListener('click', () => { listOffset = Math.max(0, listOffset - PAGE_SIZE); renderList(root, http); });
-    $('staff-next')?.addEventListener('click', () => { listOffset += PAGE_SIZE; renderList(root, http); });
-  } catch (err) {
-    if (slot.isConnected) handleError(root, http, err, slot);
+    try { await http.staffSignOut(session.token); } catch { /* the in-memory session is gone either way */ }
   }
-}
-
-async function renderDetail(root, http, publicId) {
-  if (!SAMPLE.test(publicId)) return navigate('staff');
-  page(root, `<p><a class="inline-link" href="#/staff">${icon('back', 'mini-icon')}<span>All server complaints</span></a></p>
-    <div id="staff-detail" role="status" aria-live="polite"><p class="micro">Loading ${esc(publicId)}…</p></div>`, {signedIn: true});
-  const slot = $('staff-detail');
-  let r;
-  try {
-    r = await http.getStaffComplaint(staffSession.get().token, publicId);
-  } catch (err) {
-    if (slot.isConnected) handleError(root, http, err, slot);
-    return;
-  }
-  if (!slot.isConnected) return;
-  const g = r.gps;
-  const timeline = [...r.timeline].reverse().map(t => `<li><div class="tl-head"><strong>${esc(t.status)}</strong><time datetime="${esc(t.date)}">${fmtDateTime(t.date)}</time></div><p>${esc(t.text)}</p></li>`).join('');
-  const what = r.mediaType === 'video' ? 'video' : 'photo';
-  slot.innerHTML = `<article class="panel" aria-labelledby="staff-case-title">
-      <header class="track-head"><div><p class="eyebrow">Server complaint</p><h1 id="staff-case-title" class="code-inline" tabindex="-1">${esc(r.id)}</h1></div>
-        <div class="pill-row">${statusPill(r.status)}${verificationPill(r.verification)}</div></header>
-      <dl class="meta-list two-col">
-        <div><dt>Category</dt><dd>${esc(r.category)}</dd></div>
-        <div><dt>Neighbourhood</dt><dd>${esc(r.area)}</dd></div>
-        <div><dt>Department</dt><dd>${esc(r.department)}</dd></div>
-        <div><dt>Captured</dt><dd>${r.capturedAt ? fmtDateTime(r.capturedAt) : 'Not recorded'}${r.captureSource ? ` · ${esc(r.captureSource)}` : ''}</dd></div>
-        <div><dt>Received</dt><dd>${r.uploadedAt ? fmtDateTime(r.uploadedAt) : '—'}</dd></div>
-        <div><dt>Location</dt><dd>${coords(g)}${g.accuracy ? ` · ±${Math.round(g.accuracy)} m` : ''}<br><span class="micro">${esc(g.source || g.sourceType || '')}${g.address ? ` · ${esc(g.address)}` : ''}</span></dd></div>
-        <div><dt>Description</dt><dd>${r.description ? esc(r.description) : '<span class="micro">None given</span>'}</dd></div>
-        <div><dt>Resident’s sharing choice</dt><dd>${r.shareEvidence ? 'Share with community' : 'Private'}</dd></div>
-      </dl>
-      <h2 class="mt">Evidence</h2>
-      <div id="staff-evidence">${r.evidence
-        ? `<p class="micro">${esc(r.evidence.contentType)} · ${Math.max(1, Math.round(r.evidence.byteSize / 1024))} KB · uploaded ${fmtDateTime(r.evidence.uploadedAt)} · checksum <span class="code-inline">${esc(r.evidence.sha256.slice(0, 12))}…</span></p>
-           ${notice(`Opening the ${what} records your name and the time in the access log.`, 'info', 'eye')}
-           <div class="row-actions">${btn(icon('eye') + `<span>View ${what}</span>`, 'id="staff-view-evidence"', 'primary')}</div>
-           <div id="staff-evidence-view" class="mt"></div>`
-        : notice('No evidence has been uploaded for this complaint.', 'info', 'alert')}</div>
-      <h2 class="mt">Evidence access log</h2>
-      <div id="staff-access-log"><p class="micro">${r.evidence ? 'Loading…' : 'No evidence, so no access.'}</p></div>
-      <h2 class="mt">Public timeline</h2>
-      ${timeline ? `<ol class="timeline">${timeline}</ol>` : '<p class="micro">No updates yet.</p>'}
-    </article>`;
-  if (r.evidence) {
-    $('staff-view-evidence').addEventListener('click', () => viewEvidence(root, http, r));
-    loadAccessLog(root, http, r.id);
-  }
-}
-
-async function viewEvidence(root, http, r) {
-  const view = $('staff-evidence-view');
-  const button = $('staff-view-evidence');
-  button.disabled = true;
-  view.innerHTML = '<p class="micro" role="status">Loading evidence…</p>';
-  try {
-    const blob = await http.fetchStaffEvidence(staffSession.get().token, r.id);
-    if (!view.isConnected) return;
-    const url = URL.createObjectURL(blob);
-    addCleanup(() => URL.revokeObjectURL(url));
-    view.innerHTML = blob.type.startsWith('video/')
-      ? `<video class="receipt-media" controls playsinline src="${url}" aria-label="Evidence video for ${esc(r.id)}"></video>`
-      : `<img class="receipt-media" src="${url}" alt="Evidence photo for ${esc(r.id)}">`;
-    view.insertAdjacentHTML('beforeend', '<p class="micro">Shown from the server for this session only. It is not saved in this browser.</p>');
-    loadAccessLog(root, http, r.id);
-  } catch (err) {
-    button.disabled = false;
-    if (view.isConnected) handleError(root, http, err, view);
-  }
-}
-
-async function loadAccessLog(root, http, id) {
-  const slot = $('staff-access-log');
-  try {
-    const entries = await http.getEvidenceAccessLog(staffSession.get().token, id);
-    if (!slot?.isConnected) return;
-    slot.innerHTML = entries.length
-      ? `<ol class="timeline">${entries.map(e => `<li><div class="tl-head"><strong>${esc(e.displayName)} (${esc(e.username)})</strong><time datetime="${esc(e.accessedAt)}">${fmtDateTime(e.accessedAt)}</time></div><p>${esc(e.action === 'view' ? 'Viewed the evidence' : e.action)}</p></li>`).join('')}</ol>`
-      : '<p class="micro">Nobody has viewed this evidence yet.</p>';
-  } catch (err) {
-    if (slot?.isConnected) handleError(root, http, err, slot);
-  }
+  return http;
 }
 
 async function signOut(root) {
-  const session = staffSession.get();
-  staffSession.clear();
-  const http = await client();
-  if (session && http) {
-    try { await http.staffSignOut(session.token); } catch { /* the in-memory session is gone either way */ }
-  }
+  const http = await endStaffSession();
   toast('Signed out of the staff console.', 'success');
   if (http) renderSignIn(root, http);
 }

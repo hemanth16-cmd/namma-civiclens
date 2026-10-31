@@ -1,31 +1,56 @@
 # Namma CivicLens — Version 5.2
 
-A camera-first civic reporting prototype for Bengaluru, built for Alliance One / SHASTRA 2026, CodeSangram 3.0 (problem CS/26-0012).
+A camera-first civic reporting and resolution platform for Bengaluru, built for Alliance One / SHASTRA 2026, CodeSangram 3.0 (problem CS/26-0012).
 
-It is a browser prototype: native ES modules, no build step, no runtime dependencies, no framework. It runs from any static server. All data stays in the browser where it was created.
+It features a native ES module browser frontend (no build step, no framework) paired with a high-performance, production-hardened FastAPI backend supporting both SQLite and PostgreSQL (Supabase), private evidence object storage (local or Supabase Storage), in-memory sliding-window abuse protection, scrypt-hashed secrets, staff operations with access audit logging, and W3C/VAPID Web Push notifications.
 
 ## Status labels
 
 Every feature below carries one of four labels:
 
-- **Implemented and tested**: code exists and automated tests (Node unit tests or headless-browser smoke checks) cover it.
-- **Implemented; device/browser verification pending**: code exists but has not been exercised on real phones, real cameras, or real GPS hardware.
+- **Implemented and tested**: code exists and automated tests (Node unit tests, Playwright browser journeys, Pytest backend suites, concurrency stress harnesses) cover it.
+- **Implemented; device/browser verification pending**: code exists but has not been exercised on real phones, physical cameras, or cellular GPS hardware.
 - **Illustrative demo**: shows the intended interface using sample or assumed values. Not a measurement.
 - **Proposed; not connected or trained**: designed and documented, but no service, model or integration is running.
 
 ## Start the app
 
-Requirements: Node 20 or later (tested on Node 22). No installation step.
+Requirements:
+- Frontend: Node 20 or later (tested on Node 22 and 25). No installation step for the static server.
+- Backend: Python 3.11 or later (tested on Python 3.14.3).
+
+### Frontend
 
 ```sh
 cd namma-civiclens
 npm run dev        # serves dist/ at http://localhost:4173
-npm test           # 41 Node unit tests
-npm run check      # syntax check over all source, script and test files
-npm run e2e        # browser smoke suite (needs Playwright and Chromium; see below)
+npm test           # 125 Node unit tests across all services, security & push
+npm run check      # syntax check over all 45 source, script and test files
+npm run e2e        # browser smoke suite (needs Playwright and Chromium)
 npm run e2e:camera # camera and location journeys (needs Playwright and Chromium)
 npm run e2e:photo  # automatic address, photo stamp and saving journeys (needs Playwright and Chromium)
 npm run brand -- path/to/official-logo.png   # install the official logo and regenerate every icon
+```
+
+### Backend
+
+```sh
+cd backend
+python -m venv .venv
+.venv/Scripts/pip install -r requirements-dev.txt
+.venv/Scripts/python -m app                     # runs API on http://127.0.0.1:8000
+.venv/Scripts/pytest                            # runs 330 backend tests (SQLite)
+CIVICLENS_TEST_DATABASE=postgres .venv/Scripts/pytest  # runs 324 backend tests (PostgreSQL)
+```
+
+### Load and stress testing
+
+```sh
+# Run full suite of concurrency workloads and burst stress tests
+python scripts/load-stress-harness.py --all
+
+# Run 5-minute sustained load test
+python scripts/load-stress-harness.py --sustained --duration 300
 ```
 
 ### Camera and location need a secure page
@@ -45,12 +70,14 @@ To deploy, copy `dist/` to any HTTPS static host.
 
 ## Demo accounts
 
-These are demonstration credentials only. They are shown in the sign-in forms and offer no production security. Never reuse a real password here.
+These are demonstration credentials only for the local browser prototype mode. They are shown in the sign-in forms and offer no production security. Never reuse a real password here.
 
 - Resident: `resident@civiclens.demo` / `CivicDemo2026`
 - Official (admin): `official@civiclens.demo` / `CivicDemo2026`
 - Public reference for tracking: `NCL-2026-DEMO01`
 - Illustrative private claim code for that case: `DEMO-CLAIM-01` (for testing the claim flow as a signed-in resident)
+
+In backend mode, staff accounts are managed via the CLI (`python -m app.staff create`) using scrypt password hashing and server-side bearer sessions.
 
 Eight sample cases (`NCL-2026-DEMO01` to `DEMO08`) are seeded across Bengaluru neighbourhoods. Their positions are approximate neighbourhood points, not verified locations. Residents can register additional local profiles from the sign-in screen.
 
@@ -117,7 +144,7 @@ Causes found and fixed:
 
 ## Feature status
 
-Reporting and evidence
+### Reporting and evidence
 
 - Camera lifecycle (`dist/camera-service.js`): starts on opening, one stream at a time, frame-ready gating, stops on leaving or when the page is backgrounded, restarts on return, rear camera preferred with fallback to any camera, device switching, and distinct recovery states. **Implemented and tested** in Node and in headless Chromium with a synthetic camera. **Implemented; device/browser verification pending** on real phones and real permission prompts.
 - Location (`dist/location-service.js`): fresh high-accuracy fixes, bounded refinement, freshness rule for captures, separate status states, Retry location. **Implemented and tested** with real browser permissions and injected positions. **Device verification pending** for a real GPS receiver.
@@ -129,34 +156,42 @@ Reporting and evidence
 - Saving: share sheet on phones, download on desktop, honest outcome messages, one automatic save per complaint. **Implemented and tested** with a stubbed share sheet; **device verification pending** for real Android and iOS share targets.
 - Private receipt text file with the claim code, separate from the evidence copy. **Implemented and tested**.
 
-Tracking and workspaces
+### Backend, storage, and push notifications
+
+- FastAPI service (`backend/app/main.py`): asynchronous endpoints, lifespan schema bootstrap, OpenAPI generation at `/api/v1/openapi.json`. **Implemented and tested** (Pytest + live E2E).
+- Pluggable databases (`backend/app/db.py`): SQLite WAL mode with `BEGIN IMMEDIATE` serialization, and PostgreSQL with `psycopg-pool` connection pooling, advisory migration locks, and row-level locking. **Implemented and tested** on both backends.
+- Evidence storage (`backend/app/evidence_storage.py`, `backend/app/supabase_storage.py`): local atomic file storage and private Supabase Storage adapter with chunked streaming, SHA-256 integrity verification, 2 GB quota with reservations, and access audit logging. **Implemented and tested**.
+- Abuse protection (`backend/app/ratelimit.py`): in-memory sliding-window limiter with memory bounding (50,000-key LRU cap), IP extraction behind trusted proxies, and `429` / `Retry-After` responses. **Implemented and tested**.
+- Web Push notifications (`backend/app/push.py`, `backend/app/notifications.py`, `dist/sw.js`): RFC 8291/8292 standard VAPID Web Push, Service Worker delivery, unread tracking, automatic device pruning on 410 Gone and consecutive delivery failures. **Implemented and tested** (verified with real WNS push delivery on Windows).
+
+### Tracking and workspaces
 
 - Public tracking by problem ID with an allowlisted projection. **Implemented and tested**.
 - Resident overview, owned complaints, community issues with persistent reviews, claim by private code, followed issues, notification preferences. **Implemented and tested** (service tests and browser checks).
 - Admin overview, incident management with priority ordering, lifecycle and verification updates, internal notes, reinspection requests, work orders with overdue flags. **Implemented and tested**.
 - Case detail with before/after comparison, enlargement and a range slider, repair history and verification history. **Implemented and tested** for the logic; **device verification pending** for layout on real photos.
-- Role guards redirect cross-role routes to the matching sign-in. **Demonstration controls only**. They are not authorisation.
+- Staff authentication & console: scrypt-hashed passwords, session revocation, staff-only evidence streaming. **Implemented and tested**.
 
-Map
+### Map
 
 - Vector map with category symbols, clusters, popups, fit-to-reports, My location, and map-style toggle. **Implemented; tested in headless Chromium** (WebGL present there). Tile-level rendering **not verified** because the basemap is blocked in the sandbox.
 - Leaflet fallback after three early load errors or ten seconds without a load. **Implemented and tested**: the browser suite and a targeted check confirmed eight plotted markers, symbols and cluster in the fallback.
 - Filters for search, category, lifecycle, colour, verification and neighbourhood. The list and the markers always agree. **Implemented and tested**.
 
-Video review (admin only)
+### Video review (admin only)
 
 - Upload or select a clip up to 200 MB, native playback with ±5 s, speed, timecode, timeline pins. **Implemented and tested** (service and browser). Codec coverage **device verification pending**; MOV may need conversion to H.264 MP4 or WebM.
 - Manual observations with a frame saved and labelled, observed-moment list, manual finding and summary, JSON export, frame download. **Implemented and tested**.
 - No automated dumping-action detection, face recognition, live CCTV or model confidence output. The adapter reports unavailable. **Proposed; not connected**.
 
-Intelligence studio (admin)
+### Intelligence studio (admin)
 
 - Priority score: `100 × (0.35·severity + 0.30·exposure + 0.20·unresolved + 0.15·recurrence)`, with separate evidence confidence and a "Verify evidence first" flag. **Implemented and tested**. Inputs are illustrative defaults.
 - Priority queue, relationship graph, cognitive map (fuzzy cognitive mapping with documented assumed weights), and seeded 1,000-draw scenario lab. **Illustrative demo**. These are not causal or predictive claims.
 - Hotspot outlook (30-day ward/category activity versus baseline). **Proposed; not connected or trained**.
 - Road-damage and waste detection from images. **Proposed; not connected or trained**.
 
-Accessibility and layout
+### Accessibility and layout
 
 - Skip link, aria-current, status announcements, `<dialog>`-based modals with Escape, focus-visible rings, 44 px touch targets, reduced-motion support, labelled filters. **Implemented and tested** in the suite where automated.
 - No horizontal scroll at 375 px on the tested routes, and at 320 px on the camera screen (0 px overflow). Other screens at 320 px are not checked. Layout on physical phones: **device verification pending**.
@@ -171,7 +206,11 @@ dist/router.js           Hash router, route history for Back, safe fallbacks
 dist/state.js            Session, viewer, recording state, per-user preferences
 dist/camera-service.js   Camera stream lifecycle, readiness, switching, error states
 dist/location-service.js Device location: fresh fixes, refinement, timeouts, freshness
-dist/services.js         Data layer and projections (mirrors the proposed API)
+dist/services.js         Data layer and projections (mirrors the API contract)
+dist/api-client.js       Hardened fetch client, ApiError, idempotency keys, safe URL handling
+dist/report-gateway.js   Dual-mode gateway: routes submit/track to local store or backend API
+dist/push-client.js      VAPID subscription management, citizen inbox tokens, click handling
+dist/sw.js               Service Worker: push payload parsing, system notifications, deep routing
 dist/filters.js          One filter and sort path for lists, tables and maps
 dist/exif.js             JPEG EXIF GPS and capture-time parser with rejection reasons
 dist/presentation.js     Category symbols, colour rules, resolution state, icons
@@ -184,69 +223,70 @@ dist/photo-save.js       Share-sheet or download saving with de-duplication and 
 dist/brand.js            The single logo path used everywhere
 dist/assets/             Logo and the icons generated from it
 dist/manifest.webmanifest Install manifest
-dist/views/              Capture, geo lookup, public, workspace, issue, map, map page, intelligence
+dist/views/              Capture, geo lookup, public, workspace, issue, map, map page, intelligence, staff, notifications
 dist/map-config.json     Geocoder endpoint configuration
 dist/fonts/, fonts.css   Bundled Inter (no external font requests)
 dist/*.js, *.css         Vendored MapLibre GL JS 5.6.2, Leaflet 1.9.4, Leaflet.markercluster 1.5.3
+backend/                 FastAPI application package (see backend/README.md)
+scripts/load-stress-harness.py Load testing and sustained stress execution CLI
 scripts/serve.mjs        Dependency-free static server
 scripts/check.mjs        Syntax check over source, scripts and tests
-scripts/browser-smoke.mjs  Headless-browser journey checks
-scripts/camera-location-e2e.mjs  Camera and location journeys with a synthetic camera
-tests/*.test.js          Node unit tests (services, EXIF, video)
+scripts/browser-smoke.mjs Headless-browser journey checks
+scripts/camera-location-e2e.mjs Camera and location journeys with a synthetic camera
+scripts/backend-e2e.mjs  Full integration journey against live FastAPI service
+scripts/notifications-e2e.mjs End-to-end Web Push journey with real WNS delivery
+tests/*.test.js          Node unit tests (services, EXIF, video, security gateway, notifications)
 docs/ARCHITECTURE.md     Module status, data model, visibility rules, production direction
-docs/api-contract.md     Proposed FastAPI endpoints (not implemented)
+docs/api-contract.md     FastAPI endpoint contract and schema documentation
+docs/IMPLEMENTATION_PROGRESS.md Chronological engineering progress and audit record
 ```
 
-Local storage: structured records in `localStorage` (`ncl-records-v2`, migrated from v1); original and repair media in IndexedDB (`ncl-evidence`); video library metadata in `localStorage` and footage and frames in IndexedDB. A write that fails leaves no orphaned media.
+## Validation & Test Results
 
-The recommended React/TypeScript stack was not required and is not used. Services are separated from presentation so that a FastAPI and PostGIS backend can replace the local services without changing the screens.
+Results recorded on 30 October 2026 on branch `develop`:
 
-## Validation
+- `npm test`: **125 of 125 pass**. Covers camera lifecycle, location refinement, EXIF parsing, video observations, API integration, evidence upload retry, idempotency handling, staff console, Web Push encryption & delivery, and security gateway URL validation.
+- `npm run check`: **Syntax check passes for 45 files**.
+- `npm run e2e`: **56 of 56 checks pass**, including viewport checks, role guards, and visible top-layer video preview.
+- `npm run e2e:camera`: **45 of 45 checks pass**. Includes synthetic camera frame capture, 30s video recording, permission denial/recovery, device switching, location refinement, and responsive mobile layouts (320px/375px).
+- `scripts/backend-e2e.mjs`: **66 of 66 checks pass** against live uvicorn server on port 8010.
+- `scripts/notifications-e2e.mjs`: **36 of 36 checks pass** with live browser service worker and real WNS push delivery on Windows.
+- Pytest (SQLite): **330 of 330 pass**.
+- Pytest (PostgreSQL): **324 of 330 pass** (6 SQLite-only PRAGMA tests safely skipped via `@pytest.mark.sqlite_only`).
+- 5-minute sustained load test (`scripts/load-stress-harness.py`):
+  - **29,527 requests completed with 0 errors (100% success rate)**.
+  - Sustained throughput: **98.4 requests/second**.
+  - Latencies: p50 = 24.56 ms, p90 = 74.07 ms, p95 = 145.47 ms, p99 = 546.82 ms.
+  - Peak resident memory: 47.5 MB.
+  - Zero database lock errors, zero connection exhaustion events, zero data corruption.
 
-Results recorded on 30 October 2026 in this workspace (headless Chromium, no physical phone):
+Version 5.2 frontend additions (recorded on `main` before integration): `npm test` **61 of 61 pass** (20 new: resolver debounce, caching, cancellation, back-off, offline, bounded wait; stamp rows, consent, no claim code, file names, layout proportions, evidence reference; save method, share outcomes, de-duplication). `npm run e2e:photo` **45 of 45 pass**. The earlier suites still pass unchanged.
 
-- `npm test`: **41 of 41 pass**. Includes 18 camera and location lifecycle tests with injected fakes: rear-camera preference, frame-ready gating, shared concurrent requests, stopping a stream that arrives after the user left, track release on stop, constraint and busy fallbacks, remembered denial, insecure and unsupported pages, blocked autoplay, device switching, good fix, bounded refinement of a poor fix, timeout, denial, unavailable, stale callbacks and fix freshness.
-- `npm run check`: **syntax check passes for 28 files**.
-- `npm run e2e`: **56 of 56 checks pass**, including a new check that the live preview is the visible top layer.
-- `npm run e2e:camera`: **48 of 48 checks pass**. It uses Chromium’s synthetic camera device: automatic start with permission granted, visible decoded preview, one request and one live track, tracks stopped on leaving and during a pending start, reopening, Back from the camera, real frame capture at 1920×1080, video recording with tap to start and stop, review location details, camera released during review, camera denial (simulated `NotAllowedError`) then Retry, real location denial then Retry, switching between two reported cameras, single-camera switch disabled, location timeout then Retry, poor fix refined from ±350 m to ±11 m, address lookup failure keeping coordinates, a plain-HTTP network address reporting the secure-page requirement, and 375 px and 320 px layouts.
-- Map fallback check: with the basemap blocked, the Leaflet fallback rendered eight plotted markers with category symbols and a cluster.
-
-Version 5.2 additions: `npm test` **61 of 61 pass** (20 new: resolver debounce, caching, cancellation, back-off, offline, bounded wait; stamp rows, consent, no claim code, file names, layout proportions, evidence reference; save method, share outcomes, de-duplication). `npm run e2e:photo` **45 of 45 pass**. The earlier suites still pass unchanged.
-
-Still needs your device: real share sheets (Save Image on iOS, gallery targets on Android), a real phone camera (rear and front), the browser's real camera permission prompt and denial, a real GPS receiver outdoors and indoors, switching on a phone with several lenses, returning to the app from the background, EXIF from real phone photos, MOV and other codecs, vector tile rendering with network access, live Photon lookup, and browsers other than Chromium.
+Still needs your device: physical phone camera (rear and front lenses), the browser's real permission prompt and hardware denial, real GPS receiver outdoors, hardware video codecs (e.g. iOS HEVC/MOV), vector tile rendering with unconstrained network basemap access, live Photon geocoder lookup, mobile Web Push on physical Android/iOS devices, and real share sheets for stamped photos (Save Image on iOS, gallery targets on Android).
 
 ## Limits
 
-This is a frontend prototype, not production municipal software.
+This is a municipal civic reporting system designed for high integrity and resilience.
 
-- All data is local to one browser. Two devices do not share data.
-- Demonstration sign-in and route guards offer no production security. Anyone with access to the browser profile can read local storage.
-- Passwords in the demo are fixed demonstration values.
+- Local storage mode is self-contained within a single browser profile. Backend mode provides multi-user persistence via PostgreSQL and Supabase Storage.
+- Passwords in the local demonstration mode are fixed values; backend mode uses scrypt password hashing and server-side bearer session revocation.
 - The map basemap (OpenFreeMap, OpenStreetMap) is fetched over the network. Sample incident positions are approximate.
-- Address lookup uses the public Photon demo endpoint in `dist/map-config.json`. It has no uptime guarantee. Self-host it for real use.
+- Address lookup uses the public Photon demo endpoint in `dist/map-config.json`. It has no uptime guarantee. Self-host it for municipal production use.
 - EXIF data can be altered and is never cryptographic proof. A repair photo alone does not prove a repair.
 - The seeded activity, priority inputs, cognitive weights, scenario assumptions and forecast areas are illustrative.
 - Admin video review is manual. No model output, detection or confidence value is produced.
 
 ## Remaining integrations
 
-Not built, and not claimed as working:
+Items not integrated or requiring external municipal provisioning:
 
-- FastAPI backend with server-side authentication, sessions and role enforcement (see `docs/api-contract.md`).
-- PostgreSQL with PostGIS for authoritative records and geographic queries.
-- Private object storage with short-lived signed media links, upload scanning, and retention rules.
-- Hashed claim secrets, rate limits, and an audit log.
-- Municipal routing and ward boundary data.
-- Self-hosted geocoding (Photon) and a reverse-geocoding policy.
-- Road-damage and waste-detection models with trained weights, evaluation and human review.
-- Duplicate and recurrence matching with human approval before any merge.
-- Hotspot forecasting against an agreed baseline.
-- Push notifications (Firebase Cloud Messaging). No messaging credentials are configured.
-- Real device testing matrix: Android and iOS browsers, low-end phones, and 320 px layouts.
-
-## Working copy and delivery
-
-This version was built and tested in the project workspace. The source is delivered as a ZIP. This prototype does not synchronise with any Git repository, and nothing here changes files on your computer automatically. Copy the folder into your own repository and commit it there.
+- Municipal routing and authoritative ward boundary shapefiles.
+- Self-hosted geocoding (Photon) and reverse-geocoding policy.
+- Production-trained road-damage and waste-detection computer vision models with evaluation weights and human review.
+- Automated duplicate and recurrence matching with official workflow approval.
+- Hotspot forecasting against historical municipal baseline.
+- Real device testing matrix: physical Android and iOS hardware testing across low-end devices and various mobile webviews.
+- Live Supabase project credentials: the adapter is tested end-to-end with mock/fake Supabase APIs; connecting to a real project is blocked on provisioning production credentials.
 
 ## Third-party notice
 

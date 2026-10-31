@@ -1,6 +1,5 @@
 import hashlib
 import io
-import sqlite3
 import sys
 from contextlib import closing
 from dataclasses import replace
@@ -8,6 +7,8 @@ from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+
+from tests import dbutil
 
 from app import auth
 from app.main import create_app
@@ -77,7 +78,7 @@ def new_complaint(api, media_type="photo", content=JPEG, filename="e.jpg", ctype
 
 
 def rows(db, sql, params=()):
-    with closing(sqlite3.connect(db)) as conn:
+    with closing(dbutil.connect(db)) as conn:
         return conn.execute(sql, params).fetchall()
 
 
@@ -187,7 +188,7 @@ def test_disabling_an_account_ends_its_sessions_and_blocks_sign_in(api, token, i
 
 def test_a_disabled_account_is_refused_even_if_its_sessions_were_not_revoked(api, token, isolated_db_path):
     # Disabled by some other path (direct database edit, a future admin tool) without touching sessions.
-    with closing(sqlite3.connect(isolated_db_path)) as conn:
+    with closing(dbutil.connect(isolated_db_path)) as conn:
         conn.execute("UPDATE staff_accounts SET disabled_at = '2026-10-01T00:00:00.000Z' WHERE username = 'asha'")
         conn.commit()
     assert rows(isolated_db_path, "SELECT COUNT(*) FROM staff_sessions WHERE revoked_at IS NULL") == [(1,)]
@@ -238,6 +239,40 @@ def test_list_is_newest_first_paginated_and_free_of_secrets(api, token):
     for secret in (first["claim"], first["uploadToken"], "scrypt", "claimHash", "storageKey"):
         assert secret not in response.text + str(page2)
     assert api.get("/api/v1/staff/complaints?limit=1000", headers=bearer(token)).status_code == 422
+
+
+def test_list_carries_map_fields_and_costs_two_queries_whatever_its_length(api, token):
+    """The list feeds the admin dashboard and map, and must not cost a database round trip per complaint
+    (from Render to Supabase each query takes ~0.2 s, so per-complaint queries hit the 10 s browser timeout)."""
+    for _ in range(6):
+        new_complaint(api)
+    store = api.app.state.store
+    real_connect = store.db.connect
+    executed = []
+
+    class Counting:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=()):
+            executed.append(sql)
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    store.db.connect = lambda: Counting(real_connect())
+    try:
+        items, total = store.list_complaints(100, 0)
+    finally:
+        store.db.connect = real_connect
+    assert total == 6 and len(items) == 6 and len(executed) == 2, executed
+    body = api.get("/api/v1/staff/complaints?limit=3", headers=bearer(token)).json()
+    first = body["items"][0]
+    assert set(first) == {"id", "title", "category", "area", "status", "verification", "department", "created", "updated",
+                          "mediaType", "hasEvidence", "gps"}
+    assert set(first["gps"]) == {"lat", "lng", "accuracy", "sourceType"} and first["hasEvidence"] is True
+    assert first["gps"]["lat"] == payload()["gps"]["lat"] and first["gps"]["lng"] == payload()["gps"]["lng"]
 
 
 def test_detail_has_operational_fields_but_no_secrets(api, token, isolated_db_path):
@@ -292,12 +327,38 @@ def test_complaint_without_evidence(api, token):
     assert api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence/access", headers=bearer(token)).json() == []
 
 
-def test_missing_file_returns_503_and_logs_nothing(api, token, isolated_db_path, evidence_dir):
+def test_missing_file_is_reported_as_unavailable_and_logs_nothing(api, token, isolated_db_path, evidence_dir):
+    """A file that is confirmed absent (e.g. uploaded to another machine's local disk) is a permanent
+    condition: 404 evidence_unavailable with an explanation, not 503 'try again'."""
     receipt = new_complaint(api)
     [(key,)] = rows(isolated_db_path, "SELECT storage_key FROM evidence")
     (evidence_dir / "objects" / key[:2] / key).unlink()
     response = api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token))
-    assert response.status_code == 503 and key not in response.text
+    assert response.status_code == 404 and response.json()["error"]["code"] == "evidence_unavailable"
+    assert "not in this server's storage" in response.json()["error"]["message"] and key not in response.text
+    assert rows(isolated_db_path, "SELECT COUNT(*) FROM evidence_access_log") == [(0,)]
+
+
+def test_evidence_in_an_unconfigured_backend_is_reported_as_unavailable(api, token, isolated_db_path):
+    receipt = new_complaint(api)
+    with closing(dbutil.connect(isolated_db_path)) as conn:
+        conn.execute("UPDATE evidence SET storage_backend = 'supabase'")  # this test server has no Supabase Storage
+        conn.commit()
+    response = api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token))
+    assert response.status_code == 404 and response.json()["error"]["code"] == "evidence_unavailable"
+    assert "Supabase Storage" in response.json()["error"]["message"]
+    assert rows(isolated_db_path, "SELECT COUNT(*) FROM evidence_access_log") == [(0,)]
+
+
+def test_unreadable_storage_that_cannot_confirm_absence_stays_503(api, token, isolated_db_path, monkeypatch):
+    """An outage (the storage cannot even say whether the file exists) is still 503 storage_unavailable."""
+    from app.store import StoreError
+    receipt = new_complaint(api)
+    storage = api.app.state.evidence_storages["local"]
+    monkeypatch.setattr(storage, "open_read", lambda key: (_ for _ in ()).throw(StoreError("disk offline")))
+    monkeypatch.setattr(storage, "exists", lambda key: (_ for _ in ()).throw(StoreError("disk offline")))
+    response = api.get(f"/api/v1/staff/complaints/{receipt['id']}/evidence", headers=bearer(token))
+    assert response.status_code == 503 and response.json()["error"]["code"] == "storage_unavailable"
     assert rows(isolated_db_path, "SELECT COUNT(*) FROM evidence_access_log") == [(0,)]
 
 

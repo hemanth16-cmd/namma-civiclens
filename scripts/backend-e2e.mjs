@@ -305,7 +305,8 @@ if (!STAFF_USERNAME || !STAFF_PASSWORD) {
   const {ctx, page} = await newPage({backend: true});
   check('Staff: anonymous API requests for evidence are refused', (await fetch(`${API}/staff/complaints/${publicId}/evidence`)).status === 401);
   await page.goto(BASE + '/#/login/official');
-  check('Staff: the demo admin sign-in points to the staff console in server mode', await page.waitForFunction(() => /staff console/.test(document.querySelector('.auth-panel')?.textContent || ''), null, {timeout: 5000}).then(() => true, () => false));
+  check('Staff: in server mode the admin sign-in is the server staff sign-in, not the demo login', await page.waitForSelector('[data-server-login]', {timeout: 5000}).then(() => true, () => false)
+    && !(await page.content()).includes('CivicDemo2026'));
   await page.goto(BASE + '/#/staff');
   await page.waitForSelector('#staff-sign-in', {timeout: 8000}).catch(() => {});
   check('Staff: the console asks for a server sign-in', await page.locator('#staff-sign-in').count() === 1);
@@ -320,14 +321,16 @@ if (!STAFF_USERNAME || !STAFF_PASSWORD) {
   await page.click('#staff-sign-in button[type=submit]');
   const session = await (await signInResponse)?.json().catch(() => null);
   const staffToken = session?.token;
-  await page.waitForSelector('#staff-table', {timeout: 8000}).catch(() => {});
+  await page.waitForSelector('#complaint-results table', {timeout: 8000}).catch(() => {});
   const listText = await page.locator('main').innerText();
-  check('Staff: signing in shows the server complaint list with the reported complaint', Boolean(staffToken) && listText.includes(publicId) && /Uploaded/.test(listText));
+  check('Staff: signing in opens Incident management with the reported complaint', Boolean(staffToken) && await waitHash(page, '^#/official/complaints$').then(() => true, () => false)
+    && listText.includes(publicId));
 
-  await page.click(`a[href="#/staff/${publicId}"]`);
-  await page.waitForSelector('#staff-case-title', {timeout: 8000}).catch(() => {});
+  await page.click(`#complaint-results a[href="#/issue/${publicId}"]`);
+  await page.waitForSelector('.detail-layout', {timeout: 8000}).catch(() => {});
   const detailText = await page.locator('main').innerText();
-  check('Staff: the case shows operational details (description and precise location)', detailText.includes(DEMO_DESCRIPTION) && /13\.03580/.test(detailText));
+  check('Staff: the case opens in the original case page with operational details (description and precise location)',
+    await page.locator('#workspace .sidebar').count() === 1 && detailText.includes(DEMO_DESCRIPTION) && /13\.03580/.test(detailText));
   check('Staff: the case shows no claim code', !detailText.includes(claim));
   const evidenceResponse = page.waitForResponse(r => r.url() === `${API}/staff/complaints/${publicId}/evidence`, {timeout: 15000}).catch(() => null);
   await page.click('#staff-view-evidence');
@@ -344,16 +347,16 @@ if (!STAFF_USERNAME || !STAFF_PASSWORD) {
   check('Staff: the session token is not stored in the browser or put in the URL', !stored.text.includes(staffToken || '~') && !(await page.evaluate(() => location.href)).includes(staffToken || '~'));
 
   await page.reload();
-  await page.waitForSelector('#staff-sign-in', {timeout: 8000}).catch(() => {});
-  check('Staff: reloading signs the tab out (session held in memory only)', await page.locator('#staff-sign-in').count() === 1);
-  await page.fill('#staff-username', STAFF_USERNAME);
-  await page.fill('#staff-password', STAFF_PASSWORD);
+  await page.waitForSelector('[data-server-login]', {timeout: 8000}).catch(() => {});
+  check('Staff: reloading signs the tab out (session held in memory only)', await page.locator('[data-server-login]').count() === 1);
+  await page.fill('#login-username', STAFF_USERNAME);
+  await page.fill('#login-password', STAFF_PASSWORD);
   const second = page.waitForResponse(r => r.url() === API + '/staff/sessions' && r.status() === 200, {timeout: 10000}).catch(() => null);
-  await page.click('#staff-sign-in button[type=submit]');
+  await page.click('#login-form button[type=submit]');
   const secondToken = (await (await second)?.json().catch(() => null))?.token;
-  await page.waitForSelector('#staff-sign-out', {timeout: 8000}).catch(() => {});
-  await page.click('#staff-sign-out');
-  await page.waitForSelector('#staff-sign-in', {timeout: 8000}).catch(() => {});
+  await page.waitForSelector('[data-action="logout"]', {timeout: 8000}).catch(() => {});
+  await page.click('[data-action="logout"]');
+  await page.waitForTimeout(1000);
   const afterSignOut = await fetch(`${API}/staff/me`, {headers: {Authorization: `Bearer ${secondToken}`}});
   check('Staff: signing out revokes the session on the server', Boolean(secondToken) && afterSignOut.status === 401);
   await page.screenshot({path: path.join(SHOTS, 'staff-console.png'), fullPage: true});

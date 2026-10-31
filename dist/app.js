@@ -5,16 +5,31 @@ import {renderOverview, renderComplaints, renderClaim, renderNotifications, rend
 import {renderIssue} from './views/issue.js';
 import {renderIntelligence} from './views/intelligence.js';
 import {renderMapPage} from './views/map-page.js';
+import {renderStaff} from './views/staff.js';
+import {renderMyReports} from './views/my-reports.js';
+import {reportMode} from './report-gateway.js';
+import {renderNotifications as renderServerNotifications} from './views/notifications.js';
+import {openNotification, refreshPush, takeLaunchNotification, inbox} from './push-client.js';
+import {staffSession} from './staff-session.js';
+import {residentSession} from './resident-session.js';
+import {loadApiConfig} from './api-config.js';
+import {createApiClient} from './api-client.js';
 import {mountVideoReview} from './video-review.js';
 import {api} from './services.js';
 import {state, viewer, setSession, runCleanups, addCleanup} from './state.js';
-import {navigate, currentPath, recordRoute, goBack, setRenderer} from './router.js';
+import {navigate, currentPath, recordRoute, goBack, setRenderer, serverModeRoute, serverWorkspaceAccess} from './router.js';
 import {toast, workspaceShell, notice, esc, btn} from './ui.js';
 
 const app = document.querySelector('#app');
+
+// An identity restored from sessionStorage is only a display hint. The old "this device" pseudo-resident
+// and a server resident whose in-memory token is gone (reload, new tab) are dropped here. A stale staff
+// identity is kept until the router sees it, so a reloaded case page sends staff back to sign-in.
+if (state.session?.device || (state.session?.server && state.session.role === 'resident' && !residentSession.get())) setSession(null);
 const TITLES = {
   camera: 'Report an issue', review: 'Review evidence', home: 'Choose an option', track: 'Track a problem',
-  login: 'Sign in', register: 'Create a demo profile', receipt: 'Receipt', issue: 'Case'
+  login: 'Sign in', register: 'Create a demo profile', receipt: 'Receipt', issue: 'Case', staff: 'Staff console',
+  notifications: 'Notifications', 'my-reports': 'Reports on This Device'
 };
 
 function fallbackPath(name) {
@@ -41,6 +56,9 @@ async function dispatch(path, parts, root) {
   if (head === 'login') return renderLogin(root, second === 'official' ? 'official' : 'resident');
   if (head === 'register') return renderLogin(root, 'resident', true);
   if (head === 'issue') return renderIssue(root, parts[1]);
+  if (head === 'my-reports') return renderMyReports(root);  // server mode only
+  if (head === 'staff') return renderStaff(root, parts[1]);  // server mode only; authorisation is enforced by the API
+  if (head === 'notifications') return renderServerNotifications(root, parts[1], parts[2]);  // server mode only
   if (head === 'official' || head === 'resident') {
     if (!second) return renderOverview(root);
     switch (second) {
@@ -66,7 +84,21 @@ async function render({focus = true} = {}) {
   const path = currentPath();
   const parts = path.split('/').filter(Boolean);
   const head = parts[0] || 'camera';
-  const role = viewer().role;
+  let role = viewer().role;
+
+  // Server mode: the workspaces must never show browser-local sample data in place of server complaints.
+  // The admin workspace needs a server staff session and the resident workspace a server resident
+  // session (both kept in memory only). A passerby never gets either just by opening a URL.
+  if (['official', 'resident', 'issue'].includes(head) && await reportMode() === 'backend') {
+    if (seq !== renderSeq) return;
+    const staff = staffSession.get();
+    const access = serverWorkspaceAccess(head, {staff, resident: residentSession.get(), session: state.session});
+    if (access.clear) setSession(null);
+    if (access.redirect) return navigate(access.redirect);
+    if (access.identity) { setSession(access.identity); role = access.identity.role; }
+    const target = serverModeRoute(parts, {staff: !!staff});
+    if (target) return navigate(target);
+  }
 
   // Role guards. Frontend checks are demonstration controls, not production authorisation.
   if (head === 'official' && role !== 'official') return navigate('login/official');
@@ -110,6 +142,7 @@ const CAMERA = {
   'switch-camera': () => cameraActions.switchCamera(),
   'refresh-location': () => cameraActions.locate(),
   'lookup-live': () => cameraActions.lookupLive(),
+  'lookup-street': () => cameraActions.lookupLive(),
   'gallery': () => cameraActions.openGallery(),
   'stop-recording': () => cameraActions.stopRecording(),
   'retake': () => cameraActions.retake(),
@@ -153,6 +186,38 @@ window.addEventListener('pagehide', () => runCleanups());
 window.addEventListener('unhandledrejection', e => {
   e.preventDefault();
   toast(e.reason?.message || 'Something went wrong. Your saved data is unchanged.', 'error');
+});
+
+// ---------- Web Push: notification clicks and service worker messages (server mode) ----------
+async function notificationClient() {
+  const config = await loadApiConfig();
+  return config.mode === 'backend' ? createApiClient({baseUrl: config.baseUrl}) : null;
+}
+
+function notificationOpened(n) {
+  notificationClient()
+    .then(http => openNotification(n, {http, staffToken: () => staffSession.get()?.token ?? null, go: navigate}))
+    .then(() => window.dispatchEvent(new CustomEvent('civiclens:notifications-changed')))
+    .catch(() => { /* best-effort: the notification stays unread in history */ });
+}
+
+// A click on a notification opened this window: the route is already in the hash.
+const launched = takeLaunchNotification();
+if (launched) notificationOpened(launched);
+
+navigator.serviceWorker?.addEventListener('message', e => {
+  const data = e.data && typeof e.data === 'object' ? e.data : {};
+  if (data.type === 'civiclens:notification-click') notificationOpened({id: data.id, audience: data.audience, url: data.url});
+  else if (data.type === 'civiclens:notification-received') window.dispatchEvent(new CustomEvent('civiclens:notifications-changed'));
+  else if (data.type === 'civiclens:subscription-changed') {
+    notificationClient().then(http => {
+      if (!http) return;
+      const citizen = inbox.get();
+      if (citizen) refreshPush({http, token: citizen, audience: 'citizen'}).catch(() => {});
+      const staff = staffSession.get()?.token;
+      if (staff) refreshPush({http, token: staff, audience: 'staff'}).catch(() => {});
+    });
+  }
 });
 
 render({focus: false});

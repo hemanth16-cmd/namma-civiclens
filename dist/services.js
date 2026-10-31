@@ -10,12 +10,16 @@ export const categories = [
   'Potholes', 'Road cracks and damage', 'Garbage accumulation', 'Illegal dumping',
   'Drainage or waterlogging', 'Broken streetlights', 'Damaged footpaths', 'Water leakage', 'Other civic issues'
 ];
-export const statuses = ['Submitted', 'Under Review', 'Assigned', 'In Progress', 'Marked Resolved'];
+export const statuses = ['Submitted', 'Under Review', 'Assigned', 'In Progress', 'Under Construction', 'Work Completed', 'Verification In Progress', 'On Hold', 'Marked Resolved'];
 export const verificationStates = ['Pending Verification', 'Citizen Confirmed', 'Disputed', 'Reinspection Required'];
 export const citizenResponses = ['Appears Resolved', 'Still Present', 'Cannot Confirm'];
 export const DEMO_PASSWORD = 'CivicDemo2026';
-export const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+// Citizen evidence limits. They match the backend upload limits (CIVICLENS_MAX_PHOTO_BYTES /
+// CIVICLENS_MAX_VIDEO_BYTES in backend/.env.example), so server mode never accepts a file the API refuses.
+export const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 export const MAX_PHOTO_BYTES = 25 * 1024 * 1024;
+// Admin video review keeps footage in this browser only and never uploads it, so it allows larger clips.
+export const MAX_REVIEW_VIDEO_BYTES = 200 * 1024 * 1024;
 
 // Initial, expert-set severity by category (0-1). Documented assumptions, not calibrated values.
 export const CATEGORY_SEVERITY = {

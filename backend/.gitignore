@@ -10,3 +10,4 @@ data/
 *.db-journal
 .env
 .env.*
+!.env.example

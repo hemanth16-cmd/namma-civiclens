@@ -31,8 +31,20 @@ from contextlib import closing
 from pathlib import Path
 
 from .evidence_storage import KEY_PATTERN, LocalEvidenceStorage
+from .db import DB_ERRORS, DatabaseConfigError, PostgresDatabase, database_from_env, selected_backend
 from .main import DEFAULT_EVIDENCE_DIR, EVIDENCE_DIR_ENV, PUBLIC_DIR
 from .store import resolve_db_path
+
+
+def _pg_read(db: PostgresDatabase, sql: str, params=()) -> list:
+    """One query in a READ ONLY transaction: the audit never changes PostgreSQL either."""
+    conn = db.connect()
+    try:
+        with conn.transaction():
+            conn.execute("SET TRANSACTION READ ONLY")
+            return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
 
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
@@ -41,15 +53,22 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
 
 
-def _referenced_keys(db_path: Path) -> dict[str, int]:
+def _referenced_keys(db_path) -> dict[str, int]:
+    if isinstance(db_path, PostgresDatabase):
+        return {r[0]: r[1] for r in _pg_read(db_path, "SELECT storage_key, byte_size FROM evidence WHERE storage_backend = 'local'")}
     with closing(_connect_ro(db_path)) as conn:
         has_table = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'evidence'").fetchone()
         if not has_table:
             return {}
-        return {key: size for key, size in conn.execute("SELECT storage_key, byte_size FROM evidence")}
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(evidence)")}
+        # Only rows stored on local disk belong in this folder; Supabase rows (schema 5+) are not in this folder.
+        where = " WHERE storage_backend = 'local'" if "storage_backend" in columns else ""
+        return {key: size for key, size in conn.execute(f"SELECT storage_key, byte_size FROM evidence{where}")}
 
 
-def _still_unreferenced(db_path: Path, key: str) -> bool:
+def _still_unreferenced(db_path, key: str) -> bool:
+    if isinstance(db_path, PostgresDatabase):
+        return not _pg_read(db_path, "SELECT 1 FROM evidence WHERE storage_key = ?", (key,))
     with closing(_connect_ro(db_path)) as conn:
         return conn.execute("SELECT 1 FROM evidence WHERE storage_key = ?", (key,)).fetchone() is None
 
@@ -97,7 +116,7 @@ def audit(db_path: Path, evidence_dir: Path, *, delete_orphans: bool = False, de
                 deleted_temp.append(path.name)
 
     return {
-        "database": str(db_path),
+        "database": db_path.describe() if isinstance(db_path, PostgresDatabase) else str(db_path),
         "evidenceDir": str(storage.root),
         "mode": "delete" if (delete_orphans or delete_stale_temp) else "dry-run",
         "recordedFiles": len(referenced),
@@ -142,7 +161,8 @@ def _print_human(report: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.evidence_audit", description="Audit private evidence storage against the database.")
-    parser.add_argument("--db", type=Path, default=None, help="SQLite database (default: CIVICLENS_DB_PATH or backend/data/civiclens.sqlite3)")
+    parser.add_argument("--db", type=Path, default=None, help="SQLite database (default: CIVICLENS_DB_PATH or backend/data/civiclens.sqlite3); "
+                        "with DATABASE_BACKEND=postgres, DATABASE_URL is read instead (read-only transactions)")
     parser.add_argument("--evidence-dir", type=Path, default=None, help="Evidence folder (default: CIVICLENS_EVIDENCE_DIR or backend/data/evidence)")
     parser.add_argument("--delete-orphans", action="store_true", help="DESTRUCTIVE: delete orphan files older than --min-age-minutes")
     parser.add_argument("--delete-stale-temp", action="store_true", help="DESTRUCTIVE: delete abandoned tmp/*.part files older than --min-age-minutes")
@@ -151,14 +171,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.min_age_minutes < 0:
         parser.error("--min-age-minutes must not be negative")
-    db_path = resolve_db_path(args.db)
     evidence_dir = Path(args.evidence_dir or os.environ.get(EVIDENCE_DIR_ENV) or DEFAULT_EVIDENCE_DIR)
+    source = None
     try:
-        report = audit(db_path, evidence_dir, delete_orphans=args.delete_orphans, delete_stale_temp=args.delete_stale_temp,
+        source = database_from_env() if selected_backend() == "postgres" else resolve_db_path(args.db)
+        report = audit(source, evidence_dir, delete_orphans=args.delete_orphans, delete_stale_temp=args.delete_stale_temp,
                        min_age_seconds=args.min_age_minutes * 60)
-    except (FileNotFoundError, sqlite3.Error) as exc:
-        print(f"Audit failed: {exc}", file=sys.stderr)
+    except (FileNotFoundError, DatabaseConfigError, *DB_ERRORS) as exc:
+        print(f"Audit failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if isinstance(source, PostgresDatabase):
+            source.close()
     print(json.dumps(report, indent=2)) if args.json else _print_human(report)
     return 1 if (report["missingFiles"] or report["sizeMismatches"]) else 0
 

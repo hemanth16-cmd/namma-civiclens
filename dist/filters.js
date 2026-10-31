@@ -1,9 +1,13 @@
 // One filter function for every list, table and map so results always agree.
+import {wardForRecord} from './ward-catalog.js';
 import {resolutionState} from './presentation.js';
 
-export function filterRecords(records, {q = '', status = '', category = '', verification = '', area = '', resolution = ''} = {}) {
+export function filterRecords(records, {q = '', status = '', category = '', verification = '', area = '', resolution = '', ward = '', zone = ''} = {}) {
   const needle = q.trim().toLowerCase();
   return records.filter(r => {
+    const geo = wardForRecord(r);
+    if (ward && (ward === 'unassigned' ? !!geo : String(geo?.wardNumber) !== ward)) return false;
+    if (zone && (zone === 'unassigned' ? !!geo : String(geo?.zoneNumber) !== zone)) return false;
     if (needle && !`${r.title} ${r.area} ${r.id} ${r.category}`.toLowerCase().includes(needle)) return false;
     if (status && r.status !== status) return false;
     if (category && r.category !== category) return false;

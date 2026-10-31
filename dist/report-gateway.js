@@ -10,6 +10,8 @@
 import {api, mediaDB} from './services.js';
 import {loadApiConfig} from './api-config.js';
 import {ApiError, createApiClient, toCreatePayload} from './api-client.js';
+import {enablePush, ensureInbox, inbox, pushState, requestPermissionNow} from './push-client.js';
+import {residentSession} from './resident-session.js';
 
 // A copy of server-mode evidence always stays in this browser until the user removes it; it is
 // never deleted automatically, even after a confirmed upload. A separate key prefix keeps it apart
@@ -39,6 +41,42 @@ export async function reportMode(options = {}) {
   return (await settings(options)).mode;
 }
 
+// Server reports submitted from this browser, so "My reports" can find them again (there are no
+// citizen accounts). Only the public ID, category and submission time are kept: never the claim
+// code, upload token, location or description.
+const REPORTS_KEY = 'ncl-server-reports-v1';
+const REPORT_ID = /^NCL-\d{4}-[A-Z0-9]{6}$/;
+const MAX_REMEMBERED = 200;
+
+function storageOf(options) {
+  try { return options.storage ?? globalThis.localStorage ?? null; } catch { return null; }
+}
+
+/** Newest first. Entries that are not well-formed are dropped. */
+export function rememberedServerReports(options = {}) {
+  let list = [];
+  try { list = JSON.parse(storageOf(options)?.getItem(REPORTS_KEY) || '[]'); } catch { list = []; }
+  if (!Array.isArray(list)) return [];
+  return list.filter(r => typeof r?.id === 'string' && REPORT_ID.test(r.id))
+    .map(r => ({id: r.id, category: String(r.category ?? '').slice(0, 80), submittedAt: typeof r.submittedAt === 'string' ? r.submittedAt : null}));
+}
+
+function writeRemembered(list, options) {
+  try { storageOf(options)?.setItem(REPORTS_KEY, JSON.stringify(list.slice(0, MAX_REMEMBERED))); return true; } catch { return false; }
+}
+
+/** Adds or refreshes one report. Returns false when browser storage is unavailable (the report itself is unaffected). */
+export function rememberServerReport({id, category = '', submittedAt = null}, options = {}) {
+  if (typeof id !== 'string' || !REPORT_ID.test(id)) return false;
+  const rest = rememberedServerReports(options).filter(r => r.id !== id);
+  return writeRemembered([{id, category: String(category).slice(0, 80), submittedAt: submittedAt ?? new Date().toISOString()}, ...rest], options);
+}
+
+/** Removes a report from this browser's list only. The complaint on the server is unchanged. */
+export function forgetServerReport(id, options = {}) {
+  return writeRemembered(rememberedServerReports(options).filter(r => r.id !== id), options);
+}
+
 /**
  * Saves a report. Local mode: unchanged api.create(). Backend mode: creates the complaint from
  * metadata, keeps a copy of the evidence in IndexedDB and prepares (but does not start) the upload,
@@ -54,7 +92,21 @@ export async function submitReport(data, blob, options = {}) {
   if (config.mode !== 'backend') throw new ApiError(config.problem, {code: 'config_invalid'});
   const payload = toCreatePayload(data);
   // options.idempotencyKey: one key per report, reused for every retry of that report (see capture.js).
-  const {uploadToken, uploadTokenExpiresAt, ...receipt} = await client(config, options).createComplaint(payload, {idempotencyKey: options.idempotencyKey});
+  // A signed-in resident's complaint is theirs (the server takes the owner from the session token).
+  const resident = options.residentSession === undefined ? residentSession.get() : options.residentSession;
+  let created;
+  try {
+    created = await client(config, options).createComplaint(payload, {idempotencyKey: options.idempotencyKey, residentToken: resident?.token});
+  } catch (err) {
+    if (resident && err instanceof ApiError && err.status === 401) {
+      residentSession.clear();
+      throw new ApiError('Your resident session has ended, so the report was not sent. Sign in again, or send it without an account.', {status: 401, code: 'resident_session_ended'});
+    }
+    throw err;
+  }
+  const {uploadToken, uploadTokenExpiresAt, ...receipt} = created;
+  receipt.inAccount = !!resident;
+  rememberServerReport({id: receipt.id, category: receipt.category, submittedAt: receipt.uploadedAt ?? receipt.created}, options);
   const hasFile = blob instanceof Blob && blob.size > 0;
   let evidenceKept = false;
   if (hasFile) {
@@ -70,8 +122,46 @@ export async function submitReport(data, blob, options = {}) {
     blob: hasFile ? blob : null, capturedAt: payload.capturedAt ?? null,
     state: hasFile && uploadToken ? 'pending' : 'unavailable', evidence: null, inFlight: null
   });
-  lastServerReceipt = {receipt, evidenceKept};
+  // A device that already turned notifications on follows its new reports automatically (before the
+  // evidence upload, so "evidence received" is notified too). Never blocks or fails the submission.
+  let following = false;
+  const inboxToken = inbox.get(options.env);
+  if (inboxToken && pushState('citizen', options.env) === 'enabled') {
+    try {
+      await client(config, options).followComplaint(inboxToken, receipt.id, receipt.claim);
+      following = true;
+    } catch {
+      following = false;
+    }
+  }
+  lastServerReceipt = {receipt, evidenceKept, following};
   return {mode: 'backend', id: receipt.id};
+}
+
+/**
+ * Follow a just-submitted report on this device and turn on push (called from a click on the
+ * receipt page; it asks for notification permission first). Uses the claim code held in memory.
+ * Resolves to {following, push: 'enabled'|'denied'|'dismissed'|'unsupported'|'unavailable', message}.
+ */
+export async function notifyAboutReport(id, options = {}) {
+  const ctx = uploads.get(id);
+  if (!ctx?.claim) return {following: false, message: 'The claim code is no longer available on this page. Follow the report from Notifications with its ID and claim code.'};
+  await requestPermissionNow(options.env);
+  const http = client(options.config ?? ctx.config, options);
+  let token;
+  try {
+    token = await ensureInbox(http, options.env);
+    await http.followComplaint(token, id, ctx.claim);
+  } catch (err) {
+    return {following: false, message: err instanceof ApiError ? err.message : 'Following this report failed.'};
+  }
+  try {
+    const result = await enablePush({http, token, audience: 'citizen', config: await http.getPushConfig(), env: options.env});
+    return {following: true, push: result.state, message: result.message ?? ''};
+  } catch (err) {
+    // e.g. the browser's push service could not be reached: history still records every update.
+    return {following: true, push: 'failed', message: err instanceof ApiError ? err.message : 'This browser could not register for push notifications.'};
+  }
 }
 
 /** Returns the in-memory server receipt for `id` once, then forgets it. */
@@ -142,6 +232,17 @@ export async function uploadEvidence(id, options = {}) {
  * Public tracking. Resolves to {mode, record, error}: record is null when nothing matches, and
  * error is a user-facing message when the lookup itself failed (backend or configuration).
  */
+/**
+ * Server mode only: the citizen's view of a resolution ("Appears Resolved", "Still Present" or
+ * "Cannot Confirm"), proven with the private claim code. The code is sent in the request body and
+ * never stored. Resolves to {verification, changed}; throws ApiError.
+ */
+export async function respondToResolution(id, claim, response, options = {}) {
+  const config = await settings(options);
+  if (config.mode !== 'backend') throw new ApiError('Responses to a resolution are sent to the CivicLens server, which is not configured.', {code: 'not_configured'});
+  return client(config, options).submitCitizenResponse(id, claim, response);
+}
+
 export async function trackPublic(id, options = {}) {
   const config = await settings(options);
   if (config.mode === 'local') return {mode: 'local', record: await api.publicRecord(id), error: null};
