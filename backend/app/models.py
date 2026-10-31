@@ -114,6 +114,8 @@ class PublicComplaint(BaseModel):
     updated: str
     timeline: list[TimelineEntry]
     verificationLog: list[VerificationEntry]
+    # Public ID of the complaint this report was merged into as a duplicate (schema 8), else null.
+    mergedInto: str | None = None
 
 
 class ReceiptGps(BaseModel):
@@ -200,16 +202,28 @@ class StaffGps(BaseModel):
     address: str | None
 
 
+class StaffListGps(BaseModel):
+    """Location for the staff map. Staff may see precise coordinates (as in StaffComplaint)."""
+    lat: float
+    lng: float
+    accuracy: float | None
+    sourceType: str
+
+
 class StaffComplaintSummary(BaseModel):
     id: str
+    title: str
     category: str
     area: str
     status: str
     verification: str
+    department: str
     created: str
     updated: str
     mediaType: str
     hasEvidence: bool
+    gps: StaffListGps
+    mergedInto: str | None = None
 
 
 class StaffComplaintList(BaseModel):
@@ -240,6 +254,7 @@ class StaffComplaint(BaseModel):
     timeline: list[TimelineEntry]
     verificationLog: list[VerificationEntry]
     evidence: StaffEvidenceSummary | None
+    mergedInto: str | None = None
 
 
 class EvidenceAccessEntry(BaseModel):
@@ -334,3 +349,379 @@ class UnreadCount(BaseModel):
 class ReadAllResult(BaseModel):
     updated: int
     unreadCount: int
+
+
+# ---------- Complaint management (schema 7) ----------
+# Inputs are strict (unknown fields refused, lengths capped). Outputs are explicit allowlists: the
+# public projection (PublicComplaint above) is unchanged and never includes any of these fields.
+
+Status = Literal["Submitted", "Under Review", "Assigned", "In Progress", "Marked Resolved"]
+WorkOrderStatus = Literal["Open", "In Progress", "Completed", "Cancelled"]
+DepartmentCode = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")]
+Username = Annotated[str, Field(pattern=r"^[a-z0-9._-]{3,64}$")]
+
+
+class TransitionIn(_Strict):
+    to: Status
+    expectedStatus: Status
+    explanation: Annotated[str, Field(max_length=500)] = ""
+
+
+class AssignmentIn(_Strict):
+    department: DepartmentCode
+    assignee: Username | None = None
+    reason: Annotated[str, Field(max_length=500)] = ""
+    expectedStatus: Status
+
+
+class NoteIn(_Strict):
+    body: Annotated[str, Field(min_length=1, max_length=2000)]
+
+
+class PublicUpdateIn(_Strict):
+    text: Annotated[str, Field(min_length=1, max_length=500)]
+    kind: Literal["progress", "department_response"] = "progress"
+
+
+class ReinspectionIn(_Strict):
+    note: Annotated[str, Field(min_length=1, max_length=500)]
+    reopen: bool = False
+    expectedStatus: Status
+
+
+class WorkOrderIn(_Strict):
+    team: Annotated[str, Field(min_length=1, max_length=120)]
+    description: Annotated[str, Field(max_length=1000)] = ""
+    dueAt: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")] | None = None  # a local (IST) date
+    assignee: Username | None = None
+
+    @field_validator("dueAt")
+    @classmethod
+    def _real_date(cls, v: str | None) -> str | None:
+        if v is not None:
+            datetime.strptime(v, "%Y-%m-%d")
+        return v
+
+
+class WorkOrderChangeIn(_Strict):
+    to: Literal["In Progress", "Completed", "Cancelled"]
+    expectedStatus: WorkOrderStatus
+    note: Annotated[str, Field(max_length=1000)] = ""
+
+
+class CitizenResponseIn(_Strict):
+    claim: Annotated[str, Field(min_length=1, max_length=100)]
+    response: Literal["Appears Resolved", "Still Present", "Cannot Confirm"]
+
+
+class CitizenResponseOut(BaseModel):
+    verification: str
+    changed: bool
+
+
+class DepartmentOut(BaseModel):
+    code: str
+    name: str
+    active: bool
+
+
+class StaffRef(BaseModel):
+    username: str
+    displayName: str
+
+
+class DepartmentRef(BaseModel):
+    code: str
+    name: str
+
+
+class AssignmentOut(BaseModel):
+    department: DepartmentRef | None = None
+    assignee: StaffRef | None = None
+
+
+class AssignmentHistoryEntry(BaseModel):
+    id: str
+    department: DepartmentRef
+    assignee: str | None
+    reason: str
+    by: str
+    at: str
+
+
+class WorkOrderEvidence(BaseModel):
+    phase: Literal["before", "after"]
+    evidenceId: str
+    role: str
+    contentType: str
+    byteSize: int
+    sha256: str
+    uploadedAt: str
+
+
+class WorkOrderEvent(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    action: str
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None
+    note: str
+    by: str
+    at: str
+
+
+class WorkOrderOut(BaseModel):
+    id: str
+    complaintId: str
+    department: str | None
+    team: str
+    assignee: str | None
+    description: str
+    dueAt: str | None
+    status: str
+    startedAt: str | None
+    completedAt: str | None
+    completionNote: str
+    createdBy: str
+    createdAt: str
+    updatedAt: str
+    overdue: bool
+    evidence: list[WorkOrderEvidence]
+    history: list[WorkOrderEvent]
+
+
+class WorkOrderList(BaseModel):
+    items: list[WorkOrderOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class StaffNoteOut(BaseModel):
+    id: str
+    body: str
+    createdAt: str
+    author: StaffRef
+
+
+class AllowedAction(BaseModel):
+    action: str
+    label: str
+    to: str | None = None
+    needsExplanation: bool = False
+
+
+class MergeOut(BaseModel):
+    id: str
+    duplicate: str
+    canonical: str
+    reason: str
+    score: float | None
+    label: str | None
+    by: str
+    at: str
+    revertedAt: str | None
+    revertedBy: str | None
+    revertReason: str | None
+
+
+class StaffCase(StaffComplaint):
+    """StaffComplaint plus management data. Internal notes and staff names appear only here."""
+    version: int
+    merges: list[MergeOut] = []
+    assignment: AssignmentOut
+    assignmentHistory: list[AssignmentHistoryEntry]
+    workOrders: list[WorkOrderOut]
+    notes: list[StaffNoteOut]
+    allowedActions: list[AllowedAction]
+
+
+class AuditEntry(BaseModel):
+    id: str
+    actorType: str
+    actor: str | None
+    actorName: str | None
+    action: str
+    details: dict
+    at: str
+
+
+class RepairEvidenceReceipt(BaseModel):
+    evidenceId: str
+    mediaType: str
+    contentType: str
+    byteSize: int
+    sha256: str
+    capturedAt: str | None
+    uploadedAt: str
+
+
+# ---------- Resident accounts (resident_auth.py, residents_api.py) ----------
+
+class ResidentRegister(_Strict):
+    email: Annotated[str, Field(min_length=3, max_length=254)]
+    password: Annotated[str, Field(min_length=1, max_length=256)]
+    displayName: Annotated[str, Field(min_length=1, max_length=80)]
+
+
+class ResidentSignIn(_Strict):
+    email: Annotated[str, Field(min_length=1, max_length=254)]
+    password: Annotated[str, Field(min_length=1, max_length=256)]
+
+
+class ResidentIdentity(BaseModel):
+    """The signed-in resident's own profile. Never returned to anyone else."""
+    residentId: str
+    email: str
+    displayName: str
+    demo: bool = False
+    createdAt: str | None = None
+
+
+class ResidentSessionOut(BaseModel):
+    token: str
+    expiresAt: str
+    resident: ResidentIdentity
+
+
+class ResidentProfileUpdate(_Strict):
+    displayName: Annotated[str, Field(min_length=1, max_length=80)]
+
+
+class OwnerGps(BaseModel):
+    lat: float
+    lng: float
+    accuracy: float | None = None
+    sourceType: str | None = None
+    address: str | None = None
+
+
+class ResidentComplaint(BaseModel):
+    """A complaint as its owning resident sees it: the public fields plus the resident's own description
+    and location. Never the claim code or hash, upload tokens, staff notes, assignees or storage keys."""
+    id: str
+    title: str
+    category: str
+    area: str
+    description: str
+    mediaType: str
+    shareEvidence: bool
+    hasEvidence: bool
+    gps: OwnerGps
+    created: str
+    updated: str
+    status: str
+    verification: str
+    department: str
+    ownedVia: Literal["submitted", "claimed"]
+    ownedAt: str | None
+    timeline: list[TimelineEntry]
+    verificationLog: list[VerificationEntry]
+
+
+class ResidentComplaintList(BaseModel):
+    items: list[ResidentComplaint]
+    total: int
+    limit: int
+    offset: int
+
+
+class ClaimRequest(_Strict):
+    id: Annotated[str, Field(min_length=1, max_length=40)]
+    claim: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class ClaimResult(BaseModel):
+    outcome: Literal["claimed", "already_yours"]
+    complaint: ResidentComplaint
+
+
+class ResidentPreferences(_Strict):
+    """Preferences the resident workspace already offers (Preferences screen). Stored per account."""
+    updates: bool = True
+    verification: bool = True
+    hotspots: bool = False
+
+
+# ---------- Duplicate detection (schema 8) ----------
+
+class DuplicateFactor(BaseModel):
+    name: str
+    value: float | None
+    weight: float
+    contribution: float
+    detail: str
+
+
+class DuplicateCandidate(BaseModel):
+    id: str
+    category: str
+    area: str
+    created: str
+    status: str
+    verification: str
+    score: float
+    label: Literal["likely_duplicate", "possible_duplicate", "recurrence", "nearby_separate"]
+    distanceM: float
+    factors: list[DuplicateFactor]
+    reasons: list[str]
+    caution: str | None
+
+
+class DuplicateCandidates(BaseModel):
+    complaintId: str
+    radiusM: float
+    days: int
+    candidates: list[DuplicateCandidate]
+    note: str | None
+
+
+class MergeIn(_Strict):
+    canonical: Annotated[str, Field(pattern=r"^NCL-\d{4}-[A-Z0-9]{6}$")]
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class ReasonIn(_Strict):
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+# ---------- Public community list ----------
+
+class PublicMapPoint(BaseModel):
+    """Approximate public position (geo.public_map_point): rounded to about 110 m, never the exact GPS fix."""
+    lat: float
+    lng: float
+    precision: Literal["approx-110m"]
+
+
+class PublicComplaintSummary(BaseModel):
+    """One row of the community list: the public-tracking allowlist without the timeline, plus an
+    approximate map point for the community and neighbourhood maps."""
+    id: str
+    title: str
+    category: str
+    area: str
+    status: str
+    verification: str
+    department: str
+    created: str
+    updated: str
+    mapPoint: PublicMapPoint | None = None
+
+
+class Facet(BaseModel):
+    name: str
+    count: int
+
+
+class CommunityFacets(BaseModel):
+    categories: list[Facet]
+    areas: list[Facet]
+
+
+class PublicComplaintList(BaseModel):
+    items: list[PublicComplaintSummary]
+    total: int
+    limit: int
+    offset: int
+    facets: CommunityFacets

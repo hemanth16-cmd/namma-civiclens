@@ -14,11 +14,11 @@ export function pointsFor(records) {
   const points = [];
   const hidden = [];
   for (const r of records) {
-    if (r.gps && Number.isFinite(r.gps.lat) && Number.isFinite(r.gps.lng)) {
-      points.push({r, lat: r.gps.lat, lng: r.gps.lng, approx: false});
+    if (r.gps && Number.isFinite(r.gps.lat) && Number.isFinite(r.gps.lng) && Math.abs(r.gps.lat) <= 90 && Math.abs(r.gps.lng) <= 180) {
+      points.push({r, lat: r.gps.lat, lng: r.gps.lng, approx: r.gps.approximate === true ? 'public' : false});
     } else if (r.sample && SAMPLE_POSITIONS[r.id]) {
       const [lat, lng] = SAMPLE_POSITIONS[r.id];
-      points.push({r, lat, lng, approx: true});
+      points.push({r, lat, lng, approx: 'sample'});
     } else {
       hidden.push(r);
     }
@@ -38,7 +38,7 @@ function popupHTML(p) {
   return `<div class="map-popup">
     <p class="eyebrow">${esc(p.r.category)}</p>
     <h3>${esc(p.r.title)}</h3>
-    <p>${esc(p.r.area)}${p.approx ? ' · approximate neighbourhood position (sample)' : ''}</p>
+    <p>${esc(p.r.area)}${p.approx === 'public' ? ' · approximate position (about 110 m)' : p.approx ? ' · approximate neighbourhood position (sample)' : ''}</p>
     <p class="popup-state"><span class="state-dot ${s.className}" aria-hidden="true"></span>${esc(s.label)} · ${esc(p.r.status)}</p>
     <p class="micro">Verification: ${esc(p.r.verification)}</p>
     <a class="btn btn-primary btn-sm" href="#/issue/${esc(p.r.id)}">Open case</a>
@@ -69,7 +69,7 @@ export async function mountCityMap(container, {records = [], compact = false, on
   container.innerHTML = `<div class="map-canvas" role="application" aria-label="Map of civic reports. Use the list for keyboard access."></div>`;
   const canvas = container.querySelector('.map-canvas');
   const hiddenNote = hidden.length ? ` ${hidden.length} ${hidden.length === 1 ? 'report is' : 'reports are'} not plotted because its location is private.` : '';
-  const attributionNote = `${MAP_ATTRIBUTION}. Sample incidents appear at approximate neighbourhood positions.${hiddenNote}`;
+  const attributionNote = `${MAP_ATTRIBUTION}.${points.some(p => p.approx === 'sample') ? ' Sample incidents appear at approximate neighbourhood positions.' : ''}${points.some(p => p.approx === 'public') ? ' Public reports appear at approximate positions (about 110 m) to protect reporters.' : ''}${hiddenNote}`;
 
   let impl = null;
   let visibleIds = null;
@@ -172,14 +172,17 @@ function mountVector(canvas, points, {compact, status, onFail}) {
     adding = true;
     try {
       await ensureImages();
-      if (map.getSource('reports')) map.removeSource('reports');
-      map.addSource('reports', {type: 'geojson', data: features(), cluster: true, clusterMaxZoom: 14, clusterRadius: 45});
-      map.addLayer({id: 'report-clusters', type: 'circle', source: 'reports', filter: ['has', 'point_count'],
+      // Both 'load' and 'style.load' can run this for the same style. A source that is still in use by
+      // its layers cannot be removed, so an existing one is updated in place and missing layers are added.
+      const source = map.getSource('reports');
+      if (source) source.setData(features());
+      else map.addSource('reports', {type: 'geojson', data: features(), cluster: true, clusterMaxZoom: 14, clusterRadius: 45});
+      if (!map.getLayer('report-clusters')) map.addLayer({id: 'report-clusters', type: 'circle', source: 'reports', filter: ['has', 'point_count'],
         paint: {'circle-color': '#18324A', 'circle-radius': ['step', ['get', 'point_count'], 18, 5, 22, 12, 28], 'circle-stroke-color': '#FFFFFF', 'circle-stroke-width': 3}});
-      map.addLayer({id: 'cluster-count', type: 'symbol', source: 'reports', filter: ['has', 'point_count'],
+      if (!map.getLayer('cluster-count')) map.addLayer({id: 'cluster-count', type: 'symbol', source: 'reports', filter: ['has', 'point_count'],
         layout: {'text-field': ['get', 'point_count_abbreviated'], 'text-size': 13, 'text-font': ['Noto Sans Regular'], 'text-allow-overlap': true},
         paint: {'text-color': '#FFFFFF'}});
-      map.addLayer({id: 'report-points', type: 'symbol', source: 'reports', filter: ['!', ['has', 'point_count']],
+      if (!map.getLayer('report-points')) map.addLayer({id: 'report-points', type: 'symbol', source: 'reports', filter: ['!', ['has', 'point_count']],
         layout: {'icon-image': ['get', 'iconKey'], 'icon-size': compact ? 0.72 : 0.8, 'icon-allow-overlap': true}});
       loaded = true;
       clearTimeout(loadTimer);

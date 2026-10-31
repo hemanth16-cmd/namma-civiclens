@@ -775,6 +775,80 @@ dialog.dialog::backdrop { background: #0F2236B3; }
   .btn:not(:disabled):hover { transform: none; }
 }
 
+/* ---------- Version 5.2: logo, automatic address, photo stamp, saving ---------- */
+.logo-mark { background: transparent; overflow: hidden; box-shadow: 0 0 0 1px #18324A14; }
+.logo-mark img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.boot-splash { min-height: 100vh; min-height: 100dvh; display: grid; place-content: center; justify-items: center; gap: 14px; background: var(--paper); color: var(--navy); font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
+.boot-splash img { width: 72px; height: 72px; object-fit: contain; border-radius: 18px; box-shadow: 0 8px 26px #18324a26; animation: boot-in .5s ease-out both; }
+.boot-splash p { margin: 0; }
+@keyframes boot-in { from { opacity: 0; transform: scale(.92); } }
+
+.chip-brand { padding-left: 5px; }
+.chip-logo { width: 22px; height: 22px; border-radius: 6px; object-fit: contain; flex: 0 0 auto; box-shadow: 0 0 0 1px #FFFFFF33; }
+
+/* Viewfinder card: the same details the photo stamp will carry. */
+.viewfinder-bottom { align-items: flex-end; }
+.vf-card { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 12px 8px 8px; border-radius: 12px; background: #0F2236D9; box-shadow: 0 2px 12px #0F223659; border-left: 3px solid var(--coral); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.vf-logo { width: 30px; height: 30px; flex: 0 0 auto; object-fit: contain; border-radius: 8px; }
+.vf-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.vf-location { display: inline-flex; gap: 7px; align-items: center; min-width: 0; font-variant-numeric: tabular-nums; }
+.vf-location > span:last-child, .vf-address { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vf-address { font-size: 12px; color: #DCE3EA; font-weight: 500; animation: fade-up .35s ease-out; }
+.vf-address[data-state="resolving"] { color: #B9C6D3; font-style: italic; }
+.vf-address[data-state="failed"], .vf-address[data-state="offline"] { color: #F7B3A5; }
+@keyframes fade-up { from { opacity: 0; transform: translateY(3px); } }
+
+/* Location card: phase line and automatic address card. */
+.loc-phase { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 6px; font-size: 13px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; color: var(--slate); }
+.phase-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--neutral); }
+.loc-phase[data-phase="detecting"] .phase-dot { background: var(--navy-2); animation: pulse 1.2s ease-in-out infinite; }
+.loc-phase[data-phase="located"] { color: var(--green-ink); }
+.loc-phase[data-phase="located"] .phase-dot { background: var(--green); box-shadow: 0 0 0 3px #21835B2E; }
+.loc-phase[data-phase="attention"] { color: var(--coral-ink); }
+.loc-phase[data-phase="attention"] .phase-dot { background: var(--coral); }
+.address-card { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: var(--radius); background: var(--surface-quiet); border: 1px solid var(--line); transition: border-color .2s ease, background-color .2s ease; }
+.address-card[data-state="resolved"] { background: var(--white); border-color: var(--line-strong); box-shadow: var(--shadow-sm); }
+.address-card[data-state="failed"], .address-card[data-state="offline"] { border-color: var(--coral-line); background: var(--coral-tint); }
+.address-card-main { display: flex; gap: 12px; align-items: flex-start; }
+.address-icon { width: 36px; height: 36px; flex: 0 0 auto; border-radius: 10px; display: grid; place-items: center; background: var(--navy); color: var(--white); }
+.address-icon > * { grid-area: 1 / 1; }
+.address-icon .icon { width: 18px; height: 18px; }
+.address-card .spinner-sm { display: none; }
+.address-card[data-state="resolving"] .spinner-sm { display: block; }
+.address-card[data-state="resolving"] .address-icon .icon { display: none; }
+.address-card[data-state="failed"] .address-icon, .address-card[data-state="offline"] .address-icon { background: var(--coral-ink); }
+.address-card-text { min-width: 0; }
+.address-kicker { margin: 0 0 2px; font-size: 12px; font-weight: 600; color: var(--slate); text-transform: uppercase; letter-spacing: .06em; }
+.address-text { margin: 0; font-size: 15px; font-weight: 600; color: var(--navy); line-height: 1.45; overflow-wrap: anywhere; }
+.address-card[data-state="resolved"] .address-text { animation: fade-up .35s ease-out; }
+.address-card[data-state="resolving"] .address-text, .address-card[data-state="idle"] .address-text { color: var(--slate); font-weight: 500; }
+.address-card .btn { align-self: flex-start; }
+.spinner-sm { width: 16px; height: 16px; border-width: 2px; }
+
+.shutter.is-capturing .shutter-core { transform: scale(.82); background: var(--navy-2); }
+.shutter.is-capturing .shutter-ring { animation: pulse .8s ease-in-out infinite; }
+
+/* Review: stamped preview. */
+.review-media.is-stamped img { display: block; width: 100%; height: auto; }
+.review-media.is-stamped .media-geo { top: 12px; bottom: auto; }
+.stamp-progress { position: absolute; top: 12px; right: 12px; display: inline-flex; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 999px; background: #0F2236E0; color: var(--white); font-size: 12px; font-weight: 600; }
+.stamp-note { margin: -4px 0 0; }
+.stamp-options { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-quiet); }
+.stamp-options legend { padding: 0 4px; }
+
+/* Receipt: save outcome. */
+.save-status { display: flex; gap: 8px; align-items: flex-start; margin: 10px 0 0; padding: 10px 12px; border-radius: var(--radius); font-size: 14px; font-weight: 500; line-height: 1.5; background: var(--surface-quiet); color: var(--navy); }
+.save-status:empty { display: none; }
+.save-status .mini-icon { width: 16px; height: 16px; margin-top: 3px; flex: 0 0 auto; }
+.save-status[data-tone="success"] { background: var(--green-tint); color: var(--green-ink); }
+.save-status[data-tone="warn"] { background: var(--amber-tint); color: var(--amber-ink); }
+.save-status[data-tone="error"] { background: var(--red-tint); color: var(--red-ink); }
+
+@media (max-width: 640px) {
+  .vf-card { max-width: 100%; flex: 1 1 auto; }
+  .vf-logo { width: 26px; height: 26px; }
+}
+
 /* ---------- Notifications inbox (server mode) ---------- */
 .spacer { flex: 1 1 auto; }
 .plain-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }

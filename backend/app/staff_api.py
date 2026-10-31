@@ -5,21 +5,22 @@ streamed only through GET /staff/complaints/{id}/evidence after the session is c
 view is written to evidence_access_log; there are no public, permanent or signed links.
 """
 
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from .auth import current_staff, normalise_username, session_ttl, sign_in
 from .complaints import NOT_FOUND, PUBLIC_ID_PATTERN
 from .errors import ApiProblem
-from .models import EvidenceAccessEntry, StaffComplaint, StaffComplaintList, StaffIdentity, StaffSessionOut, StaffSignIn
+from .models import EvidenceAccessEntry, StaffCase, StaffComplaintList, StaffIdentity, StaffSessionOut, StaffSignIn
+from .evidence_access import open_and_stream
 from .ratelimit import client_ip, enforce
-from .store import STAFF_LIST_MAX, StoreError
+from .store import STAFF_LIST_MAX
 
 router = APIRouter(prefix="/staff", tags=["staff"])
-CHUNK = 64 * 1024
-EXTENSIONS = {"image/jpeg": "jpg", "video/webm": "webm", "video/mp4": "mp4"}
-
-
+logger = logging.getLogger("civiclens.staff")
+# 404 evidence_unavailable messages: the record exists but this server cannot serve its file.
 @router.post("/sessions", response_model=StaffSessionOut)
 def create_session(payload: StaffSignIn, request: Request, response: Response) -> dict:
     """Sign in. Rate-limited per IP and per username before the password check."""
@@ -43,73 +44,62 @@ def who_am_i(staff: dict = Depends(current_staff)) -> dict:
     return staff
 
 
-def _summary(record: dict) -> dict:
-    return {k: record[k] for k in ("id", "category", "area", "status", "verification", "created", "updated", "mediaType")} | {"hasEvidence": record["evidence"] is not None}
-
-
 @router.get("/complaints", response_model=StaffComplaintList)
 def list_complaints(request: Request, response: Response, staff: dict = Depends(current_staff),
                     limit: int = Query(50, ge=1, le=STAFF_LIST_MAX), offset: int = Query(0, ge=0)) -> dict:
-    records, total = request.app.state.store.list_complaints(limit, offset)
+    records, total = request.app.state.store.list_complaints(limit, offset, staff_pk=staff["pk"])
     response.headers["Cache-Control"] = "no-store"
-    return {"items": [_summary(r) for r in records], "total": total, "limit": limit, "offset": offset}
+    return {"items": records, "total": total, "limit": limit, "offset": offset}
 
 
-def _record_or_404(request: Request, public_id: str) -> dict:
+def _record_or_404(request: Request, public_id: str, staff: dict) -> dict:
+    """The staff record, or 404. Officials outside the complaint's departments get 403 (lifecycle.in_scope)."""
     if not PUBLIC_ID_PATTERN.fullmatch(public_id):
         raise ApiProblem(404, "not_found", NOT_FOUND)
-    record = request.app.state.store.get_staff_complaint(public_id)
+    store = request.app.state.store
+    record = store.get_staff_complaint(public_id)
     if record is None:
         raise ApiProblem(404, "not_found", NOT_FOUND)
+    store.require_case_scope(public_id, staff["pk"])
     return record
 
 
-@router.get("/complaints/{public_id}", response_model=StaffComplaint)
+@router.get("/complaints/{public_id}", response_model=StaffCase)
 def get_complaint(public_id: str, request: Request, response: Response, staff: dict = Depends(current_staff)) -> dict:
+    """The staff view plus management data (assignment, work orders, internal notes, allowed actions)."""
+    if not PUBLIC_ID_PATTERN.fullmatch(public_id):
+        raise ApiProblem(404, "not_found", NOT_FOUND)
+    record = request.app.state.store.case_detail(public_id, staff["pk"])
+    if record is None:
+        raise ApiProblem(404, "not_found", NOT_FOUND)
     response.headers["Cache-Control"] = "no-store"
-    return _record_or_404(request, public_id)
+    return record
 
 
 @router.get("/complaints/{public_id}/evidence")
 def view_evidence(public_id: str, request: Request, background: BackgroundTasks, staff: dict = Depends(current_staff)) -> StreamingResponse:
     """Stream the original evidence to signed-in staff. The view is logged before any byte is sent;
     if logging fails, nothing is sent."""
-    store = request.app.state.store
-    evidence = _record_or_404(request, public_id)["evidence"]
+    evidence = _record_or_404(request, public_id, staff)["evidence"]
     if evidence is None:
         raise ApiProblem(404, "evidence_not_found", "No evidence has been uploaded for this complaint.")
-    # Read from the backend that stored this file (local evidence stays readable after switching to Supabase Storage).
-    storage = request.app.state.evidence_storages.get(evidence["storageBackend"])
-    if storage is None:
-        raise StoreError(f"Evidence is in the {evidence['storageBackend']!r} backend, which is not configured")
-    handle = storage.open_read(evidence["storageKey"])  # StoreError → 503
-    try:
-        store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
-    except BaseException:
-        handle.close()
-        raise
+    streamed = stream_evidence(request, evidence, staff, f"{public_id}-evidence", background)
+    background.add_task(request.app.state.notifier.evidence_viewed, public_id)  # only once the view is logged; followers are told once
+    return streamed
 
-    def chunks():
-        try:
-            while data := handle.read(CHUNK):
-                yield data
-        finally:
-            handle.close()
 
-    background.add_task(request.app.state.notifier.evidence_viewed, public_id)  # followers are told once
-    filename = f"{public_id}-evidence.{EXTENSIONS.get(evidence['contentType'], 'bin')}"
-    return StreamingResponse(chunks(), media_type=evidence["contentType"], headers={
-        "Content-Length": str(evidence["byteSize"]),
-        "Content-Disposition": f'inline; filename="{filename}"',
-        "Cache-Control": "no-store, private",
-        "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; sandbox",
-    })
+def stream_evidence(request: Request, evidence: dict, staff: dict, basename: str, background: BackgroundTasks | None = None) -> StreamingResponse:
+    """Stream one evidence file to signed-in staff through the shared retrieval service. The view is
+    written to evidence_access_log before any byte is sent; if logging fails, nothing is sent.
+    `evidence` needs pk, storageBackend, storageKey, contentType, byteSize."""
+    def log_view() -> None:
+        request.app.state.store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
+    return open_and_stream(request, evidence, basename, log_view, background)
 
 
 @router.get("/complaints/{public_id}/evidence/access", response_model=list[EvidenceAccessEntry])
 def evidence_access_log(public_id: str, request: Request, response: Response, staff: dict = Depends(current_staff)) -> list[dict]:
-    evidence = _record_or_404(request, public_id)["evidence"]
+    evidence = _record_or_404(request, public_id, staff)["evidence"]
     response.headers["Cache-Control"] = "no-store"
     if evidence is None:
         return []

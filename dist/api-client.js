@@ -4,7 +4,7 @@
 // network failure or timeout the server may already have saved the report.
 
 const DEFAULT_TIMEOUT_MS = 10000;
-const DEFAULT_UPLOAD_TIMEOUT_MS = 180000;  // a 200 MB video on a slow connection needs minutes
+const DEFAULT_UPLOAD_TIMEOUT_MS = 180000;  // a 50 MB video on a slow connection needs minutes
 const EVIDENCE_STATUSES = ['uploaded', 'already_uploaded'];
 const PUBLIC_ID = /^NCL-\d{4}-[A-Z0-9]{6}$/;
 const SOURCE_TYPES = ['gps', 'exif', 'manual'];
@@ -104,8 +104,11 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
      * With an idempotency key, a retry of the same report returns the same complaint (replayed: true)
      * with newly issued credentials instead of creating a duplicate.
      */
-    async createComplaint(payload, {idempotencyKey} = {}) {
-      return toReceipt(await request('POST', '/complaints', payload, {headers: idempotencyKey ? {'Idempotency-Key': idempotencyKey} : {}}));
+    async createComplaint(payload, {idempotencyKey, residentToken} = {}) {
+      // A signed-in resident's token makes the complaint theirs (the server takes the owner from the
+      // session). Without it the report is anonymous: no account is needed to report.
+      const headers = {...(idempotencyKey ? {'Idempotency-Key': idempotencyKey} : {}), ...(residentToken ? bearer(residentToken) : {})};
+      return toReceipt(await request('POST', '/complaints', payload, {headers}));
     },
 
     /** GET /complaints/{id}. Resolves to the public projection, or null when the server has no such ID. */
@@ -137,6 +140,38 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return {uploadToken: data.uploadToken, uploadTokenExpiresAt: data.uploadTokenExpiresAt ?? null};
     },
 
+    // ---------- Resident accounts (server mode). The token is passed in; it is never stored here. ----------
+
+    /** POST /residents (register) or POST /residents/sessions (sign in). Resolves to {token, expiresAt, resident}. */
+    async residentRegister(email, password, displayName) {
+      return toResidentSession(await request('POST', '/residents', {email, password, displayName}));
+    },
+    async residentSignIn(email, password) {
+      return toResidentSession(await request('POST', '/residents/sessions', {email, password}));
+    },
+    async residentSignOut(token) {
+      await request('DELETE', '/residents/sessions/current', undefined, {headers: bearer(token)});
+    },
+    async residentMe(token) {
+      return toResident(await request('GET', '/residents/me', undefined, {headers: bearer(token)}));
+    },
+    async listResidentComplaints(token, {limit = 100, offset = 0} = {}) {
+      const d = await request('GET', `/residents/me/complaints?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`, undefined, {headers: bearer(token)});
+      if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a complaint list this app could not read.', {code: 'malformed_response'});
+      return {items: d.items.map(toResidentComplaint), total: Number(d.total) || 0};
+    },
+    /** POST /residents/me/claims. The claim code travels in the JSON body only. */
+    async claimComplaint(token, id, claim) {
+      const d = await request('POST', '/residents/me/claims', {id, claim}, {headers: bearer(token)});
+      return {outcome: d.outcome, complaint: toResidentComplaint(d.complaint)};
+    },
+    async getResidentPreferences(token) {
+      return toResidentPrefs(await request('GET', '/residents/me/preferences', undefined, {headers: bearer(token)}));
+    },
+    async putResidentPreferences(token, prefs) {
+      return toResidentPrefs(await request('PUT', '/residents/me/preferences', toResidentPrefs(prefs), {headers: bearer(token)}));
+    },
+
     // ---------- Staff console (server mode). The session token is passed in; it is never stored here. ----------
 
     /** POST /staff/sessions. Resolves to {token, expiresAt, staff}. */
@@ -161,7 +196,8 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
         items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
           id: i.id, category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
           verification: String(i.verification ?? ''), created: i.created ?? null, updated: i.updated ?? null,
-          mediaType: i.mediaType === 'video' ? 'video' : 'photo', hasEvidence: i.hasEvidence === true
+          mediaType: i.mediaType === 'video' ? 'video' : 'photo', hasEvidence: i.hasEvidence === true,
+          title: String(i.title ?? ''), department: String(i.department ?? ''), gps: toListGps(i.gps), mergedInto: publicIdOrNull(i.mergedInto)
         }))
       };
     },
@@ -172,11 +208,160 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
 
     /** GET /staff/complaints/{id}/evidence. Resolves to a Blob of an allowed media type. Each call is logged by the server. */
     async fetchStaffEvidence(token, id) {
-      const response = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/evidence`, undefined, {headers: staffAuth(token), timeout: uploadTimeoutMs, raw: true});
+      return evidenceBlob(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/evidence`, undefined, {headers: staffAuth(token), timeout: uploadTimeoutMs, raw: true}));
+    },
+
+    // ---------- Owner evidence: the same server retrieval as staff, authorised by ownership instead. ----------
+
+    /** POST /complaints/{id}/evidence/view. The claim code travels in the JSON body only; the file comes back as a Blob. */
+    async fetchOwnEvidenceWithClaim(id, claim) {
+      return evidenceBlob(await request('POST', `/complaints/${encodeURIComponent(id)}/evidence/view`, {claim}, {timeout: uploadTimeoutMs, raw: true}));
+    },
+    /** GET /residents/me/complaints/{id}/evidence, for a complaint in the signed-in resident's account. */
+    async fetchResidentEvidence(token, id) {
+      return evidenceBlob(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}/evidence`, undefined, {headers: bearer(token), timeout: uploadTimeoutMs, raw: true}));
+    },
+    /** GET /residents/me/complaints/{id}: one complaint of the signed-in resident, or null if it is not theirs. */
+    async getResidentComplaint(token, id) {
+      try {
+        return toResidentComplaint(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}`, undefined, {headers: bearer(token)}));
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+
+    // ---------- Complaint management (staff). Every call returns the updated staff case from the server. ----------
+
+    /** POST /staff/complaints/{id}/transitions. `expectedStatus` is the status shown on screen (409 if it changed). */
+    async transitionComplaint(token, id, {to, expectedStatus, explanation = ''}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/transitions`, {to, expectedStatus, explanation}, {headers: staffAuth(token)}));
+    },
+
+    async assignComplaint(token, id, {department, assignee = null, reason = '', expectedStatus}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/assignment`, {department, assignee: assignee || null, reason, expectedStatus}, {headers: staffAuth(token)}));
+    },
+
+    /** Internal note: visible to staff only, never in public tracking. */
+    async addStaffNote(token, id, body) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/notes`, {body}, {headers: staffAuth(token)}));
+    },
+
+    /** Public update: appears in the public timeline. kind is "progress" or "department_response". */
+    async addPublicUpdate(token, id, {text, kind = 'progress'}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/updates`, {text, kind}, {headers: staffAuth(token)}));
+    },
+
+    async requestReinspection(token, id, {note, reopen = false, expectedStatus}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/reinspections`, {note, reopen: reopen === true, expectedStatus}, {headers: staffAuth(token)}));
+    },
+
+    async createWorkOrder(token, id, {team, description = '', dueAt = null, assignee = null}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/work-orders`, {team, description, dueAt: dueAt || null, assignee: assignee || null}, {headers: staffAuth(token)}));
+    },
+
+    /** Start ("In Progress"), complete ("Completed", needs a note) or cancel ("Cancelled", supervisors) a work order. */
+    async changeWorkOrder(token, workOrderId, {to, expectedStatus, note = ''}) {
+      return toStaffComplaint(await request('POST', `/staff/work-orders/${encodeURIComponent(workOrderId)}/transitions`, {to, expectedStatus, note}, {headers: staffAuth(token)}));
+    },
+
+    /** After-repair JPEG for a work order (multipart). Resolves to the evidence receipt. */
+    async uploadRepairEvidence(token, workOrderId, blob) {
+      const form = new FormData();
+      form.append('file', blob, 'repair.jpg');
+      const d = await request('POST', `/staff/work-orders/${encodeURIComponent(workOrderId)}/evidence`, form, {headers: staffAuth(token), timeout: uploadTimeoutMs});
+      if (typeof d.evidenceId !== 'string') throw new ApiError('The CivicLens server sent an upload result this app could not read.', {code: 'malformed_response'});
+      return {evidenceId: d.evidenceId, byteSize: Number(d.byteSize) || 0, sha256: String(d.sha256 ?? ''), uploadedAt: d.uploadedAt ?? null};
+    },
+
+    /** GET a before/after file of a work order as a Blob. Each view is logged by the server. */
+    async fetchWorkOrderEvidence(token, workOrderId, evidenceId) {
+      const response = await request('GET', `/staff/work-orders/${encodeURIComponent(workOrderId)}/evidence/${encodeURIComponent(evidenceId)}`, undefined, {headers: staffAuth(token), timeout: uploadTimeoutMs, raw: true});
       const type = String(response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
       if (!EVIDENCE_TYPES.includes(type)) throw new ApiError('The CivicLens server sent evidence of an unexpected type, so it is not shown.', {code: 'malformed_response'});
-      const bytes = await response.arrayBuffer();
-      return new Blob([bytes], {type});
+      return new Blob([await response.arrayBuffer()], {type});
+    },
+
+    async listWorkOrders(token, {status = '', overdue = false, department = '', limit = 50, offset = 0} = {}) {
+      const q = new URLSearchParams({limit: String(limit), offset: String(offset)});
+      if (status) q.set('status', status);
+      if (overdue) q.set('overdue', 'true');
+      if (department) q.set('department', department);
+      const d = await request('GET', '/staff/work-orders?' + q, undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a work-order list this app could not read.', {code: 'malformed_response'});
+      return {items: d.items.map(toWorkOrder).filter(Boolean), total: Number(d.total) || 0};
+    },
+
+    async listDepartments(token) {
+      const d = await request('GET', '/staff/departments', undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent a department list this app could not read.', {code: 'malformed_response'});
+      return d.filter(x => typeof x?.code === 'string').map(x => ({code: x.code, name: String(x.name ?? x.code)}));
+    },
+
+    /** Supervisors and admins only (403 otherwise). Newest first. */
+    async getAuditTrail(token, id) {
+      const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/audit`, undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent an audit trail this app could not read.', {code: 'malformed_response'});
+      return d.map(e => ({id: String(e?.id ?? ''), actorType: String(e?.actorType ?? ''), actor: e?.actor ?? null, actorName: e?.actorName ?? null,
+        action: String(e?.action ?? ''), details: e?.details && typeof e.details === 'object' ? e.details : {}, at: e?.at ?? null}));
+    },
+
+    /** Citizen response with the private claim code (in the JSON body only). No staff session. */
+    async submitCitizenResponse(id, claim, response) {
+      const d = await request('POST', `/complaints/${encodeURIComponent(id)}/citizen-responses`, {claim, response});
+      return {verification: String(d.verification ?? ''), changed: d.changed === true};
+    },
+
+    // ---------- Duplicate detection (staff). Suggestions only; merging needs a supervisor. ----------
+
+    async getDuplicateCandidates(token, id, {radius = null, days = null} = {}) {
+      const q = new URLSearchParams();
+      if (radius) q.set('radius', String(radius));
+      if (days) q.set('days', String(days));
+      const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/duplicates${q.size ? '?' + q : ''}`, undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d.candidates)) throw new ApiError('The CivicLens server sent duplicate suggestions this app could not read.', {code: 'malformed_response'});
+      return {radiusM: Number(d.radiusM) || 0, days: Number(d.days) || 0, note: typeof d.note === 'string' ? d.note : null,
+        candidates: d.candidates.filter(c => publicIdOrNull(c?.id) && DUPLICATE_LABELS.includes(c.label)).map(c => ({
+          id: c.id, category: String(c.category ?? ''), area: String(c.area ?? ''), created: c.created ?? null, status: String(c.status ?? ''),
+          verification: String(c.verification ?? ''), score: Number(c.score) || 0, label: c.label, distanceM: Number(c.distanceM) || 0,
+          factors: (Array.isArray(c.factors) ? c.factors : []).map(f => ({name: String(f?.name ?? ''), value: Number.isFinite(f?.value) ? f.value : null,
+            weight: Number(f?.weight) || 0, contribution: Number(f?.contribution) || 0, detail: String(f?.detail ?? '')})),
+          reasons: (Array.isArray(c.reasons) ? c.reasons : []).map(String), caution: typeof c.caution === 'string' ? c.caution : null}))};
+    },
+
+    /** Merge complaint `id` (the duplicate) into `canonical`. Resolves to the duplicate's updated staff case. */
+    async mergeComplaint(token, id, {canonical, reason}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/merge`, {canonical, reason}, {headers: staffAuth(token)}));
+    },
+
+    async revertMerge(token, mergeId, reason) {
+      return toStaffComplaint(await request('POST', `/staff/merges/${encodeURIComponent(mergeId)}/revert`, {reason}, {headers: staffAuth(token)}));
+    },
+
+    async dismissDuplicate(token, id, otherId, reason) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/duplicates/${encodeURIComponent(otherId)}/dismiss`, {reason}, {headers: staffAuth(token)}));
+    },
+
+    /**
+     * GET /complaints: community issues across Bengaluru (public fields only), newest first, filtered by
+     * issue type (category), neighbourhood (area) and status. Facets give the counts for the filter menus.
+     */
+    async listPublicComplaints({category = '', area = '', status = '', limit = 50, offset = 0} = {}) {
+      const q = new URLSearchParams({limit: String(limit), offset: String(offset)});
+      if (category) q.set('category', category);
+      if (area) q.set('area', area);
+      if (status) q.set('status', status);
+      const d = await request('GET', '/complaints?' + q);
+      if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a community list this app could not read.', {code: 'malformed_response'});
+      const facet = list => (Array.isArray(list) ? list : []).filter(f => typeof f?.name === 'string').map(f => ({name: f.name, count: Number(f.count) || 0}));
+      return {
+        total: Number(d.total) || 0,
+        items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
+          id: i.id, title: String(i.title ?? ''), category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
+          verification: String(i.verification ?? ''), department: String(i.department ?? ''), created: i.created ?? null, updated: i.updated ?? null,
+          mapPoint: toMapPoint(i.mapPoint)})),
+        facets: {categories: facet(d.facets?.categories), areas: facet(d.facets?.areas)}
+      };
     },
 
     async getEvidenceAccessLog(token, id) {
@@ -264,6 +449,42 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
 }
 
 const bearer = token => ({Authorization: 'Bearer ' + token});
+
+/** The public list's approximate position (about 110 m), or null when missing or not a valid coordinate. */
+export function toMapPoint(p) {
+  const ok = v => typeof v === 'number' && Number.isFinite(v);
+  if (!p || !ok(p.lat) || !ok(p.lng) || Math.abs(p.lat) > 90 || Math.abs(p.lng) > 180) return null;
+  return {lat: p.lat, lng: p.lng, precision: String(p.precision ?? 'approximate')};
+}
+
+function toResident(r) {
+  if (!r || typeof r.email !== 'string') throw new ApiError('The CivicLens server sent an account this app could not read.', {code: 'malformed_response'});
+  return {residentId: String(r.residentId ?? ''), email: r.email, displayName: String(r.displayName ?? r.email), demo: r.demo === true};
+}
+
+function toResidentSession(d) {
+  if (typeof d?.token !== 'string' || !d.token) throw new ApiError('The CivicLens server sent a sign-in response this app could not read.', {code: 'malformed_response'});
+  return {token: d.token, expiresAt: d.expiresAt ?? null, resident: toResident(d.resident)};
+}
+
+function toResidentPrefs(p) {
+  return {updates: p?.updates !== false, verification: p?.verification !== false, hotspots: p?.hotspots === true};
+}
+
+/** A complaint as its owner sees it (allowlisted; never a claim code, token or storage key). */
+export function toResidentComplaint(d) {
+  const gps = d?.gps && Number.isFinite(d.gps.lat) && Number.isFinite(d.gps.lng)
+    ? {lat: d.gps.lat, lng: d.gps.lng, accuracy: d.gps.accuracy ?? null, sourceType: d.gps.sourceType ?? null, address: d.gps.address ?? null} : null;
+  return {
+    id: String(d.id), title: String(d.title || `${d.category} reported by a citizen`), category: String(d.category), area: String(d.area ?? ''),
+    description: String(d.description ?? ''), mediaType: d.mediaType === 'video' ? 'video' : 'photo', shareEvidence: d.shareEvidence === true,
+    hasEvidence: d.hasEvidence === true, gps, created: d.created ?? null, updated: d.updated ?? null, status: String(d.status),
+    verification: String(d.verification), department: String(d.department ?? ''), ownedVia: d.ownedVia === 'claimed' ? 'claimed' : 'submitted',
+    ownedAt: d.ownedAt ?? null,
+    timeline: Array.isArray(d.timeline) ? d.timeline.map(t => ({status: String(t.status), text: String(t.text), date: t.date})) : [],
+    verificationLog: toVerificationLog(d.verificationLog)
+  };
+}
 const NOTIFICATION_ID = /^nt_[A-Za-z0-9_-]{16,40}$/;
 const SUBSCRIPTION_ID = /^ps_[A-Za-z0-9_-]{16,40}$/;
 // In-app destinations only: a notification can never send the browser to another site.
@@ -287,7 +508,65 @@ function toDevice(d) {
 }
 
 const EVIDENCE_TYPES = ['image/jpeg', 'video/webm', 'video/mp4'];
+
+/** An evidence response as a Blob, accepted only with an evidence content type (staff and owner views alike). */
+async function evidenceBlob(response) {
+  const type = String(response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+  if (!EVIDENCE_TYPES.includes(type)) throw new ApiError('The CivicLens server sent evidence of an unexpected type, so it is not shown.', {code: 'malformed_response'});
+  return new Blob([await response.arrayBuffer()], {type});
+}
+
+/** Staff-list location for the admin map; null unless both coordinates are valid. */
+function toListGps(g) {
+  if (!g || !Number.isFinite(g.lat) || !Number.isFinite(g.lng) || Math.abs(g.lat) > 90 || Math.abs(g.lng) > 180) return null;
+  return {lat: g.lat, lng: g.lng, accuracy: Number.isFinite(g.accuracy) && g.accuracy >= 0 ? g.accuracy : null,
+    sourceType: SOURCE_TYPES.includes(g.sourceType) ? g.sourceType : null};
+}
 const staffAuth = token => ({Authorization: 'Bearer ' + token});
+
+const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update', 'review_duplicates', 'merge', 'revert_merge'];
+const DUPLICATE_LABELS = ['likely_duplicate', 'possible_duplicate', 'recurrence', 'nearby_separate'];
+const MERGE_ID = /^mg_[A-Za-z0-9_-]{16}$/;
+const publicIdOrNull = v => (typeof v === 'string' && PUBLIC_ID.test(v) ? v : null);
+const staffRef = s => (s && typeof s.username === 'string' ? {username: s.username, displayName: String(s.displayName ?? s.username)} : null);
+
+/** Work order for staff. Only known fields are copied. */
+export function toWorkOrder(w) {
+  if (typeof w?.id !== 'string' || !/^wo_[A-Za-z0-9_-]{16}$/.test(w.id)) return null;
+  return {
+    id: w.id, complaintId: String(w.complaintId ?? ''), department: w.department ?? null, team: String(w.team ?? ''), assignee: w.assignee ?? null,
+    description: String(w.description ?? ''), dueAt: w.dueAt ?? null, status: String(w.status ?? ''), startedAt: w.startedAt ?? null,
+    completedAt: w.completedAt ?? null, completionNote: String(w.completionNote ?? ''), createdBy: String(w.createdBy ?? ''),
+    createdAt: w.createdAt ?? null, overdue: w.overdue === true,
+    evidence: (Array.isArray(w.evidence) ? w.evidence : []).filter(e => typeof e?.evidenceId === 'string').map(e => ({
+      phase: e.phase === 'after' ? 'after' : 'before', evidenceId: e.evidenceId, contentType: String(e.contentType ?? ''),
+      byteSize: Number(e.byteSize) || 0, uploadedAt: e.uploadedAt ?? null})),
+    history: (Array.isArray(w.history) ? w.history : []).map(h => ({action: String(h?.action ?? ''), to: h?.to ?? null, note: String(h?.note ?? ''),
+      by: String(h?.by ?? ''), at: h?.at ?? null}))
+  };
+}
+
+/** Management data in the staff case: assignment, work orders, internal notes and the server's allowed actions. */
+function toManagement(d) {
+  const a = d.assignment && typeof d.assignment === 'object' ? d.assignment : {};
+  return {
+    version: Number(d.version) || 0,
+    assignment: {department: a.department && typeof a.department.code === 'string' ? {code: a.department.code, name: String(a.department.name ?? '')} : null,
+      assignee: staffRef(a.assignee)},
+    assignmentHistory: (Array.isArray(d.assignmentHistory) ? d.assignmentHistory : []).map(h => ({department: String(h?.department?.name ?? ''),
+      assignee: h?.assignee ?? null, reason: String(h?.reason ?? ''), by: String(h?.by ?? ''), at: h?.at ?? null})),
+    workOrders: (Array.isArray(d.workOrders) ? d.workOrders : []).map(toWorkOrder).filter(Boolean),
+    notes: (Array.isArray(d.notes) ? d.notes : []).map(n => ({id: String(n?.id ?? ''), body: String(n?.body ?? ''), createdAt: n?.createdAt ?? null,
+      author: staffRef(n?.author)})),
+    mergedInto: publicIdOrNull(d.mergedInto),
+    merges: (Array.isArray(d.merges) ? d.merges : []).filter(m => typeof m?.id === 'string' && MERGE_ID.test(m.id)).map(m => ({
+      id: m.id, duplicate: publicIdOrNull(m.duplicate), canonical: publicIdOrNull(m.canonical), reason: String(m.reason ?? ''),
+      score: Number.isFinite(m.score) ? m.score : null, label: DUPLICATE_LABELS.includes(m.label) ? m.label : null, by: String(m.by ?? ''),
+      at: m.at ?? null, revertedAt: m.revertedAt ?? null, revertedBy: m.revertedBy ?? null, revertReason: m.revertReason ?? null})),
+    allowedActions: (Array.isArray(d.allowedActions) ? d.allowedActions : []).filter(x => STAFF_ACTIONS.includes(x?.action)).map(x => ({
+      action: x.action, label: String(x.label ?? ''), to: typeof x.to === 'string' ? x.to : null, needsExplanation: x.needsExplanation === true}))
+  };
+}
 
 /** Operational projection for staff. Only known fields are copied; no claim, token or storage data exists to copy. */
 export function toStaffComplaint(d) {
@@ -303,8 +582,10 @@ export function toStaffComplaint(d) {
     captureSource: d.captureSource ?? null, mediaType: d.mediaType === 'video' ? 'video' : 'photo', shareEvidence: d.shareEvidence === true,
     gps: {lat: g.lat, lng: g.lng, accuracy: g.accuracy ?? null, source: g.source ?? null, sourceType: g.sourceType ?? null, timestamp: g.timestamp ?? null, address: g.address ?? null},
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
+    verificationLog: toVerificationLog(d.verificationLog),
     evidence: e && typeof e === 'object' ? {evidenceId: String(e.evidenceId ?? ''), mediaType: e.mediaType === 'video' ? 'video' : 'photo',
-      contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, sha256: String(e.sha256 ?? ''), capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null} : null
+      contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, sha256: String(e.sha256 ?? ''), capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null} : null,
+    ...toManagement(d)
   };
 }
 
@@ -417,10 +698,16 @@ export function toPublicRecord(d) {
   return {
     id: d.id, category: String(d.category ?? ''), area: String(d.area ?? ''), status: String(d.status ?? ''),
     verification: String(d.verification ?? ''), department: String(d.department ?? ''), updated: d.updated ?? null,
+    mergedInto: publicIdOrNull(d.mergedInto),
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
-    verificationLog: (Array.isArray(d.verificationLog) ? d.verificationLog : []).map(e => ({
-      id: String(e?.id ?? ''), date: e?.date ?? null, type: String(e?.type ?? ''), from: e?.from ?? null, to: e?.to ?? null,
-      response: e?.response ?? null, by: String(e?.by ?? ''), actor: String(e?.actor ?? ''), note: String(e?.note ?? '')
-    }))
+    verificationLog: toVerificationLog(d.verificationLog)
   };
+}
+
+/** Verification history (citizen responses and verification changes): known fields only. */
+function toVerificationLog(list) {
+  return (Array.isArray(list) ? list : []).map(e => ({
+    id: String(e?.id ?? ''), date: e?.date ?? null, type: String(e?.type ?? ''), from: e?.from ?? null, to: e?.to ?? null,
+    response: e?.response ?? null, by: String(e?.by ?? ''), actor: String(e?.actor ?? ''), note: String(e?.note ?? '')
+  }));
 }

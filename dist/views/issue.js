@@ -7,6 +7,8 @@ import {locationSourceLabel} from '../presentation.js';
 import {navigate, rerender} from '../router.js';
 import {readFilters} from '../filters.js';
 import {verificationStates, statuses, citizenResponses} from '../services.js';
+import {usesServerRecords} from '../server-records.js';
+import {renderServerCase} from './server-case.js';
 
 const RESPONSE_COPY = {
   'Appears Resolved': 'The repair looks complete on the ground. Confirms the citizen confirmation state.',
@@ -46,6 +48,8 @@ function figure({title, url, mediaType, gps, emptyGeo, captured, uploaded, label
 }
 
 export async function renderIssue(root, id) {
+  // Server mode, signed-in staff: the same case page, built from the CivicLens server (views/server-case.js).
+  if (await usesServerRecords()) return renderServerCase(root, id);
   const v = viewer();
   const d = await api.detail(id, v);
   if (!d) {
@@ -322,4 +326,5 @@ function wireIssue(root, id, d, ctx) {
   };
 }
 
-export {navigate, state, btn, panel, notice};
+// Shared with views/server-case.js, which renders server complaints in this same design.
+export {navigate, state, btn, panel, notice, figure, geoBlock, dateCaption, labelOf, objectURL};

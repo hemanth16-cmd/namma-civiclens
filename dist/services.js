@@ -14,8 +14,12 @@ export const statuses = ['Submitted', 'Under Review', 'Assigned', 'In Progress',
 export const verificationStates = ['Pending Verification', 'Citizen Confirmed', 'Disputed', 'Reinspection Required'];
 export const citizenResponses = ['Appears Resolved', 'Still Present', 'Cannot Confirm'];
 export const DEMO_PASSWORD = 'CivicDemo2026';
-export const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+// Citizen evidence limits. They match the backend upload limits (CIVICLENS_MAX_PHOTO_BYTES /
+// CIVICLENS_MAX_VIDEO_BYTES in backend/.env.example), so server mode never accepts a file the API refuses.
+export const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 export const MAX_PHOTO_BYTES = 25 * 1024 * 1024;
+// Admin video review keeps footage in this browser only and never uploads it, so it allows larger clips.
+export const MAX_REVIEW_VIDEO_BYTES = 200 * 1024 * 1024;
 
 // Initial, expert-set severity by category (0-1). Documented assumptions, not calibrated values.
 export const CATEGORY_SEVERITY = {
@@ -150,6 +154,9 @@ function db() {
   });
 }
 const mediaFail = (cause, verb) => new StorageError(`The evidence file could not be ${verb} this browser. Storage may be full, blocked, or the file may be damaged. Try a smaller file.`, {cause});
+
+/** Storage key for the stamped copy of a complaint's photo (kept beside the untouched original). */
+export const stampedKey = id => `${id}:stamped`;
 
 export const mediaDB = {
   async put(id, blob) {
@@ -322,7 +329,8 @@ export const api = {
     const r = readAll().find(x => x.id === id);
     if (!r) return null;
     return {id: r.id, claim: r.claim, category: r.category, area: r.area, created: r.created, capturedAt: r.capturedAt ?? null,
-      uploadedAt: r.uploadedAt ?? r.created, captureSource: r.captureSource ?? null, gps: r.gps, mediaType: r.mediaType, shareEvidence: r.shareEvidence === true};
+      uploadedAt: r.uploadedAt ?? r.created, captureSource: r.captureSource ?? null, gps: r.gps, mediaType: r.mediaType, shareEvidence: r.shareEvidence === true,
+      evidenceRef: r.evidenceRef ?? null};
   },
 
   /** Public tracking: allowlisted, no claim codes, no reporter data, no media, no precise evidence. */
@@ -382,6 +390,8 @@ export const api = {
         source: data.gps.source, sourceType: ['gps', 'exif', 'manual'].includes(data.gps.sourceType) ? data.gps.sourceType : null,
         timestamp: data.gps.timestamp ?? null, address: data.gps.address ?? null
       } : null,
+      // Fingerprint of the original file (not a secret). Printed on the stamped photo instead of the claim code.
+      evidenceRef: typeof data.evidenceRef === 'string' && /^EV-[0-9A-F]{4}-[0-9A-F]{4}$/.test(data.evidenceRef) ? data.evidenceRef : null,
       created: data.created || now,
       capturedAt: data.created || null,
       captureSource: data.captureSource || 'Live camera',

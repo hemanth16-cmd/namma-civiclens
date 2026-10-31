@@ -1,6 +1,6 @@
 # Namma CivicLens — Backend
 
-**Status (Phase 3.6 + Supabase migration + Web Push):** a FastAPI service backed by SQLite (default) or **PostgreSQL / Supabase Postgres**, and private evidence storage — local files (default) or a private **Supabase Storage** bucket — with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged), and sends **Web Push notifications** about complaints to citizens who follow them and to staff, with a persistent notification history. The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. Owners and the public cannot view uploaded evidence. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
+**Status (Phase 3.6 + Supabase migration + Web Push):** a FastAPI service backed by SQLite (default) or **PostgreSQL / Supabase Postgres**, and private evidence storage — local files (default) or a private **Supabase Storage** bucket — with development-grade rate limits, an evidence storage quota, idempotent complaint creation and a staff console API. It creates complaints from metadata, serves public tracking, accepts the complaint's original photo or video through an authorised, streamed upload, and lets **signed-in staff** list complaints and view evidence (every view is logged), and sends **Web Push notifications** about complaints to citizens who follow them and to staff, with a persistent notification history. The frontend in `dist/` can use it in **opt-in backend mode** (see "Using it from the frontend" below); by default the frontend still runs in local mode with `localStorage`/IndexedDB. A complaint's owner can view its evidence with the private claim code or from the resident account that owns it; the public cannot. Everything else in `../docs/api-contract.md` (claiming, staff case updates, repairs, maps) is still **proposed, not implemented**.
 
 > **No user authentication; development-grade abuse protection only.** Anyone who can reach the server can create complaints and look them up by ID. Phase 3.5 added per-IP/per-complaint rate limits, an evidence storage quota and idempotent creation, but the limits live in one process's memory (reset on restart, not shared between workers). Before any public deployment it still needs shared rate limiting, HTTPS, abuse/spam controls and server-side authentication for anything beyond anonymous submit and public tracking.
 
@@ -250,9 +250,79 @@ Add `--db <path>` to target a database other than `CIVICLENS_DB_PATH` / `backend
 
 Sessions: `Authorization: Bearer <token>`. The token is 256-bit random; only its SHA-256 hash is stored, with an expiry (8 hours, `CIVICLENS_STAFF_SESSION_SECONDS`). A session stops working when it expires, on sign-out, when the account is disabled, or when its password changes; re-enabling an account does not revive old sessions. Upload tokens and staff tokens are not interchangeable. Missing or invalid sessions get `401 unauthorized` with `WWW-Authenticate: Bearer`.
 
-Limits of this design: one role only; no MFA, password-reset flow or lockout beyond rate limits; the access log stores the client IP (personal data, kept indefinitely for now); evidence is still not available to owners or the public; `http://` only in development, so tokens travel unencrypted on anything but localhost.
+Limits of this design: one role only; no MFA, password-reset flow or lockout beyond rate limits; the access log stores the client IP (personal data, kept indefinitely for now); evidence is not available to the public (owners: see "Owner evidence viewing"); `http://` only in development, so tokens travel unencrypted on anything but localhost.
 
 The frontend's staff console is `#/staff` in backend mode (see `docs/IMPLEMENTATION_PROGRESS.md`); it keeps the token in page memory only, so reloading signs the tab out.
+
+## Resident accounts API
+
+Three separate identities use the API. A **passerby** reports and tracks with no account. A
+**resident** has a server account. **Staff** use the staff console API above. Resident accounts are
+their own authentication domain (`app/resident_auth.py`, tables `resident_accounts`,
+`resident_sessions`, `resident_preferences`), built like staff sign-in: scrypt passwords (12+
+characters), 256-bit bearer tokens stored only as SHA-256 hashes, an 8-hour expiry
+(`CIVICLENS_RESIDENT_SESSION_SECONDS`), and revocation on sign-out, password change or disable.
+**A resident token is refused by every `/staff` endpoint, and a staff token by every `/residents`
+endpoint.**
+
+| Method and path | Auth | Result |
+| --- | --- | --- |
+| `POST /api/v1/residents` `{"email", "password", "displayName"}` | none | `201` + a session (`{"token", "expiresAt", "resident"}`). `409 email_taken`; `422` for a bad email or short password. 5 per hour per IP. |
+| `POST /api/v1/residents/sessions` `{"email", "password"}` | none | `200` session. Wrong password and unknown email give the same `401`. Rate-limited per IP and per account before the password check. |
+| `DELETE /api/v1/residents/sessions/current` | resident | `204`; revoked on the server |
+| `GET /api/v1/residents/me`, `PATCH` `{"displayName"}` | resident | `{"residentId", "email", "displayName", "demo", "createdAt"}` |
+| `GET /api/v1/residents/me/complaints?limit&offset` | resident | Only this resident's complaints, newest first: public fields plus their own description and location, `ownedVia` (`submitted` / `claimed`) and `ownedAt`. Never the claim code or hash, tokens, staff notes or storage keys. |
+| `GET /api/v1/residents/me/complaints/{id}` | resident | One owned complaint. Any other ID is `404`, whether or not it exists. |
+| `POST /api/v1/residents/me/claims` `{"id", "claim"}` | resident | Links an **unowned** complaint after checking the private claim code: `200 {"outcome": "claimed" \| "already_yours", "complaint"}`. A wrong ID or code gives one generic `403 invalid_claim`, always after one scrypt check. If another resident owns it: `409 already_claimed` (names nobody). Only the ownership columns change. The claim hash, public timeline, evidence and dates stay as they were, and the claim is written to `audit_log`. 10 per 15 min per IP, 10 per hour per complaint. |
+| `GET` / `PUT /api/v1/residents/me/preferences` `{"updates", "verification", "hotspots"}` | resident | Per-account preferences (booleans only) |
+
+**Ownership.** `POST /api/v1/complaints` stays open to everyone. With no `Authorization` header the
+complaint is anonymous: `owner_resident_pk` stays `NULL` until a claim. With a valid resident token
+the owner is taken **from the session** (`owned_via = 'submitted'`). An `owner` or `role` field in
+the body is rejected (`422`). Any other bearer token (expired, revoked, or a staff token) is refused
+with `401`, not quietly treated as anonymous. The owner is part of the idempotency fingerprint, so
+nobody else can replay a resident's key. Public tracking (`GET /complaints/{id}`) never shows an
+owner.
+
+### Owner evidence viewing
+
+The owner of a complaint sees its original photo or video through the **same retrieval service as staff**
+(`app/evidence_access.py`: same evidence metadata, storage backend selection, file opening and streaming;
+moved unchanged out of `staff_api.py`). Only the authorisation and the access record differ:
+
+| Method and path | Auth | Result |
+| --- | --- | --- |
+| `POST /api/v1/complaints/{id}/evidence/view` `{"claim"}` | the private claim code, in the JSON body only | the file, streamed with the same headers as the staff view (`no-store, private`, `nosniff`, sandbox CSP). A wrong code and an unknown ID give the same `403 invalid_claim` after one scrypt check. |
+| `GET /api/v1/residents/me/complaints/{id}/evidence` | resident session that **owns** the complaint | the same file; any other ID is `404` |
+
+Both are rate-limited before the check (20 per 15 min per IP, 30 per hour per complaint:
+`CIVICLENS_RATE_OWNER_EVIDENCE_IP`, `CIVICLENS_RATE_OWNER_EVIDENCE_COMPLAINT`). Every owner view is written to
+`audit_log` (`owner_evidence_view`, actor `citizen`, how: `claim_code` or `resident`); `evidence_access_log`
+stays staff-only, and an owner's view does not send the "Report under review" notification a staff view sends.
+The browser fetches the bytes and shows them from a `blob:` URL, as the staff console does, so no credential,
+storage key or storage URL is ever placed in a link. Staff tokens, resident tokens and upload tokens remain
+separate: none of them opens another's route.
+
+### Demonstration accounts (local or isolated test databases only)
+
+```sh
+cd backend
+python -m app.demo seed --confirm-demo                    # SQLite (--db, else CIVICLENS_DB_PATH)
+python -m app.demo seed --confirm-demo --allow-postgres   # an isolated PostgreSQL test database only
+python -m app.demo remove --confirm-demo                  # disables both and signs them out
+```
+
+| Role | Sign in with | Password |
+| --- | --- | --- |
+| Resident | `resident@civiclens.demo` | `CivicDemo2026!` |
+| Administrator (staff role `admin`) | `demo_admin` | `CivicDemo2026!` |
+
+**These credentials are public and not production-safe.** The command does nothing without
+`--confirm-demo`. It needs `--allow-postgres` for PostgreSQL and refuses when `CIVICLENS_ENV` is
+`production`. It never prints the password and is idempotent: a rerun leaves working accounts and
+their sessions alone, and repairs a changed password, role or disabled flag. The API never creates
+these accounts, and the frontend never contains the credentials. The admin is made with the same
+store methods as `python -m app.staff`, so the role lives only on the server.
 
 ## Web Push notifications
 
@@ -683,6 +753,40 @@ All errors use the shape from `docs/api-contract.md`:
 
 A failed create rolls back completely: no half-written complaint is left behind.
 
+## Complaint management (Workstream 1, schema 7)
+
+Staff manage complaints through the API in `docs/api-contract.md` §3.2. Design notes:
+
+- **Two state machines.** `status` (Submitted → Under Review → Assigned → In Progress → Marked Resolved, plus a few controlled backward moves) is changed only by staff. `verification` (Pending Verification, Citizen Confirmed, Disputed, Reinspection Required) is changed by citizens with the claim code and by a supervisor's reinspection request. The rules, roles and department scoping are pure functions in `app/lifecycle.py`, so another channel (for example a Telegram bot) must call the same store methods rather than write SQL.
+- **One transaction per action.** `store.py` locks the complaint row (`FOR UPDATE` on PostgreSQL, an immediate transaction on SQLite), re-reads the actor's role and departments, checks the rule, and writes the change, its public timeline or verification entry, and an `audit_log` row together. The client sends `expectedStatus`; if the case moved on, the result is `409 conflict` rather than a lost update.
+- **Visibility by table.** Internal notes live in `staff_notes`, which the public projection never queries. Public timeline text names departments and teams, never individual staff.
+- **Append-only history.** `audit_log`, `complaint_assignments`, `staff_notes` and `work_order_events` have no update or delete path in the code, and database triggers refuse `UPDATE` and `DELETE` (and `TRUNCATE` on `audit_log` in PostgreSQL).
+- **After-repair evidence** reuses the evidence pipeline and the `EvidenceStorage` interface unchanged: an `evidence` row with role `repair` (still exactly one `original` per complaint, enforced by a partial unique index), linked to the work order as "after". The orphan audit and the access log cover it automatically.
+- **Notifications** are not sent for management events yet. The notification kinds are a `CHECK` list in the notifications table, which belongs to the notification work; status-change events need an agreed interface first.
+
+Set up roles and departments with the CLI (the database follows `DATABASE_BACKEND`, like the API):
+
+```bash
+.venv/Scripts/python -m app.staff department add --code roads --name "Road maintenance"
+.venv/Scripts/python -m app.staff create --username ravi --display-name "Ravi" --role supervisor
+.venv/Scripts/python -m app.staff join --username asha --department roads
+.venv/Scripts/python -m app.staff set-role --username asha --role supervisor
+.venv/Scripts/python -m app.staff list
+```
+
+Migration 7 upgrades an existing database in place and keeps every row. Existing staff stay `official`, and existing complaints are unassigned (the triage queue). On SQLite, two tables (`staff_accounts`, `evidence`) are rebuilt to change their constraints; `apply_schema` turns foreign keys off for that and checks them before committing. On PostgreSQL the constraints are altered in place. Take a backup before deploying it to Supabase (`pg_dump`, or the dashboard's backup) and let the API apply it at startup, as with earlier migrations.
+
+## Duplicate detection (Workstream 2, schema 8)
+
+`GET /staff/complaints/{id}/duplicates` returns ranked, explained suggestions (see `docs/api-contract.md` §3.3). Supervisors merge, revert or dismiss; nothing is merged automatically.
+
+- **Candidates** come from a bounding-box query on the new `(gps_lat, gps_lng)` index (plain comparisons, identical on SQLite and PostgreSQL), filtered by category, time window, merge state and dismissed pairs, then measured exactly with the haversine distance in Python. No PostGIS or `pg_trgm`; both engines behave the same.
+- **Scoring** (`app/duplicates.py`) weighs location relative to the two reports' combined GPS uncertainty, so precise fixes 40 m apart are separate issues while coarse fixes at the same distance may be one. It also weighs category, time and description overlap. Each factor's contribution is returned, so a supervisor can see why.
+- **Merges** (`complaint_merges`) keep both complaints intact. `complaints.merged_into_pk` points at the canonical complaint, a partial unique index allows one active merge per duplicate, and rows cannot be deleted. Chains and double merges are refused under row locks. Every merge, revert and dismissal is in the audit log of both complaints.
+- **Not done:** perceptual image similarity (needs Pillow/imagehash and decoding private files; proposed separately); followers of a merged report receiving the canonical complaint's notifications (an interface request to the notification work).
+
+Migration 8 only adds a column, two tables and indexes; no existing row changes.
+
 ## Not included yet
 
-Authentication and sessions, shared (multi-process) rate limiting, claiming complaints, staff operations, repairs, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), staff case updates and work orders on the server, more staff roles, MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (staff case updates do not exist yet), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.
+Shared (multi-process) rate limiting, **public** evidence viewing (staff and owners can view; never permanent public links), MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (needs an agreed interface with the notification work), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.
