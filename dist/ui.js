@@ -4,6 +4,7 @@ import {icon, categoryIcon, resolutionState} from './presentation.js';
 import {state, viewer} from './state.js';
 import {navigate, currentPath} from './router.js';
 import {LOGO_SRC, BRAND_NAME} from './brand.js';
+import {staffSession} from './staff-session.js';
 
 export {esc, icon, categoryIcon, resolutionState, categories};
 
@@ -130,7 +131,9 @@ export function workspaceShell({title, body}) {
   const base = official ? '#/official' : '#/resident';
   const items = official
     ? [[base, 'dashboard', 'Overview'], [base + '/complaints', 'list', 'Incident management'], [base + '/map', 'pin', 'City map'],
-       [base + '/workorders', 'wrench', 'Work orders'], [base + '/video-review', 'video', 'Video review'], [base + '/intelligence', 'scale', 'Intelligence studio']]
+       [base + '/workorders', 'wrench', 'Work orders'], [base + '/video-review', 'video', 'Video review'], [base + '/intelligence', 'scale', 'Intelligence studio'],
+       // Supervisors and admins on a server session; the API enforces the role on every request.
+       ...(['supervisor', 'admin'].includes(staffSession.get()?.staff?.role) ? [[base + '/supervisor', 'pin', 'Supervisor wards']] : [])]
     : [[base, 'dashboard', 'Overview'], [base + '/complaints', 'list', 'My complaints'], [base + '/community', 'message', 'Community issues'],
        [base + '/map', 'pin', 'City map'], [base + '/claim', 'lock', 'Claim a complaint'], [base + '/notifications', 'bell', 'Notifications']];
   const initials = (v.name || (official ? 'Civic official' : 'Resident')).split(/\s+/).map(s => s[0]).join('').slice(0, 2).toUpperCase();
