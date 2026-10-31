@@ -70,6 +70,8 @@ class RateLimitSettings:
     resident_login_per_account: Rule = Rule(10, 3600)
     resident_claim_per_ip: Rule = Rule(10, 900)     # POST /residents/me/claims (claim-code check)
     resident_claim_per_complaint: Rule = Rule(10, 3600)
+    owner_evidence_per_ip: Rule = Rule(20, 900)     # owner evidence views (claim code or resident account)
+    owner_evidence_per_complaint: Rule = Rule(30, 3600)
     trusted_proxies: tuple = field(default_factory=tuple)
 
     ENV_RULES = {
@@ -93,6 +95,8 @@ class RateLimitSettings:
         "resident_login_per_account": "CIVICLENS_RATE_RESIDENT_LOGIN_ACCOUNT",
         "resident_claim_per_ip": "CIVICLENS_RATE_RESIDENT_CLAIM_IP",
         "resident_claim_per_complaint": "CIVICLENS_RATE_RESIDENT_CLAIM_COMPLAINT",
+        "owner_evidence_per_ip": "CIVICLENS_RATE_OWNER_EVIDENCE_IP",
+        "owner_evidence_per_complaint": "CIVICLENS_RATE_OWNER_EVIDENCE_COMPLAINT",
     }
 
     @classmethod
