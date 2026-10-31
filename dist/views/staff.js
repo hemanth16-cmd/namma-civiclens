@@ -12,6 +12,7 @@ import {navigate} from '../router.js';
 import {loadApiConfig} from '../api-config.js';
 import {ApiError, createApiClient} from '../api-client.js';
 import {staffSession} from '../staff-session.js';
+import {residentSession} from '../resident-session.js';
 import {mountInbox} from './notifications.js';
 import {disablePush, registeredDevice, takePendingStaffReads} from '../push-client.js';
 
@@ -83,6 +84,7 @@ function renderSignIn(root, http, message = '') {
     button.disabled = true;
     try {
       staffSession.set(await http.staffSignIn(String(form.get('username')), String(form.get('password'))));
+      residentSession.clear();  // one identity per tab
       listOffset = 0;
       // Notifications opened before signing in (sessions are memory-only) are marked read now.
       for (const nid of takePendingStaffReads()) http.markNotification(staffSession.get().token, nid, true).catch(() => {});

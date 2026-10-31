@@ -1,6 +1,7 @@
-// "My reports" in server mode (#/my-reports): the complaints submitted from this browser, with their
-// current public status from the CivicLens server. There are no citizen accounts yet, so the list is
-// the IDs this browser remembered at submission (report-gateway.js); the claim code is never kept.
+// "Reports on This Device" in server mode (#/my-reports): the complaints a passerby submitted from this
+// browser, with their current public status from the CivicLens server. It is not an account and gives
+// no resident access: the list is the IDs this browser remembered at submission (report-gateway.js);
+// the claim code is never kept. A resident claims a report into their account with its claim code.
 // Each status comes from public tracking, so nothing restricted is ever shown here.
 import {esc} from '../services.js';
 import {icon, btn, heading, notice, publicTopbar, statusPill, verificationPill, fmtDateTime} from '../ui.js';
@@ -15,8 +16,8 @@ export async function renderMyReports(root) {
   root.innerHTML = `<div class="page">
     ${publicTopbar({fallback: 'home'})}
     <main id="main" class="narrow" tabindex="-1">
-      ${heading({eyebrow: 'Your reports · this device', title: 'My reports', lead: 'Complaints you submitted from this browser, with their current status on the CivicLens server.'})}
-      ${notice('This list is kept only in this browser; there are no resident accounts yet. On another device, track a report with its public ID. Your private claim code is never stored here.', 'info', 'lock')}
+      ${heading({eyebrow: 'Passerby · this device only', title: 'Reports on This Device', lead: 'Complaints submitted from this browser without an account, with their current public status on the CivicLens server.'})}
+      ${notice('This list is kept only in this browser and is not a resident account. On another device, track a report with its public ID. To keep a report in a resident account, sign in and claim it with its public ID and private claim code (never stored here).', 'info', 'lock')}
       <div id="my-reports" class="mt" role="status" aria-live="polite">${reports.length ? '<p class="micro">Loading current status…</p>' : ''}</div>
       <p class="row-actions mt">${btn(icon('camera') + '<span>Report an issue</span>', 'data-action="go-camera"', 'secondary')}<a class="btn btn-ghost" href="#/home">${icon('search')}<span>Track by ID</span></a></p>
     </main>

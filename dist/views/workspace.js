@@ -5,8 +5,9 @@ import {state, viewer, setSession, readPrefs, writePrefs, readLastRead, writeLas
 import {navigate} from '../router.js';
 import {filterRecords, sortRecords, readFilters} from '../filters.js';
 import {mountCityMap} from './map.js';
-import {workspaceRecords, usesServerRecords, dailyActivity, serverClient, isDeviceResident} from '../server-records.js';
+import {workspaceRecords, usesServerRecords, dailyActivity, serverClient, isServerResident} from '../server-records.js';
 import {staffSession} from '../staff-session.js';
+import {residentSession} from '../resident-session.js';
 import {endStaffSession} from './staff.js';
 import {ApiError} from '../api-client.js';
 import {mountInbox} from './notifications.js';
@@ -17,11 +18,12 @@ export async function loadRecords() {
   try {
     state.records = await workspaceRecords(viewer());
   } catch (err) {
-    if (err instanceof ApiError && err.status === 401) {  // server mode: the staff session ended
-      staffSession.clear();
+    if (err instanceof ApiError && err.status === 401) {  // server mode: the staff or resident session ended
+      const resident = viewer().role === 'resident';
+      (resident ? residentSession : staffSession).clear();
       setSession(null);
-      navigate('login/official');
-      throw new Error('Your staff session has ended. Sign in again.');
+      navigate(resident ? 'login/resident' : 'login/official');
+      throw new Error(resident ? 'Your resident session has ended. Sign in again.' : 'Your staff session has ended. Sign in again.');
     }
     throw err;
   }
@@ -35,12 +37,22 @@ function mount(root, title, body) {
 
 export function wireWorkspace(root) {
   root.querySelector('[data-action="logout"]').onclick = async () => {
-    const server = state.session?.server === true && !state.session?.device;
-    if (server) await endStaffSession();  // revokes the server session and staff push on this device
+    const server = state.session?.server === true;
+    const resident = server && state.session?.role === 'resident';
+    if (resident) await endResidentSession();  // revokes the resident session on the server
+    else if (server) await endStaffSession();  // revokes the server session and staff push on this device
     setSession(null);
-    toast(server ? 'Signed out of CivicLens staff.' : state.session === null ? 'You have left this workspace.' : 'You have signed out of this demonstration workspace.');
+    toast(resident ? 'Signed out of your resident account.' : server ? 'Signed out of CivicLens staff.' : 'You have signed out of this demonstration workspace.');
     navigate('home');
   };
+}
+
+/** Sign the resident out on the server (best-effort) and forget the token held in memory. */
+export async function endResidentSession() {
+  const token = residentSession.get()?.token;  // read before any await: app.js also clears it on this click
+  residentSession.clear();
+  if (!token) return;
+  try { await (await serverClient())?.residentSignOut(token); } catch { /* the token expires on its own */ }
 }
 
 // ---------- Shared pieces ----------
@@ -106,25 +118,23 @@ export async function renderOverview(root) {
         </div>
       </div>`);
   } else {
-    const device = await isDeviceResident(v);
+    const account = await isServerResident(v);
     const mine = records.filter(r => r.mine);
     const open = mine.filter(r => r.status !== 'Marked Resolved').length;
     const resolved = mine.filter(r => r.status === 'Marked Resolved').length;
     const challenged = mine.filter(r => ['Disputed', 'Reinspection Required'].includes(r.verification)).length;
     mount(root, 'Overview', `
-      ${heading({eyebrow: 'Your neighbourhood', title: device ? 'Your reports' : `Hello, ${esc(v.name || 'neighbour')}`, lead: 'Your reports, what has changed, and where your neighbours are reporting.', actions: link(icon('camera') + '<span>Report an issue</span>', '#/camera', 'primary')})}
-      ${device ? notice(`Reports submitted from <strong>this browser</strong>, with their current status on the CivicLens server. There are no resident accounts yet, so other devices do not show them. <a class="inline-link" href="#/my-reports">Manage this device's list</a>.`, 'info', 'lock') : ''}
+      ${heading({eyebrow: 'Your neighbourhood', title: `Hello, ${esc(v.name || 'neighbour')}`, lead: 'Your reports, what has changed, and where your neighbours are reporting.', actions: link(icon('camera') + '<span>Report an issue</span>', '#/camera', 'primary')})}
+      ${account ? notice(`Signed in as <strong>${esc(v.email)}</strong>. Complaints you submitted while signed in, and anonymous reports you claimed with their claim code, come from your resident account on the CivicLens server.`, 'info', 'user') : ''}
       <div class="stats" role="list">
-        ${stat('My reports', mine.length, device ? 'Submitted from this device' : mine.length ? 'Claimed or submitted by you' : 'Claim a report to add it here')}
+        ${stat('My reports', mine.length, mine.length ? 'Claimed or submitted by you' : 'Claim a report to add it here')}
         ${stat('Open', open, 'Waiting for civic action', 'stat-navy')}
         ${stat('Marked resolved', resolved, 'Verification tracked separately', 'stat-green')}
         ${stat('Disputed or recheck', challenged, 'Needs a second look', 'stat-red')}
       </div>
       <div class="split">
         ${panel(`${panelHead('My recent reports', link('All my complaints', '#/resident/complaints', 'ghost'))}
-          ${mine.length ? `<ul class="issue-list">${mine.slice(0, 5).map(issueRow).join('')}</ul>` : device
-            ? empty('No reports from this device yet', 'Report an issue from the camera. It appears here with its status from the CivicLens server.', `<div class="row-actions">${link('Report an issue', '#/camera', 'primary')}</div>`)
-            : empty('No reports linked to your profile yet', 'Report an issue from the camera, or claim an anonymous report with its public ID and private claim code.', `<div class="row-actions">${link('Claim a complaint', '#/resident/claim', 'secondary')}${link('Report an issue', '#/camera', 'primary')}</div>`)}`, 'panel-main')}
+          ${mine.length ? `<ul class="issue-list">${mine.slice(0, 5).map(issueRow).join('')}</ul>` : empty('No reports linked to your profile yet', 'Report an issue from the camera, or claim an anonymous report with its public ID and private claim code.', `<div class="row-actions">${link('Claim a complaint', '#/resident/claim', 'secondary')}${link('Report an issue', '#/camera', 'primary')}</div>`)}`, 'panel-main')}
         <div class="stack">
           ${panel(`${panelHead('Neighbourhood map', link('Open map', '#/resident/map', 'ghost'))}<div class="map-compact" id="overview-map"></div>`)}
           ${panel(`<h2>Close the loop</h2><p>When a repair is marked resolved, you can confirm it, report that it is still present, or say you cannot confirm. Those answers are kept beside the official status.</p><a class="inline-link" href="#/resident/community">Browse community issues ${icon('forward')}</a>`)}
@@ -157,7 +167,7 @@ function sampleChart() {
 
 // ---------- Complaint lists ----------
 export async function renderComplaints(root, mode) {
-  if (mode === 'community' && await isDeviceResident(viewer())) return renderServerCommunity(root);
+  if (mode === 'community' && await isServerResident(viewer())) return renderServerCommunity(root);
   const records = await loadRecords();
   const admin = isAdmin();
   const base = admin ? records : mode === 'community' ? records : records.filter(r => r.mine);
@@ -286,10 +296,7 @@ function renderNeedsAccounts(root, title, lead, emptyTitle, emptyText, actions) 
 }
 
 export async function renderClaim(root) {
-  if (await isDeviceResident(viewer())) return renderNeedsAccounts(root, 'Claim a complaint',
-    'Link a report to your resident profile with its public ID and private claim code.',
-    'Claiming needs resident accounts', 'The CivicLens server has no resident sign-in yet. To get updates about a report on this device, follow it from Notifications with its public ID and private claim code.',
-    `<div class="row-actions">${link('Open notifications', '#/notifications', 'primary')}</div>`);
+  const account = await isServerResident(viewer());
   mount(root, 'Claim a complaint', `
     ${heading({eyebrow: 'Anonymous report, resident follow-through', title: 'Claim a complaint', lead: 'Link a report to your resident profile. You need both its public ID and its private claim code. Both are on the receipt.'})}
     <div class="narrow-panel">
@@ -300,7 +307,9 @@ export async function renderClaim(root) {
           <div id="claim-error" role="alert"></div>
           <button class="btn btn-primary btn-lg" type="submit">${icon('lock')}<span>Claim report</span></button>
         </form>
-        ${notice('Sample report: public ID <span class="code-inline">NCL-2026-DEMO01</span> with claim code <span class="code-inline">DEMO-CLAIM-01</span>. Demonstration data only.', 'info', 'alert', 'mt')}
+        ${account
+          ? notice('The CivicLens server checks the claim code. Only a report that is not already linked to another account can be claimed, and its history stays as it was.', 'info', 'lock', 'mt')
+          : notice('Sample report: public ID <span class="code-inline">NCL-2026-DEMO01</span> with claim code <span class="code-inline">DEMO-CLAIM-01</span>. Demonstration data only.', 'info', 'alert', 'mt')}
       </section>
     </div>`);
   root.querySelector('#claim-form').onsubmit = async e => {
@@ -309,11 +318,21 @@ export async function renderClaim(root) {
     const submit = e.target.querySelector('button[type=submit]');
     submit.disabled = true;
     try {
-      const claimed = await api.claim(String(fd.get('id')).trim().toUpperCase(), String(fd.get('code')).trim(), viewer().email);
-      toast(`${claimed.id} is now linked to your profile.`, 'success');
+      const id = String(fd.get('id')).trim().toUpperCase();
+      const code = String(fd.get('code')).trim();
+      if (account) {
+        const result = await (await serverClient()).claimComplaint(residentSession.get().token, id, code);
+        e.target.reset();
+        toast(result.outcome === 'already_yours' ? `${id} is already in your account.` : `${id} is now linked to your resident account.`, 'success');
+      } else {
+        const claimed = await api.claim(id, code, viewer().email);
+        toast(`${claimed.id} is now linked to your profile.`, 'success');
+      }
       navigate('resident/complaints');
     } catch (err) {
       submit.disabled = false;
+      e.target.querySelector('#claim-code').value = '';
+      if (err instanceof ApiError && err.status === 401) { residentSession.clear(); setSession(null); return navigate('login/resident'); }
       document.getElementById('claim-error').innerHTML = notice(esc(err.message), 'error', 'alert');
     }
   };
@@ -344,11 +363,21 @@ export async function renderNotifications(root) {
 }
 
 // ---------- Preferences ----------
-export function renderSettings(root) {
-  const prefs = readPrefs();
+export async function renderSettings(root) {
   const admin = isAdmin();
+  // A signed-in resident's preferences belong to the account on the server; everyone else keeps them in this browser.
+  const account = !admin && await isServerResident(viewer());
+  const http = account ? await serverClient() : null;
+  let prefs;
+  try {
+    prefs = account ? await http.getResidentPreferences(residentSession.get().token) : readPrefs();
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) { residentSession.clear(); setSession(null); return navigate('login/resident'); }
+    throw err;
+  }
+  const v = viewer();
   mount(root, 'Preferences', `
-    ${heading({eyebrow: 'Your workspace', title: 'Preferences', lead: 'Choose what this browser shows you. Preferences are stored on this device for your account.'})}
+    ${heading({eyebrow: 'Your workspace', title: 'Preferences', lead: account ? 'Choose what your workspace shows you. Preferences are saved to your resident account on the CivicLens server.' : 'Choose what this browser shows you. Preferences are stored on this device for your account.'})}
     <div class="split">
       <section class="panel">
         ${panelHead('Notifications')}
@@ -359,18 +388,36 @@ export function renderSettings(root) {
         </form>
         <p class="micro mt" id="prefs-status" role="status"></p>
       </section>
-      <section class="panel">
+      ${account ? `<section class="panel" data-panel="account">
+        ${panelHead('Your account')}
+        <dl class="meta-list"><div><dt>Name</dt><dd>${esc(v.name)}</dd></div><div><dt>Email</dt><dd>${esc(v.email)}</dd></div></dl>
+        ${residentSession.get()?.resident?.demo ? notice('This is a <strong>demonstration</strong> account with a public password. Do not store anything private in it.', 'warn', 'alert', 'mt') : ''}
+        <p class="micro mt">Your session ends when you sign out, close or reload this tab, or after a few hours.</p>
+      </section>` : `<section class="panel">
         ${panelHead('Demonstration data')}
         <p>Reset clears reports, evidence files, video reviews and profile claims from this browser, then restores the sample workspace. It does not affect other devices.</p>
         ${btn(icon('refresh') + '<span>Reset sample workspace</span>', 'data-action="reset"', 'secondary')}
         ${notice('Local data is visible to anyone who can use this browser. Production data would be governed by server-side access control and retention rules.', 'warn', 'lock', 'mt')}
-      </section>
+      </section>`}
     </div>`);
-  root.querySelector('#prefs-form').addEventListener('change', e => {
-    const next = {...readPrefs(), [e.target.name]: e.target.checked};
-    const ok = writePrefs(next);
-    document.getElementById('prefs-status').textContent = ok ? 'Preference saved on this device.' : 'Preference could not be saved: browser storage is blocked.';
+  root.querySelector('#prefs-form').addEventListener('change', async e => {
+    const status = document.getElementById('prefs-status');
+    if (!account) {
+      const ok = writePrefs({...readPrefs(), [e.target.name]: e.target.checked});
+      status.textContent = ok ? 'Preference saved on this device.' : 'Preference could not be saved: browser storage is blocked.';
+      return;
+    }
+    prefs = {...prefs, [e.target.name]: e.target.checked};
+    try {
+      prefs = await http.putResidentPreferences(residentSession.get()?.token, prefs);
+      status.textContent = 'Preference saved to your account.';
+    } catch (err) {
+      e.target.checked = !e.target.checked;
+      if (err instanceof ApiError && err.status === 401) { residentSession.clear(); setSession(null); return navigate('login/resident'); }
+      status.textContent = 'Preference could not be saved: ' + (err?.message || 'the server did not answer.');
+    }
   });
+  if (account) return;
   root.querySelector('[data-action="reset"]').onclick = async () => {
     const yes = await confirmDialog({title: 'Reset the demonstration workspace?', message: 'This removes every locally created report, evidence file and video review in this browser. It cannot be undone.', confirmLabel: 'Reset workspace'});
     if (!yes) return;

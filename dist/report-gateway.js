@@ -11,6 +11,7 @@ import {api, mediaDB} from './services.js';
 import {loadApiConfig} from './api-config.js';
 import {ApiError, createApiClient, toCreatePayload} from './api-client.js';
 import {enablePush, ensureInbox, inbox, pushState, requestPermissionNow} from './push-client.js';
+import {residentSession} from './resident-session.js';
 
 // A copy of server-mode evidence always stays in this browser until the user removes it; it is
 // never deleted automatically, even after a confirmed upload. A separate key prefix keeps it apart
@@ -91,7 +92,20 @@ export async function submitReport(data, blob, options = {}) {
   if (config.mode !== 'backend') throw new ApiError(config.problem, {code: 'config_invalid'});
   const payload = toCreatePayload(data);
   // options.idempotencyKey: one key per report, reused for every retry of that report (see capture.js).
-  const {uploadToken, uploadTokenExpiresAt, ...receipt} = await client(config, options).createComplaint(payload, {idempotencyKey: options.idempotencyKey});
+  // A signed-in resident's complaint is theirs (the server takes the owner from the session token).
+  const resident = options.residentSession === undefined ? residentSession.get() : options.residentSession;
+  let created;
+  try {
+    created = await client(config, options).createComplaint(payload, {idempotencyKey: options.idempotencyKey, residentToken: resident?.token});
+  } catch (err) {
+    if (resident && err instanceof ApiError && err.status === 401) {
+      residentSession.clear();
+      throw new ApiError('Your resident session has ended, so the report was not sent. Sign in again, or send it without an account.', {status: 401, code: 'resident_session_ended'});
+    }
+    throw err;
+  }
+  const {uploadToken, uploadTokenExpiresAt, ...receipt} = created;
+  receipt.inAccount = !!resident;
   rememberServerReport({id: receipt.id, category: receipt.category, submittedAt: receipt.uploadedAt ?? receipt.created}, options);
   const hasFile = blob instanceof Blob && blob.size > 0;
   let evidenceKept = false;

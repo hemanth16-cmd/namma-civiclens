@@ -102,7 +102,7 @@ def test_app_uses_postgres_when_configured(pg_url, monkeypatch, evidence_dir):
 
 def test_schema_initialisation(pg_store, pg_url):
     tables = {r[0] for r in pg_query(pg_url, "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()")}
-    assert set(TABLES) | {"civiclens_schema"} == tables
+    assert set(TABLES) | {"civiclens_schema", "civiclens_features"} == tables
     assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)]
     types = dict(pg_query(pg_url, "SELECT column_name, data_type FROM information_schema.columns "
                                   "WHERE table_schema = current_schema() AND table_name = 'complaints'"))
@@ -129,7 +129,8 @@ def test_version_5_postgres_database_is_upgraded_in_place(pg_url):
         record, _ = old.create(payload(capturedAt=None))
         assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(5,)]
         ComplaintStore(database=db).initialize()
-        assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)] == [(8,)]
+        assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)] == [(7,)]
+        assert db.features() == {"duplicate_detection": "applied", "resident_accounts": "applied"}
         assert old.get(record["id"])["id"] == record["id"]
         for table in ("notification_recipients", "notification_follows", "push_subscriptions", "notifications"):
             assert pg_query(pg_url, f"SELECT COUNT(*) FROM {table}") == [(0,)]
@@ -291,6 +292,13 @@ def populated_sqlite(isolated_db_path, evidence_dir):
         order = client.post(f"/api/v1/staff/complaints/{cid}/work-orders", json={"team": "crew"}, headers=staff).json()["workOrders"][0]["id"]
         assert client.post(f"/api/v1/staff/work-orders/{order}/evidence", files={"file": ("a.jpg", JPEG, "image/jpeg")},
                            headers=staff).status_code == 201
+        # Resident accounts: an account, its session and preferences, and a claimed complaint.
+        resident = client.post("/api/v1/residents", json={"email": "bina@example.org", "password": "resident passphrase 1",
+                                                          "displayName": "Bina"}).json()["token"]
+        res = {"Authorization": f"Bearer {resident}"}
+        assert client.put("/api/v1/residents/me/preferences", json={"updates": False}, headers=res).status_code == 200
+        assert client.post("/api/v1/residents/me/claims", json={"id": receipts[1]["id"], "claim": receipts[1]["claim"]},
+                           headers=res).status_code == 200
         # Duplicate detection (schema 8): one merge and one dismissed pair.
         third = client.post("/api/v1/complaints", json=payload()).json()["id"]
         assert client.post(f"/api/v1/staff/complaints/{receipts[1]['id']}/merge", json={"canonical": cid, "reason": "same issue"},

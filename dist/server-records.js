@@ -1,12 +1,13 @@
 // Server complaints for the admin workspace (overview, incident management, city map, intelligence)
 // in server mode. The workspace screens were built on browser-local records; this module gives them
 // the same row shape from GET /staff/complaints, so the existing design keeps working on real data.
-// In local mode, and for residents, the local demonstration store is used exactly as before.
+// Signed-in residents get their own complaints from /residents/me/complaints. In local mode the local
+// demonstration store is used exactly as before.
 import {api, assessPriority} from './services.js';
 import {loadApiConfig} from './api-config.js';
 import {createApiClient} from './api-client.js';
 import {staffSession} from './staff-session.js';
-import {rememberedServerReports, trackPublic} from './report-gateway.js';
+import {residentSession} from './resident-session.js';
 
 const PAGE = 100;        // the API's maximum page size
 const MAX_PAGES = 20;    // 2,000 complaints; more needs server-side filtering (see docs/INTEGRATION_AUDIT.md)
@@ -48,36 +49,36 @@ export async function loadServerRecords(http, token) {
   return rows;
 }
 
-/**
- * The reports this browser submitted in server mode, with their public status. There are no resident
- * accounts, so this is what "my reports" can honestly mean; nothing private (location, description,
- * evidence) is in the public projection, so none of it is shown.
- */
-export async function deviceRecords() {
-  const rows = await Promise.all(rememberedServerReports().map(async r => {
-    const {record} = await trackPublic(r.id);
-    if (!record) return null;
-    return {
-      id: record.id, title: `${record.category} reported by a citizen`, category: record.category, area: record.area,
-      status: record.status, verification: record.verification, department: record.department, team: null,
-      created: r.submittedAt || record.updated, updated: record.updated, mediaType: 'photo', gps: null,
-      sample: false, server: true, recurrence: 0, reviewCount: 0, shareEvidence: false, mine: true, following: false
-    };
-  }));
-  return rows.filter(Boolean);
+/** A resident's own server complaint as a workspace row (the owner may see their own location). */
+export function toResidentRow(c) {
+  const row = {
+    id: c.id, title: c.title, category: c.category, area: c.area, status: c.status, verification: c.verification,
+    department: c.department, team: null, created: c.created, updated: c.updated, mediaType: c.mediaType, hasEvidence: c.hasEvidence,
+    gps: c.gps ? {lat: c.gps.lat, lng: c.gps.lng, accuracy: c.gps.accuracy, sourceType: c.gps.sourceType} : null,
+    description: c.description, ownedVia: c.ownedVia, ownedAt: c.ownedAt, timeline: c.timeline,
+    sample: false, server: true, recurrence: 0, reviewCount: 0, shareEvidence: c.shareEvidence, mine: true, following: false
+  };
+  row.priority = assessPriority(row);
+  return row;
 }
 
-/** Records for the workspace screens: server complaints for signed-in staff, this device's reports for residents
- * in server mode, else the local demonstration store. */
+/** The signed-in resident's complaints from GET /residents/me/complaints. Throws ApiError (401 when the session ended). */
+export async function residentRecords(http, token) {
+  const {items} = await http.listResidentComplaints(token, {limit: 100});
+  return items.map(toResidentRow);
+}
+
+/** Records for the workspace screens: server complaints for signed-in staff, the resident's own complaints
+ * for a signed-in resident in server mode, else the local demonstration store. */
 export async function workspaceRecords(viewer) {
   if (viewer?.role === 'official' && await usesServerRecords()) return loadServerRecords(await serverClient(), staffSession.get().token);
-  if (viewer?.role === 'resident' && (await loadApiConfig()).mode === 'backend') return deviceRecords();
+  if (await isServerResident(viewer)) return residentRecords(await serverClient(), residentSession.get().token);
   return api.list(viewer);
 }
 
-/** True for a resident in server mode ("this device", no account). */
-export async function isDeviceResident(viewer) {
-  return viewer?.role === 'resident' && (await loadApiConfig()).mode === 'backend';
+/** True for a resident signed in with a server resident account (server mode). */
+export async function isServerResident(viewer) {
+  return viewer?.role === 'resident' && !!residentSession.get() && (await loadApiConfig()).mode === 'backend';
 }
 
 /** Reporting activity: complaints received on each of the last `days` days (UTC dates), oldest first. */
