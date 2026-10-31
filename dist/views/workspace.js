@@ -5,7 +5,7 @@ import {state, viewer, setSession, readPrefs, writePrefs, readLastRead, writeLas
 import {navigate} from '../router.js';
 import {filterRecords, sortRecords, readFilters} from '../filters.js';
 import {mountCityMap} from './map.js';
-import {workspaceRecords, usesServerRecords, dailyActivity, serverClient, isServerResident} from '../server-records.js';
+import {workspaceRecords, usesServerRecords, dailyActivity, serverClient, isServerResident, loadPublicCommunityComplaints} from '../server-records.js';
 import {staffSession} from '../staff-session.js';
 import {residentSession} from '../resident-session.js';
 import {endStaffSession} from './staff.js';
@@ -143,7 +143,18 @@ export async function renderOverview(root) {
   }
   const container = root.querySelector('#overview-map');
   if (container) {
-    const map = await mountCityMap(container, {records, compact: true});
+    // A signed-in resident's neighbourhood map shows every public report, not only their own.
+    let mapData = records;
+    if (!admin && await isServerResident(v)) {
+      try {
+        mapData = await loadPublicCommunityComplaints(await serverClient());
+      } catch {
+        container.innerHTML = '<p class="micro">The neighbourhood map could not load public reports right now.</p>';
+        return;
+      }
+    }
+    if (!container.isConnected) return;
+    const map = await mountCityMap(container, {records: mapData, compact: true});
     addCleanup(() => map.destroy());
   }
 }
@@ -167,10 +178,7 @@ function sampleChart() {
 
 // ---------- Complaint lists ----------
 export async function renderComplaints(root, mode) {
-  if (mode === 'community' && await isServerResident(viewer())) return renderNeedsAccounts(root, 'Community issues',
-    'Neighbourhood reports you can read and review.',
-    'Community issues are not on the server yet', 'The CivicLens server does not publish a neighbourhood list or take reviews yet, so this screen has nothing real to show. Public tracking works for any report ID, and your own complaints are under My complaints.',
-    `<div class="row-actions">${link('Track by ID', '#/home', 'secondary')}${link('Report an issue', '#/camera', 'primary')}</div>`);
+  if (mode === 'community' && await isServerResident(viewer())) return renderServerCommunity(root);
   const records = await loadRecords();
   const admin = isAdmin();
   const base = admin ? records : mode === 'community' ? records : records.filter(r => r.mine);
@@ -219,6 +227,75 @@ export async function renderComplaints(root, mode) {
   form.addEventListener('change', paint);
   form.addEventListener('submit', e => e.preventDefault());
   paint();
+}
+
+// ---------- Community issues across Bengaluru (server mode) ----------
+const COMMUNITY_PAGE = 50;
+const UNNAMED_AREA = 'Bengaluru · location on file';
+const placeLabel = area => (area === UNNAMED_AREA ? 'Neighbourhood not named' : area);
+
+/**
+ * Every report on the CivicLens server inside the Bengaluru service area, newest first, filtered by issue
+ * type and by the neighbourhood it was reported from. Public fields only (as in public tracking): no
+ * coordinates, descriptions, photos or reporter details. Filtering happens on the server.
+ */
+async function renderServerCommunity(root) {
+  mount(root, 'Community issues', `
+    ${heading({eyebrow: 'Your workspace', title: 'Community issues', lead: 'Every report across Bengaluru on the CivicLens server. Filter by the type of issue and the place it was reported from. Reporter details, exact locations and photos are never shown here.',
+      actions: link(icon('camera') + '<span>Report an issue</span>', '#/camera', 'primary')})}
+    <section class="panel panel-flush">
+      <form class="filter-bar" id="community-filter" role="search" aria-label="Filter community issues">
+        <div class="field"><label for="community-category">Type of issue</label><select id="community-category" name="category"><option value="">All types</option>${categories.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select></div>
+        <div class="field"><label for="community-area">Place reported</label><select id="community-area" name="area"><option value="">All of Bengaluru</option></select></div>
+        <div class="field"><label for="community-status">Lifecycle status</label><select id="community-status" name="status"><option value="">All statuses</option>${statuses.map(s => `<option>${s}</option>`).join('')}</select></div>
+      </form>
+      <p class="result-count" id="community-count" role="status" aria-live="polite">Loading community issues…</p>
+      <div id="community-results"></div>
+      <div class="row-actions" id="community-more"></div>
+    </section>`);
+  const form = root.querySelector('#community-filter');
+  const results = root.querySelector('#community-results');
+  const count = root.querySelector('#community-count');
+  const more = root.querySelector('#community-more');
+  const http = await serverClient();
+  let items = [], seq = 0, facetsShown = false;
+
+  const fillFacets = facets => {
+    if (facetsShown) return;
+    facetsShown = true;
+    const totals = Object.fromEntries(facets.categories.map(f => [f.name, f.count]));
+    form.querySelectorAll('#community-category option[value]:not([value=""])').forEach(o => { o.textContent = `${o.value} (${totals[o.value] || 0})`; });
+    root.querySelector('#community-area').insertAdjacentHTML('beforeend', facets.areas
+      .map(f => `<option value="${esc(f.name)}">${esc(placeLabel(f.name))} (${f.count})</option>`).join(''));
+  };
+  const load = async (append = false) => {
+    const mine = ++seq;
+    const f = Object.fromEntries(new FormData(form));
+    if (!append) { items = []; results.innerHTML = ''; }
+    more.innerHTML = '';
+    count.textContent = 'Loading community issues…';
+    try {
+      const page = await http.listPublicComplaints({...f, limit: COMMUNITY_PAGE, offset: items.length});
+      if (mine !== seq || !results.isConnected) return;
+      fillFacets(page.facets);
+      items = items.concat(page.items);
+      count.textContent = `${page.total} ${page.total === 1 ? 'issue' : 'issues'}${f.area ? ` in ${placeLabel(f.area)}` : ' across Bengaluru'}${items.length < page.total ? `, showing ${items.length}` : ''}`;
+      results.innerHTML = items.length
+        ? `<ul class="issue-list issue-list-wide">${items.map(r => issueRow({...r, title: r.title || `${r.category} reported by a citizen`, area: placeLabel(r.area), reviewCount: 0})).join('')}</ul>`
+        : empty('No matching issues', 'Try another type of issue or place, or choose “All of Bengaluru”.');
+      if (items.length < page.total) {
+        more.innerHTML = btn('<span>Show more</span>', 'id="community-load-more"', 'secondary');
+        more.querySelector('#community-load-more').onclick = () => load(true);
+      }
+    } catch (err) {
+      if (mine !== seq || !results.isConnected) return;
+      count.textContent = '';
+      results.innerHTML = notice(esc(err instanceof ApiError ? err.message : 'Community issues could not be loaded.'), 'error', 'alert');
+    }
+  };
+  form.addEventListener('change', () => load());
+  form.addEventListener('submit', e => e.preventDefault());
+  load();
 }
 
 // ---------- Claim ----------

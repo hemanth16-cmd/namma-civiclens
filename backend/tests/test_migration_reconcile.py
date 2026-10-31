@@ -30,10 +30,10 @@ AI_TABLES = {"ai_inferences", "repair_assessments", "repair_assessment_inference
 DUP_TABLES = {"complaint_merges", "duplicate_dismissals"}
 
 # The merge recipe: each branch's version 8 becomes a named feature that is adopted where it exists,
-# followed by this branch's own named migrations (resident_accounts).
+# followed by this branch's own named migrations. duplicate_detection is now merged (store.FEATURES has it,
+# with SQL identical to DUPLICATES_V8_*); ai_analysis from main is still to come, so it is added here.
 RECIPE = (
     Feature("ai_analysis", AI_V8_SQLITE, AI_V8_POSTGRES, adopt_if="ai_inferences"),
-    Feature("duplicate_detection", DUPLICATES_V8_SQLITE, DUPLICATES_V8_POSTGRES, adopt_if="complaint_merges"),
     *store_mod.FEATURES,
 )
 RESIDENT_TABLES = {"resident_accounts", "resident_sessions", "resident_preferences"}
@@ -122,8 +122,9 @@ def test_this_branch_starts_on_every_known_state_without_changing_it(engine_targ
         ComplaintStore(database=db).initialize()
         assert db.schema_version() == version, "the numbered version is never lowered or bumped"
         assert before <= _tables(db), "no table is dropped"
-        assert RESIDENT_TABLES <= _tables(db)
-        assert db.features() == {"resident_accounts": "applied"}
+        assert RESIDENT_TABLES <= _tables(db) and DUP_TABLES <= _tables(db)
+        assert db.features() == {"duplicate_detection": "adopted" if extra.get(8) == "dup" else "applied",
+                                 "resident_accounts": "applied"}
         _check_preserved(db, refs)
         _check_unowned(db, refs)
     finally:
@@ -157,6 +158,15 @@ def test_reconciliation_recipe_converges_every_state(engine_target, state, monke
     finally:
         if engine == "postgres":
             db.close()
+
+
+def test_merged_duplicate_detection_is_the_verbatim_core_platform_migration():
+    """The named feature must stay byte-identical to the version 8 that feature/core-platform-development
+    shipped, or databases that ran it would differ from fresh ones."""
+    feature = next(f for f in store_mod.FEATURES if f.name == "duplicate_detection")
+    assert feature.sqlite.strip() == DUPLICATES_V8_SQLITE.strip() and feature.postgres.strip() == DUPLICATES_V8_POSTGRES.strip()
+    assert feature.adopt_if == "complaint_merges"
+    assert [f.name for f in store_mod.FEATURES] == ["duplicate_detection", "resident_accounts"]
 
 
 def test_a_fresh_database_gets_every_named_feature(tmp_path, monkeypatch):

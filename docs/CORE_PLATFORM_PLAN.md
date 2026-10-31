@@ -1,7 +1,7 @@
 # Namma CivicLens — Core platform development: audit and plan
 
 Branch `feature/core-platform-development`, created from `origin/integration/v52-fullstack` at `dca458e`
-(2026-10-30). Status: **plan approved; Workstream 1 implemented and awaiting review** (see §12). Workstreams 2–4 not started.
+(2026-10-30). Status: **Workstreams 1 and 2 implemented** (see §12 and §13). Workstreams 3–4 not started.
 
 Scope: our four workstreams only — (1) server-side complaint management, (2) duplicate detection,
 (3) geospatial intelligence, (4) security and product hardening. Out of scope and not touched:
@@ -373,3 +373,21 @@ Differences from the plan, and why:
 Files: `backend/app/lifecycle.py`, `cases_api.py` (new); `store.py`, `db.py`, `models.py`, `staff_api.py`, `complaints.py`, `errors.py`, `ratelimit.py`, `staff.py`, `main.py`; tests `test_lifecycle.py`, `test_migration_v7.py`, `test_cases_api.py` (new) plus version and fixture updates in `test_evidence.py` and `test_postgres.py`; `dist/api-client.js`, `report-gateway.js`, `views/staff.js`, `views/public.js`; `tests/case-management.test.js`.
 
 Before production: back up Supabase, then deploy. The API applies migration 7 at startup, and a failure rolls the whole migration back. After that, create departments and roles with the CLI.
+
+---
+
+## 13. Workstream 2 — implementation record (2026-10-31)
+
+The base was updated first: `origin/integration/v52-fullstack` (5 new commits) was merged in. One fix was needed because the merge put `d138e72`'s evidence-unavailable logging inside the shared stream helper, where `public_id` did not exist.
+
+Implemented as planned (§6): `app/geo.py`, `app/duplicates.py` (pure), migration 8 (`complaints.merged_into_pk`, `complaint_merges`, `duplicate_dismissals`, location index), store methods, four staff endpoints (`api-contract.md` §3.3), public `mergedInto`, and the staff console review panel and public notice.
+
+Decisions taken during implementation:
+- **Dismissing a suggestion needs a supervisor**, like merging, so one authority owns duplicate review. Officials can still view suggestions.
+- **A merged duplicate refuses lifecycle actions, assignment, work orders and reinspection** (409 `merged`). Notes are allowed. Citizen responses on it are recorded under the existing rules.
+- **Public timeline entries for merges use the existing `progress` kind.** A new kind would mean rebuilding `complaint_timeline` on SQLite to change its CHECK constraint, and that is not worth it.
+- **Image similarity stays deferred**, as planned; only identical files (SHA-256) count.
+
+Verified: SQLite 388 passed/19 skipped; all on PostgreSQL 15 399 passed/8 skipped; `npm test` 159/160 (the known `api-config` failure); browser e2e with a local-mode config 66/66, 56/56, 45/45 and camera 45/45 (43/45 once with a timing flake at 320/375 px, then 45/45 twice). Manual browser run: a real schema-7 file upgraded to 8 on startup. On the test data, the top suggestion was a resolved pothole at the same spot, correctly labelled a recurrence; a report 4 m away scored 88% as a likely duplicate; merging it worked and public tracking showed "merged into".
+
+Next: Workstream 3 (geospatial). It reuses `geo.py` and the location index, and labels recurring locations with WS2's classification.

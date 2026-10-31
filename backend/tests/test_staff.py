@@ -270,7 +270,7 @@ def test_list_carries_map_fields_and_costs_two_queries_whatever_its_length(api, 
     body = api.get("/api/v1/staff/complaints?limit=3", headers=bearer(token)).json()
     first = body["items"][0]
     assert set(first) == {"id", "title", "category", "area", "status", "verification", "department", "created", "updated",
-                          "mediaType", "hasEvidence", "gps"}
+                          "mediaType", "hasEvidence", "gps", "mergedInto"}
     assert set(first["gps"]) == {"lat", "lng", "accuracy", "sourceType"} and first["hasEvidence"] is True
     assert first["gps"]["lat"] == payload()["gps"]["lat"] and first["gps"]["lng"] == payload()["gps"]["lng"]
 

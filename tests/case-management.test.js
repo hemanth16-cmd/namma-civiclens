@@ -116,3 +116,46 @@ test('audit and department lists are mapped defensively', async () => {
   const audit = createApiClient({baseUrl: BASE, fetchImpl: recorder(json(200, [{id: 'au_1', actorType: 'staff', actor: 'ravi', actorName: 'Ravi', action: 'assigned', details: 'oops', at: 'z'}]))});
   assert.deepEqual((await audit.getAuditTrail(TOKEN, 'NCL-2026-STF001'))[0].details, {});
 });
+
+test('duplicate suggestions keep known labels and fields only, and merges post to the right endpoints', async () => {
+  const body = {complaintId: 'NCL-2026-STF001', radiusM: 250, days: 90, note: null, candidates: [
+    {id: 'NCL-2026-STF002', category: 'Potholes', area: 'Hebbal', created: 'z', status: 'Submitted', verification: 'Pending Verification',
+      score: 0.91, label: 'likely_duplicate', distanceM: 5.2, gpsLat: 13.1, description: 'secret text',
+      factors: [{name: 'location', value: 0.98, weight: 0.45, contribution: 0.44, detail: '5 m apart'}], reasons: ['Within the GPS uncertainty of each other.'], caution: null},
+    {id: 'NCL-2026-STF003', label: 'merge_now', score: 1}]};
+  const fetchImpl = recorder(json(200, body));
+  const result = await createApiClient({baseUrl: BASE, fetchImpl}).getDuplicateCandidates(TOKEN, 'NCL-2026-STF001', {radius: 100});
+  assert.equal(fetchImpl.calls[0].url, BASE + '/staff/complaints/NCL-2026-STF001/duplicates?radius=100');
+  assert.equal(result.candidates.length, 1, 'unknown labels are dropped');
+  assert.ok(!JSON.stringify(result).includes('secret text') && !JSON.stringify(result).includes('13.1'), 'no extra fields kept');
+
+  const posts = recorder(json(200, staffCase({mergedInto: 'NCL-2026-STF002', merges: [{id: 'mg_' + 'M'.repeat(16), duplicate: 'NCL-2026-STF001',
+    canonical: 'NCL-2026-STF002', reason: 'same', score: 0.9, label: 'likely_duplicate', by: 'ravi', at: 'z', revertedAt: null}, {id: 'bad'}]})));
+  const http = createApiClient({baseUrl: BASE, fetchImpl: posts});
+  const merged = await http.mergeComplaint(TOKEN, 'NCL-2026-STF001', {canonical: 'NCL-2026-STF002', reason: 'same'});
+  await http.revertMerge(TOKEN, 'mg_' + 'M'.repeat(16), 'oops');
+  await http.dismissDuplicate(TOKEN, 'NCL-2026-STF001', 'NCL-2026-STF003', 'different');
+  assert.deepEqual(posts.calls.map(c => [c.url.replace(BASE, ''), JSON.parse(c.init.body)]), [
+    ['/staff/complaints/NCL-2026-STF001/merge', {canonical: 'NCL-2026-STF002', reason: 'same'}],
+    ['/staff/merges/mg_' + 'M'.repeat(16) + '/revert', {reason: 'oops'}],
+    ['/staff/complaints/NCL-2026-STF001/duplicates/NCL-2026-STF003/dismiss', {reason: 'different'}],
+  ]);
+  assert.equal(merged.mergedInto, 'NCL-2026-STF002');
+  assert.equal(merged.merges.length, 1, 'malformed merge records are dropped');
+});
+
+test('the community list is public, sends only the chosen filters and keeps public fields only', async () => {
+  const body = {total: 2, limit: 50, offset: 0, items: [
+    {id: 'NCL-2026-COM001', title: 'Potholes reported by a citizen', category: 'Potholes', area: 'Hebbal', status: 'Submitted', verification: 'Pending Verification',
+      department: 'Awaiting civic review', created: 'z', updated: 'z', gps: {lat: 13}, description: 'secret', claim: 'x'},
+    {id: 'not-an-id'}],
+    facets: {categories: [{name: 'Potholes', count: 2}], areas: [{name: 'Hebbal', count: 2}, {count: 1}]}};
+  const fetchImpl = recorder(json(200, body));
+  const r = await createApiClient({baseUrl: BASE, fetchImpl}).listPublicComplaints({category: 'Potholes', area: 'Hebbal', status: ''});
+  const [call] = fetchImpl.calls;
+  assert.equal(call.url, BASE + '/complaints?limit=50&offset=0&category=Potholes&area=Hebbal');
+  assert.equal(call.init.headers.Authorization, undefined, 'no staff token');
+  assert.equal(r.items.length, 1);
+  assert.ok(!JSON.stringify(r).includes('secret') && !JSON.stringify(r).includes('"lat"'), 'no private fields kept');
+  assert.deepEqual(r.facets.areas, [{name: 'Hebbal', count: 2}]);
+});
