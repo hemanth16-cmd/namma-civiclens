@@ -88,7 +88,6 @@ def view_evidence(public_id: str, request: Request, background: BackgroundTasks,
     return streamed
 
 
-<<<<<<< HEAD
 def stream_evidence(request: Request, evidence: dict, staff: dict | None, basename: str, background: BackgroundTasks | None = None) -> StreamingResponse:
     """Stream one evidence file. For staff the view is logged before any byte is sent; if logging fails,
     nothing is sent. `staff` is None when a resident opens their own complaint's evidence."""
@@ -99,15 +98,6 @@ def stream_evidence(request: Request, evidence: dict, staff: dict | None, basena
                 client_ip(request, request.app.state.rate_limit_settings.trusted_proxies),
             )
     return open_and_stream(request, evidence, basename, log_view, background)
-=======
-def stream_evidence(request: Request, evidence: dict, staff: dict, basename: str, background: BackgroundTasks | None = None) -> StreamingResponse:
-    """Stream one evidence file to signed-in staff through the shared retrieval service. The view is
-    written to evidence_access_log before any byte is sent; if logging fails, nothing is sent.
-    `evidence` needs pk, storageBackend, storageKey, contentType, byteSize."""
-    def log_view() -> None:
-        request.app.state.store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
-    return open_and_stream(request, evidence, basename, log_view, background)
->>>>>>> origin/integration/v52-fullstack
 
 
 @router.get("/complaints/{public_id}/evidence/access", response_model=list[EvidenceAccessEntry])
