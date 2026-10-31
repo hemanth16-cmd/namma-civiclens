@@ -199,6 +199,7 @@ class StaffEvidenceSummary(BaseModel):
     sha256: str
     capturedAt: str | None
     uploadedAt: str
+    gps: StaffGps | None = None
 
 
 class StaffGps(BaseModel):
@@ -466,6 +467,8 @@ class WorkOrderEvidence(BaseModel):
     byteSize: int
     sha256: str
     uploadedAt: str
+    capturedAt: str | None = None
+    gps: StaffGps | None = None
 
 
 class WorkOrderEvent(BaseModel):

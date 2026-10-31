@@ -133,7 +133,8 @@ def test_version_5_postgres_database_is_upgraded_in_place(pg_url):
         ComplaintStore(database=db).initialize()
         assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)] == [(7,)]
         assert db.features() == {"duplicate_detection": "applied", "resident_accounts": "applied",
-                                    "ward_zone_operations": "applied", "ai_analysis": "applied"}
+                                    "ward_zone_operations": "applied", "ai_analysis": "applied",
+                                    "repair_evidence_geotagging": "applied"}
         assert old.get(record["id"])["id"] == record["id"]
         for table in ("notification_recipients", "notification_follows", "push_subscriptions", "notifications"):
             assert pg_query(pg_url, f"SELECT COUNT(*) FROM {table}") == [(0,)]

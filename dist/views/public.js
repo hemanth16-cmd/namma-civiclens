@@ -453,7 +453,7 @@ function wirePublicEvidence(root, r) {
       const fig = button.closest('figure');
       if (!fig) { openLightbox(url, 'Earlier repair evidence'); return; }
       const title = e.phase === 'before' ? 'Before · reported issue' : 'After · repair evidence';
-      fig.outerHTML = figure({title, url, mediaType: e.mediaType, uploaded: e.uploadedAt, label: 'Shared evidence', altText: title});
+      fig.outerHTML = figure({title, url, mediaType: e.mediaType, uploaded: e.uploadedAt, captured: e.capturedAt, label: 'Shared evidence', altText: title});
       section.querySelectorAll('.geo-caption').forEach(el => el.remove());
       section.querySelectorAll('[data-enlarge]').forEach(b => b.onclick = () => openLightbox(b.dataset.enlarge, b.dataset.alt));
     } catch (err) {

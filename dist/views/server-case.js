@@ -4,7 +4,10 @@
 // The server decides what each person may do (allowedActions); this page only offers those actions and
 // re-reads the case after every change. Private evidence opens on request because every view is logged.
 import {esc, assessPriority} from '../services.js';
-import {icon, categoryIcon, resolutionState, workspaceShell, heading, btn, statusPill, verificationPill, priorityPill, notice, panel, panelHead, toast, fmtDate, fmtDateTime, openLightbox, empty, pill} from '../ui.js';
+import {icon, categoryIcon, resolutionState, workspaceShell, heading, btn, statusPill, verificationPill, priorityPill, notice, panel, panelHead, toast, fmtDate, fmtDateTime, openLightbox, empty, pill, coords} from '../ui.js';
+import {inspectJpegFile} from '../exif.js';
+import {distanceM} from '../address-service.js';
+import {renderStampedPhoto, evidenceRef} from '../photo-stamp.js';
 import {setSession, addCleanup} from '../state.js';
 import {navigate, rerender} from '../router.js';
 import {ApiError} from '../api-client.js';
@@ -26,6 +29,20 @@ function signedOut() {
   staffSession.clear();
   setSession(null);
   navigate('login/official');
+}
+
+function distanceComparison(origGps, repairGps) {
+  if (!origGps || !repairGps || !Number.isFinite(origGps.lat) || !Number.isFinite(origGps.lng) ||
+      !Number.isFinite(repairGps.lat) || !Number.isFinite(repairGps.lng)) {
+    return '';
+  }
+  const d = Math.round(distanceM(origGps, repairGps));
+  const origAcc = Number.isFinite(origGps.accuracy) ? `±${Math.round(origGps.accuracy)} m` : 'accuracy unknown';
+  const repAcc = Number.isFinite(repairGps.accuracy) ? `±${Math.round(repairGps.accuracy)} m` : 'accuracy unknown';
+  if (d > 200) {
+    return `<p class="pill pill-amber" style="margin-top:6px; display:inline-block;">⚠️ Repair photo is ~${d} m from reported location (reported: ${origAcc}, repair: ${repAcc}). Review recommended.</p>`;
+  }
+  return `<p class="micro text-muted" style="margin-top:4px;">Repair location is ~${d} m from reported location (reported: ${origAcc}, repair: ${repAcc}).</p>`;
 }
 
 export async function renderServerCase(root, id) {
@@ -55,11 +72,28 @@ export async function renderServerCase(root, id) {
   const department = r.assignment.department?.name || r.department;
 
   const repairHistory = repairs.length
-    ? `<ol class="history-list">${repairs.slice().reverse().map(e => `<li>
-        <div class="tl-head"><strong>After-repair evidence · ${esc(e.order?.team || 'Case repair')}</strong><span class="pill">${r.status === 'Marked Resolved' ? 'Public repair evidence' : 'Staff review'}</span></div>
-        <p class="micro">${e.order ? `Work order ${esc(e.order.status.toLowerCase())} · ` : ''}Uploaded ${fmtDateTime(e.uploadedAt)}</p>
-        <p>${btn(icon('eye') + '<span>View repair photo</span>', `data-repair="${esc(e.evidenceId)}" data-order="${esc(e.order?.id || '')}"`, 'ghost', 'btn-sm')}</p>
-      </li>`).join('')}</ol>`
+    ? `<ol class="history-list">${repairs.slice().reverse().map(e => {
+        const hasGps = e.gps && Number.isFinite(e.gps.lat) && Number.isFinite(e.gps.lng);
+        const acc = hasGps && Number.isFinite(e.gps.accuracy) ? `±${Math.round(e.gps.accuracy)} m` : '';
+        const src = hasGps ? (e.gps.sourceType === 'exif' ? 'photo EXIF' : (e.gps.source || 'device GPS')) : '';
+        const fixTime = hasGps && e.gps.timestamp ? ` · fix ${fmtDateTime(e.gps.timestamp)}` : '';
+        const captured = e.capturedAt ? `Captured ${fmtDateTime(e.capturedAt)}` : 'Capture time not recorded in the file';
+        const uploaded = e.uploadedAt ? `Uploaded ${fmtDateTime(e.uploadedAt)}` : '';
+        const distWarning = hasGps ? distanceComparison(r.gps, e.gps) : '';
+        return `<li>
+          <div class="tl-head"><strong>After-repair evidence · ${esc(e.order?.team || 'Case repair')}</strong><span class="pill">${r.status === 'Marked Resolved' ? 'Public repair evidence' : 'Staff review'}</span></div>
+          <p class="micro">${e.order ? `Work order ${esc(e.order.status.toLowerCase())} · ` : ''}${uploaded}</p>
+          <div class="geo-caption micro">
+            ${hasGps ? `<strong>${coords(e.gps)}</strong><small>${acc ? `${acc} · ` : ''}${esc(src)}${fixTime}${e.gps.address ? ` · ${esc(e.gps.address)}` : ''}</small>` : '<strong>No GPS metadata</strong><small>Location is not verified from this file.</small>'}
+            <p class="micro" style="margin:2px 0;">${esc(captured)}</p>
+            ${distWarning}
+          </div>
+          <p class="row-actions">
+            ${btn(icon('eye') + '<span>View repair photo</span>', `data-repair="${esc(e.evidenceId)}" data-order="${esc(e.order?.id || '')}"`, 'ghost', 'btn-sm')}
+            ${btn(icon('download') + '<span>Stamped copy</span>', `data-stamp="${esc(e.evidenceId)}" data-order="${esc(e.order?.id || '')}"`, 'ghost', 'btn-sm')}
+          </p>
+        </li>`;
+      }).join('')}</ol>`
     : '<p class="micro">No repair evidence has been uploaded yet.</p>';
 
   const verificationHistory = r.verificationLog.length
@@ -82,7 +116,7 @@ export async function renderServerCase(root, id) {
     ? `<figure class="evidence-figure" id="figure-after"><figcaption><span>After · repair evidence</span><span class="pill">Photo</span></figcaption>
         <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Latest repair photo</strong></p><p class="micro">Uploaded ${fmtDateTime(latest.uploadedAt)} for ${esc(latest.order?.team || 'this case')}.</p>
         ${btn(icon('eye') + '<span>View photo</span>', 'data-load="after"', 'primary', 'btn-sm')}</div>
-        ${geoBlock(null, 'Location is not read from repair photos')}</figure>`
+        ${geoBlock(latest.gps, 'No GPS metadata supplied for the repair')}${distanceComparison(r.gps, latest.gps)}</figure>`
     : figure({title: 'After · repair evidence', url: null, emptyGeo: 'No GPS metadata supplied for the repair', emptyText: 'No repair evidence yet'});
 
   const transitions = r.allowedActions.filter(a => a.action === 'transition');
@@ -297,7 +331,7 @@ function wire(root, http, r, latest) {
   root.querySelector('[data-load="before"]')?.addEventListener('click', () => show('figure-before', () => http.fetchStaffEvidence(token(), r.id),
     r.mediaType, r.gps, r.capturedAt, r.uploadedAt, 'Reported', 'Before — reported issue'));
   root.querySelector('[data-load="after"]')?.addEventListener('click', () => show('figure-after', () => (latest.order ? http.fetchWorkOrderEvidence(token(), latest.order.id, latest.evidenceId) : http.fetchCaseRepairEvidence(token(), r.id, latest.evidenceId)),
-    'photo', null, null, latest.uploadedAt, 'Repair', 'After — repair evidence'));
+    'photo', latest.gps, latest.capturedAt, latest.uploadedAt, 'Repair', 'After — repair evidence'));
   root.querySelectorAll('[data-repair]').forEach(b => b.addEventListener('click', async () => {
     try {
       const blob = await (b.dataset.order ? http.fetchWorkOrderEvidence(token(), b.dataset.order, b.dataset.repair) : http.fetchCaseRepairEvidence(token(), r.id, b.dataset.repair));
@@ -305,9 +339,29 @@ function wire(root, http, r, latest) {
       loadAccessLog(http, r);
     } catch (err) { fail(err); }
   }));
+  root.querySelectorAll('[data-stamp]').forEach(b => b.addEventListener('click', async () => {
+    b.setAttribute('disabled', '');
+    try {
+      const evId = b.dataset.stamp;
+      const orderId = b.dataset.order;
+      const blob = await (orderId ? http.fetchWorkOrderEvidence(token(), orderId, evId) : http.fetchCaseRepairEvidence(token(), r.id, evId));
+      const evItem = repairs.find(x => x.evidenceId === evId);
+      const ref = await evidenceRef(blob);
+      const stampedBlob = await renderStampedPhoto(blob, {
+        complaintId: r.id,
+        evidenceRef: ref,
+        includeLocation: true,
+        gps: evItem?.gps || null,
+        address: evItem?.gps?.address || null,
+        capturedAt: evItem?.capturedAt || evItem?.uploadedAt || null
+      });
+      openLightbox(objectURL(stampedBlob), 'Stamped repair evidence');
+      loadAccessLog(http, r);
+    } catch (err) { fail(err); } finally { b.removeAttribute('disabled'); }
+  }));
   if (r.evidence) loadAccessLog(http, r);
 
-  const uploadRepair = async file => {
+  const uploadRepair = async (file, userMeta = null) => {
     const slot = $('repair-message');
     const controls = root.querySelectorAll('.repair-toolbar input, .repair-toolbar button');
     controls.forEach(el => { el.disabled = true; });
@@ -315,7 +369,18 @@ function wire(root, http, r, latest) {
     try {
       if (!file || file.type !== 'image/jpeg') throw new Error('Choose a JPEG photo. Use Take repair photo to capture a JPEG.');
       if (file.size > 20 * 1024 * 1024) throw new Error('Choose a photo smaller than 20 MB.');
-      await http.uploadCaseRepairEvidence(token(), r.id, file);
+      let meta = userMeta;
+      if (!meta) {
+        const info = await inspectJpegFile(file);
+        meta = {};
+        if (info.gps && Number.isFinite(info.gps.lat) && Number.isFinite(info.gps.lng)) {
+          meta.gps = {lat: info.gps.lat, lng: info.gps.lng, accuracy: null, source: 'EXIF', sourceType: 'gps'};
+        }
+        if (info.captureTime) {
+          meta.capturedAt = info.captureTime;
+        }
+      }
+      await http.uploadCaseRepairEvidence(token(), r.id, file, meta);
       toast('Repair photo saved. It will be public once the case is marked resolved.', 'success');
       rerender();
     } catch (err) {
@@ -390,9 +455,20 @@ function wire(root, http, r, latest) {
     if (to && order) run(e.target.closest('button'), () => http.changeWorkOrder(token(), order.id, {to, expectedStatus: order.status, note: value('wo-note')}),
       `Work order ${to === 'In Progress' ? 'started' : to.toLowerCase()}.`);
   });
-  $('work-orders')?.addEventListener('change', e => {
+  $('work-orders')?.addEventListener('change', async e => {
     const file = e.target.closest('[data-wo-upload]')?.files?.[0];
-    if (file) run(null, () => http.uploadRepairEvidence(token(), e.target.closest('[data-work-order]').dataset.workOrder, file), 'After-repair photo uploaded.');
+    const orderId = e.target.closest('[data-work-order]')?.dataset.workOrder;
+    if (file && orderId) {
+      const info = await inspectJpegFile(file);
+      const meta = {};
+      if (info.gps && Number.isFinite(info.gps.lat) && Number.isFinite(info.gps.lng)) {
+        meta.gps = {lat: info.gps.lat, lng: info.gps.lng, accuracy: null, source: 'EXIF', sourceType: 'gps'};
+      }
+      if (info.captureTime) {
+        meta.capturedAt = info.captureTime;
+      }
+      run(null, () => http.uploadRepairEvidence(token(), orderId, file, meta), 'After-repair photo uploaded.');
+    }
   });
   $('case-load-audit')?.addEventListener('click', async () => {
     const slot = $('case-audit');
