@@ -30,12 +30,12 @@ export async function renderEntry(root) {
   const adminCard = server
     ? `<a class="entry-card entry-link" href="#/login/official" data-entry="staff">
           <span class="entry-icon">${icon('shield')}</span>
-          <div><p class="eyebrow">Civic operations · staff account</p><h2>Login as admin</h2><p>Dashboard, incident management and city map of the complaints on the CivicLens server, with their private evidence.</p></div>
+          <div><p class="eyebrow">Municipal operations · staff account</p><h2>Staff, supervisor & admin</h2><p>Incident triage, work orders, city map, and supervisor ward operations for authorized municipal staff.</p></div>
           <span class="entry-go">${icon('forward')}</span>
         </a>`
     : `<a class="entry-card entry-link" href="#/login/official">
           <span class="entry-icon">${icon('shield')}</span>
-          <div><p class="eyebrow">Civic operations</p><h2>Login as admin</h2><p>Incident management, assignments, work orders, video review and decision support.</p></div>
+          <div><p class="eyebrow">Civic operations</p><h2>Login as admin / staff</h2><p>Incident management, assignments, work orders, video review and decision support.</p></div>
           <span class="entry-go">${icon('forward')}</span>
         </a>`;
   root.innerHTML = `<div class="page page-entry">
@@ -318,21 +318,24 @@ export async function renderLogin(root, role = 'resident', register = false) {
 // The session token stays in this tab's memory only (staff-session.js); the dashboard, incident list
 // and city map then show the complaints stored on the server.
 function renderServerAdminLogin(root) {
-  if (staffSession.get()) return navigate('official');
+  if (staffSession.get()) {
+    const staffRole = staffSession.get()?.staff?.role;
+    return navigate(staffRole === 'supervisor' ? 'official/supervisor' : 'official');
+  }
   root.innerHTML = `<div class="page">
     ${publicTopbar({fallback: 'home'})}
     <main id="main" class="narrow" tabindex="-1">
       <section class="panel auth-panel" aria-labelledby="login-title">
         <p class="pill pill-coral">${icon('shield', 'pill-icon')}<span>Civic operations · server account</span></p>
         <h1 id="login-title" tabindex="-1">Civic operations sign-in</h1>
-        <p class="lead">Sign in with the staff account created for you on the CivicLens server. Your dashboard, incident list and city map then show the complaints stored on the server.</p>
+        <p class="lead">Sign in with your municipal staff account. Official staff, supervisors, and administrators access incident management, city map, and supervisor ward operations based on server-side permissions.</p>
         <form id="login-form" class="stack" data-server-login autocomplete="on">
-          <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required maxlength="64" spellcheck="false"></div>
-          <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256"></div>
+          <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required maxlength="64" spellcheck="false" placeholder="Your username"></div>
+          <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="Your password"></div>
           <div id="login-error" role="alert"></div>
           <button class="btn btn-primary btn-block btn-lg" type="submit">Sign in ${icon('forward')}</button>
         </form>
-        ${notice('Your session is kept only in this tab’s memory: reloading or closing the page signs you out. Staff accounts are created by an administrator with <code>python -m app.staff create</code>.', 'info', 'lock', 'mt')}
+        ${notice('Staff accounts are assigned one of three roles: <strong>Official staff</strong> (department incident management), <strong>Supervisor</strong> (zone/ward dashboard and bulk allocation), or <strong>Admin</strong> (city-wide operations). Sessions live in-memory only.', 'info', 'shield', 'mt')}
         <div class="auth-foot"><a class="inline-link" href="#/login/resident">Resident? Use resident sign-in</a> <a class="inline-link" href="#/my-reports">Reported without an account? Open Reports on This Device</a></div>
       </section>
     </main>
@@ -348,7 +351,11 @@ function renderServerAdminLogin(root) {
       residentSession.clear();  // one identity per tab: a staff sign-in ends any resident session held here
       setSession({role: 'official', name: session.staff.displayName, email: session.staff.username, server: true});
       toast(`Signed in as ${session.staff.displayName}.`, 'success');
-      navigate('official');
+      if (session.staff?.role === 'supervisor') {
+        navigate('official/supervisor');
+      } else {
+        navigate('official');
+      }
     } catch (err) {
       submit.disabled = false;
       e.target.querySelector('#login-password').value = '';

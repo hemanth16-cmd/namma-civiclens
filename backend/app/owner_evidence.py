@@ -55,11 +55,19 @@ def view_with_claim_code(public_id: str, payload: UploadTokenRequest, request: R
 
 
 @router.get("/residents/me/complaints/{public_id}/evidence")
-def view_own_evidence(public_id: str, request: Request, resident: dict = Depends(current_resident)) -> StreamingResponse:
+@router.get("/residents/me/complaints/{public_id}/evidence/{evidence_id}")
+def view_own_evidence(public_id: str, request: Request, evidence_id: str | None = None, resident: dict = Depends(current_resident)) -> StreamingResponse:
     """The original photo or video of a complaint in the signed-in resident's account. Any other ID is 404."""
     enforce(request, "owner_evidence_per_ip", "ip")
     store = request.app.state.store
     ref = store.complaint_ref(public_id) if PUBLIC_ID_PATTERN.fullmatch(public_id) else None
     if ref is None or store.owner_of(public_id) != resident["pk"]:
         raise ApiProblem(404, "not_found", "None of your complaints has that ID.")
+    if evidence_id:
+        evidence = store.resident_evidence(resident["pk"], public_id, evidence_id)
+        if evidence is None:
+            raise ApiProblem(404, "evidence_not_found", "None of your complaints has that evidence file.")
+        ip = client_ip(request, request.app.state.rate_limit_settings.trusted_proxies)
+        return open_and_stream(request, evidence, f"{public_id}-{evidence_id}",
+                               lambda: store.log_owner_evidence_view(ref["pk"], evidence["evidenceId"], "resident", resident["residentId"], ip))
     return _stream(request, public_id, ref["pk"], "resident", resident["residentId"])

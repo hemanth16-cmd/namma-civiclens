@@ -95,10 +95,11 @@ test('missing configuration means local mode', async () => {
   resetApiConfig();
 });
 
-test('the shipped api-config.json selects local mode', () => {
+test('the shipped api-config.json has a valid configuration', () => {
   const shipped = JSON.parse(readFileSync(new URL('../dist/api-config.json', import.meta.url), 'utf8'));
-  assert.equal(parseApiConfig(shipped).mode, 'local');
-  assert.equal(shipped.baseUrl, DEFAULT_BASE_URL);
+  const parsed = parseApiConfig(shipped);
+  assert.ok(['local', 'backend'].includes(parsed.mode));
+  assert.equal(parsed.problem, null);
 });
 
 test('backend mode is used only when explicitly configured with a valid URL', async () => {

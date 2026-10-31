@@ -93,6 +93,23 @@ export async function renderOverview(root) {
   const records = await loadRecords();
   const server = admin && await usesServerRecords();
   if (admin) {
+    const staffRole = staffSession.get()?.staff?.role;
+    const isSupervisorOrAdmin = ['supervisor', 'admin'].includes(staffRole);
+    const supervisorBanner = isSupervisorOrAdmin ? `
+      <div class="panel" style="margin-bottom: 20px;">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow" style="margin: 0 0 4px;">${staffRole === 'supervisor' ? 'Supervisor operations' : 'City-wide supervisor operations'}</p>
+            <h2 style="margin: 0;">Supervisor Wards & Allocations</h2>
+            <p class="lead" style="margin: 6px 0 0;">Inspect complaint density across your authorised zones and wards, review overdue items, and bulk-allocate complaints to field staff.</p>
+          </div>
+          <div class="panel-head-right">
+            <a class="btn btn-primary" href="#/official/supervisor">${icon('layers')}<span>Supervisor wards</span></a>
+            <a class="btn btn-secondary" href="#/official/supervisor/allocate">Multi-ward allocation</a>
+            <a class="btn btn-ghost" href="#/official/supervisor/unverified">Unverified</a>
+          </div>
+        </div>
+      </div>` : '';
     const open = records.filter(r => r.status !== 'Marked Resolved');
     const needsReview = records.filter(r => ['Submitted', 'Under Review'].includes(r.status));
     const disputed = records.filter(r => ['Disputed', 'Reinspection Required'].includes(r.verification));
@@ -103,6 +120,7 @@ export async function renderOverview(root) {
       ${server
         ? notice(`Showing <strong>${records.length}</strong> ${records.length === 1 ? 'complaint' : 'complaints'} stored on the CivicLens server. Open a case to view its evidence, change its status, assign it and manage work orders.`, 'info', 'alert')
         : notice('Sample incidents and the activity series are illustrative. Browser-local reports appear alongside them. No municipal system is connected.', 'info', 'alert')}
+      ${supervisorBanner}
       <div class="stats" role="list">
         ${stat('Total cases', records.length, 'Across the workspace')}
         ${stat('Awaiting first review', needsReview.length, 'Submitted or under review', 'stat-navy')}

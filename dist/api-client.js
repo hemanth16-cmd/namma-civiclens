@@ -232,8 +232,9 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return evidenceBlob(await request('POST', `/complaints/${encodeURIComponent(id)}/evidence/view`, {claim}, {timeout: uploadTimeoutMs, raw: true}));
     },
     /** GET /residents/me/complaints/{id}/evidence, for a complaint in the signed-in resident's account. */
-    async fetchResidentEvidence(token, id) {
-      return evidenceBlob(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}/evidence`, undefined, {headers: bearer(token), timeout: uploadTimeoutMs, raw: true}));
+    async fetchResidentEvidence(token, id, evidenceId = '') {
+      const suffix = evidenceId ? `/${encodeURIComponent(evidenceId)}` : '';
+      return evidenceBlob(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}/evidence${suffix}`, undefined, {headers: bearer(token), timeout: uploadTimeoutMs, raw: true}));
     },
     /** GET /residents/me/complaints/{id}: one complaint of the signed-in resident, or null if it is not theirs. */
     async getResidentComplaint(token, id) {

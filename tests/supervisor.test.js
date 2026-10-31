@@ -89,3 +89,47 @@ test('only supervisors and admins see the supervisor workspace', () => {
   assert.equal(isSupervisor({role: 'official'}), false);
   assert.equal(isSupervisor(null), false);
 });
+
+const {dashboardRoute} = await import('../dist/views/staff.js');
+const {workspaceShell} = await import('../dist/ui.js');
+const {staffSession} = await import('../dist/staff-session.js');
+const {setSession} = await import('../dist/state.js');
+
+test('dashboardRoute directs supervisors to supervisor workspace by default', () => {
+  assert.equal(dashboardRoute('', 'supervisor'), 'official/supervisor');
+  assert.equal(dashboardRoute('supervisor', 'official'), 'official/supervisor');
+  assert.equal(dashboardRoute('notifications', 'supervisor'), 'official/notifications');
+  assert.equal(dashboardRoute('', 'official'), 'official/complaints');
+  assert.equal(dashboardRoute('NCL-2026-ABC123', 'supervisor'), 'issue/NCL-2026-ABC123');
+});
+
+test('workspace navigation adapts to server-side staff role', () => {
+  // Official staff
+  staffSession.set({token: TOKEN, staff: {role: 'official', username: 'official_demo', displayName: 'Official Demo'}});
+  setSession({role: 'official', name: 'Official Demo', email: 'official@civiclens.test', server: true});
+  const officialHtml = workspaceShell({title: 'Overview', body: ''});
+  assert.ok(!officialHtml.includes('#/official/supervisor'), 'ordinary official does not see supervisor wards nav');
+  assert.ok(officialHtml.includes('City operations'));
+  assert.ok(officialHtml.includes('Admin workspace'));
+
+  // Supervisor staff
+  staffSession.set({token: TOKEN, staff: {role: 'supervisor', username: 'sup_demo', displayName: 'Supervisor Demo'}});
+  setSession({role: 'official', name: 'Supervisor Demo', email: 'sup@civiclens.test', server: true});
+  const supHtml = workspaceShell({title: 'Overview', body: ''});
+  assert.ok(supHtml.includes('#/official/supervisor'), 'supervisor sees supervisor wards nav');
+  assert.ok(supHtml.includes('Supervisor wards'), 'supervisor wards link label present');
+  assert.ok(supHtml.includes('Supervisor operations'), 'supervisor operations header label present');
+  assert.ok(supHtml.includes('Supervisor workspace'), 'supervisor workspace breadcrumb root present');
+
+  // Admin staff
+  staffSession.set({token: TOKEN, staff: {role: 'admin', username: 'admin_demo', displayName: 'Admin Demo'}});
+  setSession({role: 'official', name: 'Admin Demo', email: 'admin@civiclens.test', server: true});
+  const adminHtml = workspaceShell({title: 'Overview', body: ''});
+  assert.ok(adminHtml.includes('#/official/supervisor'), 'admin sees supervisor wards nav');
+  assert.ok(adminHtml.includes('City operations · Admin'), 'admin header label present');
+  assert.ok(adminHtml.includes('Admin workspace'), 'admin workspace breadcrumb root present');
+
+  // Cleanup
+  staffSession.clear();
+  setSession(null);
+});

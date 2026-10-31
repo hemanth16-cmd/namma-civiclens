@@ -16,6 +16,7 @@ function saveHistory() {
 }
 
 export function currentPath() {
+  if (typeof location === 'undefined') return 'camera';
   return location.hash.replace(/^#\/?/, '') || 'camera';
 }
 
