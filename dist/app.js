@@ -6,6 +6,7 @@ import {renderIssue} from './views/issue.js';
 import {renderIntelligence} from './views/intelligence.js';
 import {renderMapPage} from './views/map-page.js';
 import {renderStaff} from './views/staff.js';
+import {renderSupervisor} from './views/supervisor.js';
 import {renderMyReports} from './views/my-reports.js';
 import {reportMode} from './report-gateway.js';
 import {renderNotifications as renderServerNotifications} from './views/notifications.js';
@@ -71,6 +72,7 @@ async function dispatch(path, parts, root) {
       case 'workorders': return renderWorkOrders(root);
       case 'intelligence': return renderIntelligence(root);
       case 'video-review': return renderVideoDesk(root);
+      case 'supervisor': return head === 'official' ? renderSupervisor(root, parts.slice(2)) : renderOverview(root);  // server mode; the API checks role and scope
       default: return renderOverview(root);
     }
   }

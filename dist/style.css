@@ -861,3 +861,8 @@ dialog.dialog::backdrop { background: #0F2236B3; }
 .notification-text p { margin: 0 0 4px; overflow-wrap: anywhere; }
 .notification-title { display: flex; align-items: center; gap: 8px; }
 .unread-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--coral); flex: none; }
+
+/* Supervisor workspace: ward picker */
+.ward-zone { border: 1px solid var(--line, #0F22361F); border-radius: 12px; padding: 8px 12px; }
+.ward-zone summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; cursor: pointer; }
+.ward-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px 16px; padding: 10px 0 4px; }

@@ -306,6 +306,69 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
         action: String(e?.action ?? ''), details: e?.details && typeof e.details === 'object' ? e.details : {}, at: e?.at ?? null}));
     },
 
+    // ---------- Supervisor operations (supervisors and admins; 403 for officials) ----------
+
+    /** The wards this supervisor may act on, grouped by zone. Admins are city-wide. */
+    async supervisorScope(token) {
+      const d = await request('GET', '/staff/supervisor/scope', undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d?.zones)) throw new ApiError('The CivicLens server sent a ward list this app could not read.', {code: 'malformed_response'});
+      return {cityWide: d.cityWide === true, role: String(d.role ?? ''), wardCount: Number(d.wardCount) || 0,
+        zones: d.zones.filter(z => Number.isInteger(z?.number)).map(z => ({number: z.number, name: String(z.name ?? ''),
+          wards: (Array.isArray(z.wards) ? z.wards : []).filter(w => Number.isInteger(w?.number)).map(w => ({number: w.number, name: String(w.name ?? ''), hasBoundary: w.hasBoundary === true}))}))};
+    },
+
+    /** City, zone or ward counts from the server's complaint rows. */
+    async supervisorDashboard(token, {zone = null, ward = null} = {}) {
+      const q = new URLSearchParams();
+      if (ward) q.set('ward', String(ward)); else if (zone) q.set('zone', String(zone));
+      const query = q.toString();
+      const d = await request('GET', '/staff/supervisor/dashboard' + (query ? '?' + query : ''), undefined, {headers: staffAuth(token)});
+      if (!d?.totals || !Array.isArray(d.byWard)) throw new ApiError('The CivicLens server sent a dashboard this app could not read.', {code: 'malformed_response'});
+      return {level: ['city', 'zone', 'ward'].includes(d.level) ? d.level : 'city', cityWide: d.cityWide === true, zone: d.zone ?? null, ward: d.ward ?? null,
+        totals: toCounts(d.totals), unverifiedWard: d.unverifiedWard ? toCounts(d.unverifiedWard) : null,
+        byStatus: (Array.isArray(d.byStatus) ? d.byStatus : []).map(s => ({status: String(s?.status ?? ''), count: Number(s?.count) || 0})),
+        byCategory: (Array.isArray(d.byCategory) ? d.byCategory : []).map(c => ({category: String(c?.category ?? ''), ...toCounts(c)})),
+        byZone: (Array.isArray(d.byZone) ? d.byZone : []).filter(z => Number.isInteger(z?.number)).map(z => ({number: z.number, name: String(z.name ?? ''), wards: Number(z.wards) || 0, ...toCounts(z)})),
+        byWard: d.byWard.filter(w => Number.isInteger(w?.number)).map(w => ({...toWardRef(w), ...toCounts(w)}))};
+    },
+
+    /** Unresolved complaints in the selected wards (or with no verified ward), oldest first. */
+    async supervisorComplaints(token, {wards = [], category = '', status = '', minAgeDays = null, maxAgeDays = null, unverifiedWard = false, limit = 100, offset = 0} = {}) {
+      const q = new URLSearchParams({limit: String(limit), offset: String(offset)});
+      if (unverifiedWard) q.set('unverifiedWard', 'true'); else q.set('wards', wards.join(','));
+      if (category) q.set('category', category);
+      if (status) q.set('status', status);
+      if (minAgeDays !== null && minAgeDays !== '') q.set('minAgeDays', String(minAgeDays));
+      if (maxAgeDays !== null && maxAgeDays !== '') q.set('maxAgeDays', String(maxAgeDays));
+      const d = await request('GET', '/staff/supervisor/complaints?' + q, undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d?.items)) throw new ApiError('The CivicLens server sent a complaint list this app could not read.', {code: 'malformed_response'});
+      return {total: Number(d.total) || 0, items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
+        id: i.id, title: String(i.title ?? ''), category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
+        verification: String(i.verification ?? ''), department: String(i.department ?? ''), received: i.received ?? null, ageDays: Number(i.ageDays) || 0,
+        priority: typeof i.priority === 'string' ? i.priority : null, dueAt: typeof i.dueAt === 'string' ? i.dueAt : null, overdue: i.overdue === true,
+        ward: toWardRef(i.ward), wardAssignmentStatus: WARD_STATUSES.includes(i.wardAssignmentStatus) ? i.wardAssignmentStatus : 'unverified', assignee: staffRef(i.assignee)}))};
+    },
+
+    async supervisorStaff(token) {
+      const d = await request('GET', '/staff/supervisor/staff', undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent a staff list this app could not read.', {code: 'malformed_response'});
+      return d.filter(x => typeof x?.username === 'string').map(x => ({username: x.username, displayName: String(x.displayName ?? x.username), role: String(x.role ?? ''),
+        departments: Array.isArray(x.departments) ? x.departments.map(String) : []}));
+    },
+
+    /** Bulk allocation. All or nothing on the server; returns the per-complaint outcome. */
+    async allocateComplaints(token, {complaints, department = null, assignee, priority = 'normal', dueAt = null, reason, note = ''}) {
+      const d = await request('POST', '/staff/supervisor/allocations', {complaints, department, assignee, priority, dueAt, reason, note}, {headers: staffAuth(token)});
+      if (!Array.isArray(d?.results)) throw new ApiError('The CivicLens server sent an allocation result this app could not read.', {code: 'malformed_response', ambiguous: true});
+      return {batch: String(d.batch ?? ''), changed: Number(d.changed) || 0, unchanged: Number(d.unchanged) || 0,
+        results: d.results.map(r => ({id: String(r?.id ?? ''), outcome: String(r?.outcome ?? '')}))};
+    },
+
+    /** Manual ward by a supervisor or admin (audited; the original GPS is kept). */
+    async setComplaintWard(token, id, {ward, reason}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/ward`, {ward, reason}, {headers: staffAuth(token)}));
+    },
+
     /** Citizen response with the private claim code (in the JSON body only). No staff session. */
     async submitCitizenResponse(id, claim, response) {
       const d = await request('POST', `/complaints/${encodeURIComponent(id)}/citizen-responses`, {claim, response});
@@ -524,7 +587,18 @@ function toListGps(g) {
 }
 const staffAuth = token => ({Authorization: 'Bearer ' + token});
 
-const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update', 'review_duplicates', 'merge', 'revert_merge'];
+const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update', 'review_duplicates', 'merge', 'revert_merge', 'set_ward'];
+const WARD_STATUSES = ['auto', 'manual', 'unverified'];
+
+function toWardRef(w) {
+  if (!w || !Number.isInteger(w.number)) return null;
+  return {number: w.number, name: String(w.name ?? ''), zone: {number: Number.isInteger(w.zone?.number) ? w.zone.number : null, name: String(w.zone?.name ?? '')}};
+}
+
+function toCounts(c) {
+  const n = k => Number.isInteger(c?.[k]) ? c[k] : 0;
+  return {total: n('total'), open: n('open'), resolved: n('resolved'), pendingVerification: n('pendingVerification'), overdue: n('overdue')};
+}
 const DUPLICATE_LABELS = ['likely_duplicate', 'possible_duplicate', 'recurrence', 'nearby_separate'];
 const MERGE_ID = /^mg_[A-Za-z0-9_-]{16}$/;
 const publicIdOrNull = v => (typeof v === 'string' && PUBLIC_ID.test(v) ? v : null);
@@ -563,6 +637,16 @@ function toManagement(d) {
       id: m.id, duplicate: publicIdOrNull(m.duplicate), canonical: publicIdOrNull(m.canonical), reason: String(m.reason ?? ''),
       score: Number.isFinite(m.score) ? m.score : null, label: DUPLICATE_LABELS.includes(m.label) ? m.label : null, by: String(m.by ?? ''),
       at: m.at ?? null, revertedAt: m.revertedAt ?? null, revertedBy: m.revertedBy ?? null, revertReason: m.revertReason ?? null})),
+    ward: toWardRef(d.ward),
+    wardAssignmentStatus: WARD_STATUSES.includes(d.wardAssignmentStatus) ? d.wardAssignmentStatus : 'unverified',
+    priority: typeof d.priority === 'string' ? d.priority : null,
+    dueAt: typeof d.dueAt === 'string' ? d.dueAt : null,
+    wardHistory: (Array.isArray(d.wardHistory) ? d.wardHistory : []).map(h => ({from: Number.isInteger(h?.from) ? h.from : null, to: Number.isInteger(h?.to) ? h.to : null,
+      method: WARD_STATUSES.includes(h?.method) ? h.method : 'unverified', reason: String(h?.reason ?? ''), by: h?.by ?? null, at: h?.at ?? null})),
+    allocations: (Array.isArray(d.allocations) ? d.allocations : []).map(a => ({kind: String(a?.kind ?? ''), ward: a?.ward ?? null,
+      from: {assignee: a?.from?.assignee ?? null, priority: a?.from?.priority ?? null, dueAt: a?.from?.dueAt ?? null},
+      to: {assignee: a?.to?.assignee ?? null, department: a?.to?.department ?? null, priority: a?.to?.priority ?? null, dueAt: a?.to?.dueAt ?? null},
+      reason: String(a?.reason ?? ''), note: String(a?.note ?? ''), by: String(a?.by ?? ''), at: a?.at ?? null})),
     allowedActions: (Array.isArray(d.allowedActions) ? d.allowedActions : []).filter(x => STAFF_ACTIONS.includes(x?.action)).map(x => ({
       action: x.action, label: String(x.label ?? ''), to: typeof x.to === 'string' ? x.to : null, needsExplanation: x.needsExplanation === true}))
   };

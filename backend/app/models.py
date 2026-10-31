@@ -525,6 +525,200 @@ class MergeOut(BaseModel):
     revertReason: str | None
 
 
+# ---------- Wards, zones and supervisor operations ----------
+
+WardNumber = Annotated[int, Field(ge=1, le=9999)]
+Priority = Literal["low", "normal", "high", "urgent"]
+PublicId = Annotated[str, Field(pattern=r"^NCL-\d{4}-[A-Z0-9]{6}$")]
+
+
+class ZoneRef(BaseModel):
+    number: int | None
+    name: str | None
+
+
+class WardRef(BaseModel):
+    number: int
+    name: str
+    zone: ZoneRef
+
+
+class WardOut(WardRef):
+    active: bool
+    testing: bool
+    hasBoundary: bool
+
+
+class WardHistoryEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    from_: int | None = Field(default=None, alias="from")
+    to: int | None
+    method: Literal["auto", "manual", "unverified"]
+    reason: str
+    gps: dict
+    by: str | None
+    at: str
+
+
+class AllocationSide(BaseModel):
+    department: str | None
+    assignee: str | None
+    priority: str | None
+    dueAt: str | None
+    status: str
+
+
+class AllocationEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    batch: str
+    kind: Literal["allocated", "reallocated"]
+    ward: int | None
+    zone: int | None
+    from_: AllocationSide = Field(alias="from")
+    to: AllocationSide
+    reason: str
+    note: str
+    by: str
+    at: str
+
+
+class WardSetIn(_Strict):
+    ward: WardNumber
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class AllocationIn(_Strict):
+    complaints: Annotated[list[PublicId], Field(min_length=1, max_length=100)]
+    department: DepartmentCode | None = None
+    assignee: Username
+    priority: Priority = "normal"
+    dueAt: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")] | None = None  # a local (IST) date
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+    note: Annotated[str, Field(max_length=2000)] = ""
+
+    @field_validator("dueAt")
+    @classmethod
+    def _real_date(cls, v: str | None) -> str | None:
+        if v is not None:
+            datetime.strptime(v, "%Y-%m-%d")
+        return v
+
+
+class AllocationResult(BaseModel):
+    id: str
+    outcome: Literal["allocated", "reallocated", "unchanged"]
+    allocationId: str | None = None
+    status: str | None = None
+
+
+class AllocationOut(BaseModel):
+    batch: str
+    results: list[AllocationResult]
+    changed: int
+    unchanged: int
+
+
+class ScopeWard(BaseModel):
+    number: int
+    name: str
+    hasBoundary: bool
+
+
+class ScopeZone(BaseModel):
+    number: int
+    name: str
+    wards: list[ScopeWard]
+
+
+class SupervisorScope(BaseModel):
+    role: str
+    cityWide: bool
+    zones: list[ScopeZone]
+    wardCount: int
+
+
+class SupervisorComplaint(BaseModel):
+    id: str
+    title: str
+    category: str
+    area: str
+    status: str
+    verification: str
+    department: str
+    received: str
+    ageDays: int
+    priority: str | None
+    dueAt: str | None
+    overdue: bool
+    ward: WardRef | None
+    wardAssignmentStatus: str
+    assignee: StaffRef | None
+    gps: dict
+
+
+class SupervisorComplaintList(BaseModel):
+    items: list[SupervisorComplaint]
+    total: int
+    limit: int
+    offset: int
+
+
+class Counts(BaseModel):
+    total: int
+    open: int
+    resolved: int
+    pendingVerification: int
+    overdue: int
+
+
+class CategoryCounts(Counts):
+    category: str
+
+
+class ZoneCounts(Counts):
+    number: int
+    name: str
+    wards: int
+
+
+class WardCounts(Counts):
+    number: int
+    name: str
+    active: bool
+    testing: bool
+    zone: ZoneRef
+
+
+class StatusCount(BaseModel):
+    status: str
+    count: int
+
+
+class SupervisorDashboard(BaseModel):
+    level: Literal["city", "zone", "ward"]
+    cityWide: bool
+    zone: int | None
+    ward: int | None
+    today: str
+    totals: Counts
+    unverifiedWard: Counts | None
+    byStatus: list[StatusCount]
+    byCategory: list[CategoryCounts]
+    byZone: list[ZoneCounts]
+    byWard: list[WardCounts]
+
+
+class AssignableStaff(BaseModel):
+    username: str
+    displayName: str
+    role: str
+    departments: list[str]
+
+
 class StaffCase(StaffComplaint):
     """StaffComplaint plus management data. Internal notes and staff names appear only here."""
     version: int
@@ -534,6 +728,12 @@ class StaffCase(StaffComplaint):
     workOrders: list[WorkOrderOut]
     notes: list[StaffNoteOut]
     allowedActions: list[AllowedAction]
+    ward: WardOut | None = None
+    wardAssignmentStatus: Literal["auto", "manual", "unverified"] = "unverified"
+    priority: Priority | None = None
+    dueAt: str | None = None
+    wardHistory: list[WardHistoryEntry] = []
+    allocations: list[AllocationEntry] = []
 
 
 class AuditEntry(BaseModel):
