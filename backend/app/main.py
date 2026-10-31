@@ -21,6 +21,7 @@ from .evidence import router as evidence_router
 from .auth import session_ttl
 from .resident_auth import session_ttl as resident_session_ttl_from_env
 from .residents_api import router as residents_router
+from .owner_evidence import router as owner_evidence_router
 from .evidence_storage import EvidenceStorage, LocalEvidenceStorage
 from .notifications import MAX_FAILURES, Notifier
 from .notifications_api import router as notifications_router
@@ -159,6 +160,7 @@ def create_app(
     router.include_router(evidence_router)
     router.include_router(staff_router)
     router.include_router(residents_router)
+    router.include_router(owner_evidence_router)
     router.include_router(cases_router)
     router.include_router(notifications_router)
     app.include_router(router)

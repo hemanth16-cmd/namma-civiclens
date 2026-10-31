@@ -102,3 +102,22 @@ test('no server credentials or demo admin details are shipped in the frontend', 
     }
   }
 });
+
+test('owner evidence uses the claim code in the body only, or the resident token, and accepts evidence types only', async () => {
+  const jpeg = () => new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), {status: 200, headers: {'Content-Type': 'image/jpeg'}});
+  const c = recorder(jpeg);
+  const http = createApiClient({baseUrl: BACKEND.baseUrl, fetchImpl: c.fetchImpl});
+  const blob = await http.fetchOwnEvidenceWithClaim('NCL-2026-AAAAAA', 'secret-claim');
+  assert.equal(blob.type, 'image/jpeg');
+  assert.equal(c.calls[0].url, BACKEND.baseUrl + '/complaints/NCL-2026-AAAAAA/evidence/view');
+  assert.equal(c.calls[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(c.calls[0].init.body), {claim: 'secret-claim'});
+  assert.ok(!c.calls[0].url.includes('secret-claim') && !c.calls[0].init.headers.Authorization);
+  const r = recorder(jpeg);
+  await createApiClient({baseUrl: BACKEND.baseUrl, fetchImpl: r.fetchImpl}).fetchResidentEvidence('t'.repeat(43), 'NCL-2026-AAAAAA');
+  assert.equal(r.calls[0].url, BACKEND.baseUrl + '/residents/me/complaints/NCL-2026-AAAAAA/evidence');
+  assert.equal(r.calls[0].init.headers.Authorization, 'Bearer ' + 't'.repeat(43));
+  const html = recorder(() => new Response('<script>x</script>', {status: 200, headers: {'Content-Type': 'text/html'}}));
+  await assert.rejects(createApiClient({baseUrl: BACKEND.baseUrl, fetchImpl: html.fetchImpl}).fetchOwnEvidenceWithClaim('NCL-2026-AAAAAA', 'c'),
+    err => err.code === 'malformed_response');
+});

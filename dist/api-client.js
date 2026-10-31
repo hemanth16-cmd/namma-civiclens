@@ -208,11 +208,27 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
 
     /** GET /staff/complaints/{id}/evidence. Resolves to a Blob of an allowed media type. Each call is logged by the server. */
     async fetchStaffEvidence(token, id) {
-      const response = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/evidence`, undefined, {headers: staffAuth(token), timeout: uploadTimeoutMs, raw: true});
-      const type = String(response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
-      if (!EVIDENCE_TYPES.includes(type)) throw new ApiError('The CivicLens server sent evidence of an unexpected type, so it is not shown.', {code: 'malformed_response'});
-      const bytes = await response.arrayBuffer();
-      return new Blob([bytes], {type});
+      return evidenceBlob(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/evidence`, undefined, {headers: staffAuth(token), timeout: uploadTimeoutMs, raw: true}));
+    },
+
+    // ---------- Owner evidence: the same server retrieval as staff, authorised by ownership instead. ----------
+
+    /** POST /complaints/{id}/evidence/view. The claim code travels in the JSON body only; the file comes back as a Blob. */
+    async fetchOwnEvidenceWithClaim(id, claim) {
+      return evidenceBlob(await request('POST', `/complaints/${encodeURIComponent(id)}/evidence/view`, {claim}, {timeout: uploadTimeoutMs, raw: true}));
+    },
+    /** GET /residents/me/complaints/{id}/evidence, for a complaint in the signed-in resident's account. */
+    async fetchResidentEvidence(token, id) {
+      return evidenceBlob(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}/evidence`, undefined, {headers: bearer(token), timeout: uploadTimeoutMs, raw: true}));
+    },
+    /** GET /residents/me/complaints/{id}: one complaint of the signed-in resident, or null if it is not theirs. */
+    async getResidentComplaint(token, id) {
+      try {
+        return toResidentComplaint(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}`, undefined, {headers: bearer(token)}));
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
     },
 
     // ---------- Complaint management (staff). Every call returns the updated staff case from the server. ----------
@@ -492,6 +508,13 @@ function toDevice(d) {
 }
 
 const EVIDENCE_TYPES = ['image/jpeg', 'video/webm', 'video/mp4'];
+
+/** An evidence response as a Blob, accepted only with an evidence content type (staff and owner views alike). */
+async function evidenceBlob(response) {
+  const type = String(response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+  if (!EVIDENCE_TYPES.includes(type)) throw new ApiError('The CivicLens server sent evidence of an unexpected type, so it is not shown.', {code: 'malformed_response'});
+  return new Blob([await response.arrayBuffer()], {type});
+}
 
 /** Staff-list location for the admin map; null unless both coordinates are valid. */
 function toListGps(g) {

@@ -14,31 +14,13 @@ from .auth import current_staff, normalise_username, session_ttl, sign_in
 from .complaints import NOT_FOUND, PUBLIC_ID_PATTERN
 from .errors import ApiProblem
 from .models import EvidenceAccessEntry, StaffCase, StaffComplaintList, StaffIdentity, StaffSessionOut, StaffSignIn
+from .evidence_access import open_and_stream
 from .ratelimit import client_ip, enforce
-from .store import STAFF_LIST_MAX, StoreError
+from .store import STAFF_LIST_MAX
 
 router = APIRouter(prefix="/staff", tags=["staff"])
 logger = logging.getLogger("civiclens.staff")
-CHUNK = 64 * 1024
-EXTENSIONS = {"image/jpeg": "jpg", "video/webm": "webm", "video/mp4": "mp4"}
 # 404 evidence_unavailable messages: the record exists but this server cannot serve its file.
-UNAVAILABLE = {
-    "supabase": "This evidence is stored in Supabase Storage, which this server is not connected to, so it cannot be shown here.",
-    "local": "This evidence is stored on a server's local disk that this server cannot reach, so it cannot be shown here.",
-    "other": "This evidence is stored in a location this server is not connected to, so it cannot be shown here.",
-}
-MISSING_FILE = ("The evidence file for this complaint is not in this server's storage. It may have been uploaded while the "
-                "API was running elsewhere, for example on another machine's local disk. Nothing was opened or logged.")
-
-
-def _definitely_missing(storage, key: str) -> bool:
-    """True only when the storage confirms the object is absent; False when it cannot tell."""
-    try:
-        return not storage.exists(key)
-    except StoreError:
-        return False
-
-
 @router.post("/sessions", response_model=StaffSessionOut)
 def create_session(payload: StaffSignIn, request: Request, response: Response) -> dict:
     """Sign in. Rate-limited per IP and per username before the password check."""
@@ -107,43 +89,12 @@ def view_evidence(public_id: str, request: Request, background: BackgroundTasks,
 
 
 def stream_evidence(request: Request, evidence: dict, staff: dict, basename: str, background: BackgroundTasks | None = None) -> StreamingResponse:
-    """Stream one evidence file to signed-in staff. The view is logged before any byte is sent; if
-    logging fails, nothing is sent. `evidence` needs pk, storageBackend, storageKey, contentType, byteSize."""
-    store = request.app.state.store
-    # Read from the backend that stored this file (local evidence stays readable after switching to Supabase Storage).
-    storage = request.app.state.evidence_storages.get(evidence["storageBackend"])
-    if storage is None:
-        logger.warning("Evidence for %s is in the %r backend, which this server is not configured for", basename, evidence["storageBackend"])
-        raise ApiProblem(404, "evidence_unavailable", UNAVAILABLE.get(evidence["storageBackend"], UNAVAILABLE["other"]))
-    try:
-        handle = storage.open_read(evidence["storageKey"])
-    except StoreError:
-        # A file that is definitely absent is a permanent condition, not an outage: say so instead of 503.
-        if _definitely_missing(storage, evidence["storageKey"]):
-            logger.warning("Evidence file for %s is missing from the %r backend", basename, evidence["storageBackend"])
-            raise ApiProblem(404, "evidence_unavailable", MISSING_FILE)
-        raise  # → 503 storage_unavailable (e.g. Supabase unreachable)
-    try:
-        store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
-    except BaseException:
-        handle.close()
-        raise
-
-    def chunks():
-        try:
-            while data := handle.read(CHUNK):
-                yield data
-        finally:
-            handle.close()
-
-    filename = f"{basename}.{EXTENSIONS.get(evidence['contentType'], 'bin')}"
-    return StreamingResponse(chunks(), media_type=evidence["contentType"], background=background, headers={
-        "Content-Length": str(evidence["byteSize"]),
-        "Content-Disposition": f'inline; filename="{filename}"',
-        "Cache-Control": "no-store, private",
-        "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; sandbox",
-    })
+    """Stream one evidence file to signed-in staff through the shared retrieval service. The view is
+    written to evidence_access_log before any byte is sent; if logging fails, nothing is sent.
+    `evidence` needs pk, storageBackend, storageKey, contentType, byteSize."""
+    def log_view() -> None:
+        request.app.state.store.log_evidence_access(evidence["pk"], staff["pk"], client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
+    return open_and_stream(request, evidence, basename, log_view, background)
 
 
 @router.get("/complaints/{public_id}/evidence/access", response_model=list[EvidenceAccessEntry])
