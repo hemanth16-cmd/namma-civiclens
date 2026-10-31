@@ -65,6 +65,11 @@ class RateLimitSettings:
     push_test_per_recipient: Rule = Rule(5, 3600)   # POST /notifications/test
     citizen_response_per_ip: Rule = Rule(10, 900)   # POST /complaints/{id}/citizen-responses (claim-code check)
     citizen_response_per_complaint: Rule = Rule(10, 3600)
+    resident_register_per_ip: Rule = Rule(5, 3600)  # POST /residents
+    resident_login_per_ip: Rule = Rule(10, 900)     # POST /residents/sessions
+    resident_login_per_account: Rule = Rule(10, 3600)
+    resident_claim_per_ip: Rule = Rule(10, 900)     # POST /residents/me/claims (claim-code check)
+    resident_claim_per_complaint: Rule = Rule(10, 3600)
     trusted_proxies: tuple = field(default_factory=tuple)
 
     ENV_RULES = {
@@ -83,6 +88,11 @@ class RateLimitSettings:
         "push_test_per_recipient": "CIVICLENS_RATE_PUSH_TEST",
         "citizen_response_per_ip": "CIVICLENS_RATE_CITIZEN_RESPONSE_IP",
         "citizen_response_per_complaint": "CIVICLENS_RATE_CITIZEN_RESPONSE_COMPLAINT",
+        "resident_register_per_ip": "CIVICLENS_RATE_RESIDENT_REGISTER_IP",
+        "resident_login_per_ip": "CIVICLENS_RATE_RESIDENT_LOGIN_IP",
+        "resident_login_per_account": "CIVICLENS_RATE_RESIDENT_LOGIN_ACCOUNT",
+        "resident_claim_per_ip": "CIVICLENS_RATE_RESIDENT_CLAIM_IP",
+        "resident_claim_per_complaint": "CIVICLENS_RATE_RESIDENT_CLAIM_COMPLAINT",
     }
 
     @classmethod

@@ -49,6 +49,9 @@ FOREIGN_KEYS = (
     ("push_subscriptions", "recipient_pk", "notification_recipients"),
     ("notifications", "recipient_pk", "notification_recipients"),
     ("notifications", "complaint_pk", "complaints"),
+    ("complaints", "owner_resident_pk", "resident_accounts"),
+    ("resident_sessions", "resident_pk", "resident_accounts"),
+    ("resident_preferences", "resident_pk", "resident_accounts"),
 )
 _IMPORT_LOCK_ID = 7_201_027
 

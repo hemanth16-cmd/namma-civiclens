@@ -19,6 +19,8 @@ from .errors import install_error_handlers
 from .evidence import UploadSettings
 from .evidence import router as evidence_router
 from .auth import session_ttl
+from .resident_auth import session_ttl as resident_session_ttl_from_env
+from .residents_api import router as residents_router
 from .evidence_storage import EvidenceStorage, LocalEvidenceStorage
 from .notifications import MAX_FAILURES, Notifier
 from .notifications_api import router as notifications_router
@@ -57,6 +59,7 @@ def create_app(
     evidence_quota: EvidenceQuota | None = None,
     replay_window: timedelta | None = None,
     staff_session_ttl: timedelta | None = None,
+    resident_session_ttl: timedelta | None = None,
     push_settings: PushSettings | None = None,
     push_sender: PushSender | None = None,
 ) -> FastAPI:
@@ -102,6 +105,8 @@ def create_app(
         replay_window = timedelta(seconds=int(replay_raw)) if replay_raw else DEFAULT_REPLAY_WINDOW
     if staff_session_ttl is None:
         staff_session_ttl = session_ttl()
+    if resident_session_ttl is None:
+        resident_session_ttl = resident_session_ttl_from_env()
     origins = resolve_cors_origins(cors_origins)
     # Web Push: VAPID_* variables (push.py). Without keys, notifications are stored but not pushed.
     # Tests pass push_settings and a fake push_sender.
@@ -141,6 +146,7 @@ def create_app(
     app.state.evidence_quota = evidence_quota
     app.state.replay_window = replay_window
     app.state.staff_session_ttl = staff_session_ttl
+    app.state.resident_session_ttl = resident_session_ttl
     app.state.push_settings = push_settings
     app.state.push_endpoint_hosts = push_settings.endpoint_hosts if push_settings else DEFAULT_ENDPOINT_HOSTS
     app.state.notifier = notifier
@@ -152,6 +158,7 @@ def create_app(
     router.include_router(complaints_router)
     router.include_router(evidence_router)
     router.include_router(staff_router)
+    router.include_router(residents_router)
     router.include_router(cases_router)
     router.include_router(notifications_router)
     app.include_router(router)

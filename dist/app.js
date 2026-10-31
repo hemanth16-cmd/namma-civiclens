@@ -11,19 +11,25 @@ import {reportMode} from './report-gateway.js';
 import {renderNotifications as renderServerNotifications} from './views/notifications.js';
 import {openNotification, refreshPush, takeLaunchNotification, inbox} from './push-client.js';
 import {staffSession} from './staff-session.js';
+import {residentSession} from './resident-session.js';
 import {loadApiConfig} from './api-config.js';
 import {createApiClient} from './api-client.js';
 import {mountVideoReview} from './video-review.js';
 import {api} from './services.js';
 import {state, viewer, setSession, runCleanups, addCleanup} from './state.js';
-import {navigate, currentPath, recordRoute, goBack, setRenderer, serverModeRoute} from './router.js';
+import {navigate, currentPath, recordRoute, goBack, setRenderer, serverModeRoute, serverWorkspaceAccess} from './router.js';
 import {toast, workspaceShell, notice, esc, btn} from './ui.js';
 
 const app = document.querySelector('#app');
+
+// An identity restored from sessionStorage is only a display hint. The old "this device" pseudo-resident
+// and a server resident whose in-memory token is gone (reload, new tab) are dropped here. A stale staff
+// identity is kept until the router sees it, so a reloaded case page sends staff back to sign-in.
+if (state.session?.device || (state.session?.server && state.session.role === 'resident' && !residentSession.get())) setSession(null);
 const TITLES = {
   camera: 'Report an issue', review: 'Review evidence', home: 'Choose an option', track: 'Track a problem',
   login: 'Sign in', register: 'Create a demo profile', receipt: 'Receipt', issue: 'Case', staff: 'Staff console',
-  notifications: 'Notifications', 'my-reports': 'My reports'
+  notifications: 'Notifications', 'my-reports': 'Reports on This Device'
 };
 
 function fallbackPath(name) {
@@ -81,29 +87,15 @@ async function render({focus = true} = {}) {
   let role = viewer().role;
 
   // Server mode: the workspaces must never show browser-local sample data in place of server complaints.
-  // The admin workspace needs a server staff session (kept in memory only) and then reads server
-  // complaints; residents go to their reports; a case opens in the staff console.
+  // The admin workspace needs a server staff session and the resident workspace a server resident
+  // session (both kept in memory only). A passerby never gets either just by opening a URL.
   if (['official', 'resident', 'issue'].includes(head) && await reportMode() === 'backend') {
     if (seq !== renderSeq) return;
     const staff = staffSession.get();
-    if (head === 'issue' && !staff && state.session?.server && !state.session?.device) {
-      setSession(null);  // a staff member whose memory-only session ended (e.g. reload): sign in again
-      return navigate('login/official');
-    }
-    if (head === 'official' || (head === 'issue' && staff)) {
-      if (!staff) {
-        if (role === 'official') setSession(null);  // a demo or expired identity must not open the workspace
-        return navigate('login/official');
-      }
-      if (role !== 'official' || !state.session?.server) {
-        setSession({role: 'official', name: staff.staff.displayName, email: staff.staff.username, server: true});
-        role = 'official';
-      }
-    }
-    if (head === 'resident' && role !== 'resident') {
-      setSession({role: 'resident', name: 'This device', email: '', server: true, device: true});
-      role = 'resident';
-    }
+    const access = serverWorkspaceAccess(head, {staff, resident: residentSession.get(), session: state.session});
+    if (access.clear) setSession(null);
+    if (access.redirect) return navigate(access.redirect);
+    if (access.identity) { setSession(access.identity); role = access.identity.role; }
     const target = serverModeRoute(parts, {staff: !!staff});
     if (target) return navigate(target);
   }

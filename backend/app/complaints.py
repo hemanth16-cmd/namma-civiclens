@@ -16,6 +16,7 @@ from .claims import verify_claim_code
 from .errors import ApiProblem
 from .models import CitizenResponseIn, CitizenResponseOut, ComplaintCreate, ComplaintReceipt, PublicComplaint, UploadTokenRequest, UploadTokenResponse
 from .ratelimit import client_ip, enforce
+from .resident_auth import optional_resident
 from .store import ComplaintStore, IdempotencyCompleted, IdempotencyConflict, iso
 
 router = APIRouter(prefix="/complaints", tags=["complaints"])
@@ -46,7 +47,12 @@ def request_fingerprint(data: dict) -> str:
 
 
 @router.post("", status_code=201, response_model=ComplaintReceipt, dependencies=[Depends(_limit_create)])
-def create_complaint(payload: ComplaintCreate, request: Request, response: Response, background: BackgroundTasks) -> dict:
+def create_complaint(payload: ComplaintCreate, request: Request, response: Response, background: BackgroundTasks,
+                     resident: dict | None = Depends(optional_resident)) -> dict:
+    """Anyone may report; no account is needed and the complaint is then unowned. With a valid resident
+    bearer token the complaint belongs to that resident (taken from the session, never from the body).
+    Any other bearer token (expired, revoked, staff) is refused rather than treated as anonymous."""
+    owner_pk = resident["pk"] if resident else None
     data = payload.model_dump()
     if payload.capturedAt is not None:
         data["capturedAt"] = iso(payload.capturedAt)
@@ -57,14 +63,16 @@ def create_complaint(payload: ComplaintCreate, request: Request, response: Respo
 
     key = request.headers.get("idempotency-key")
     if key is None:
-        record, claim = store.create(data)
+        record, claim = store.create(data, owner_resident_pk=owner_pk)
         replayed = False
     else:
         if not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
             raise ApiProblem(400, "invalid_idempotency_key", "Idempotency-Key must be 22–128 URL-safe characters (at least 128 random bits).")
         key_hash = hashlib.sha256(key.encode("ascii")).hexdigest()
         try:
-            outcome, record, claim = store.create_idempotent(data, key_hash, request_fingerprint(data), request.app.state.replay_window)
+            # The owner is part of the fingerprint: the same key replayed by someone else is a different request.
+            fingerprint = request_fingerprint(data if owner_pk is None else {**data, "_owner": resident["residentId"]})
+            outcome, record, claim = store.create_idempotent(data, key_hash, fingerprint, request.app.state.replay_window, owner_pk)
         except IdempotencyConflict:
             raise ApiProblem(409, "idempotency_key_conflict", "This Idempotency-Key was already used for a different request.")
         except IdempotencyCompleted as done:

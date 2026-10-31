@@ -2,7 +2,7 @@
 
 **Status: mostly proposed.** This document describes the HTTP API a FastAPI backend would expose so that the browser prototype's rules move to the server without changing the screens. In local mode (the default) the same operations run in `dist/services.js` against `localStorage` and IndexedDB, and the functions are named to match these endpoints.
 
-**Implemented in `backend/` so far** (see `backend/README.md` for exact request and response shapes): `GET /api/v1/health`, `POST /api/v1/complaints`, `GET /api/v1/complaints/{publicId}`, `POST /api/v1/complaints/{publicId}/upload-token` `POST /api/v1/complaints/{publicId}/evidence` (section 5) the staff console endpoints under `/api/v1/staff` (section 3.1), complaint management (section 3.2: lifecycle, assignment, work orders, notes, citizen verification, audit) and Web Push notifications under `/api/v1/notifications` (section 9.1), with per-IP/per-complaint rate limits (`429 rate_limited` + `Retry-After`), an evidence storage quota (`507 storage_quota_exceeded`) and `Idempotency-Key` support on complaint creation (section 2.1). Everything else below is still proposed. Evidence files can be stored on local disk (default) or in a private Supabase Storage bucket (`EVIDENCE_STORAGE_BACKEND=supabase`), and complaint data in SQLite (default) or PostgreSQL / Supabase Postgres (`DATABASE_BACKEND=postgres`); the API contract is identical in every combination. Resident accounts and shared (multi-process) rate limiting are not built.
+**Implemented in `backend/` so far** (see `backend/README.md` for exact request and response shapes): `GET /api/v1/health`, `POST /api/v1/complaints`, `GET /api/v1/complaints/{publicId}`, `POST /api/v1/complaints/{publicId}/upload-token` `POST /api/v1/complaints/{publicId}/evidence` (section 5) the staff console endpoints under `/api/v1/staff` (section 3.1), complaint management (section 3.2: lifecycle, assignment, work orders, notes, citizen verification, audit) and Web Push notifications under `/api/v1/notifications` (section 9.1), with per-IP/per-complaint rate limits (`429 rate_limited` + `Retry-After`), an evidence storage quota (`507 storage_quota_exceeded`) and `Idempotency-Key` support on complaint creation (section 2.1). Everything else below is still proposed. Evidence files can be stored on local disk (default) or in a private Supabase Storage bucket (`EVIDENCE_STORAGE_BACKEND=supabase`), and complaint data in SQLite (default) or PostgreSQL / Supabase Postgres (`DATABASE_BACKEND=postgres`); the API contract is identical in every combination. Resident accounts are implemented under `/api/v1/residents` (section 2.2). Shared (multi-process) rate limiting is not built.
 
 Conventions: JSON over HTTPS under `/api/v1`. Times are ISO 8601 in UTC; the UI displays Asia/Kolkata. Errors use `{ "error": { "code": "...", "message": "..." } }`. Every mutation is authorised on the server, never by the client's role guard.
 
@@ -26,11 +26,11 @@ Claim codes are hashed server-side and shown once, to the submitting client, at 
 | --- | --- | --- | --- |
 | `POST /api/v1/complaints` | Anonymous or signed-in | Create a case from capture or validated gallery upload. Returns public ID and a one-time claim code. Requires coordinates; gallery uploads are validated for JPEG EXIF GPS server-side. | `api.create()` |
 | `GET /api/v1/complaints/{publicId}` | Anonymous | Public tracking projection | `api.publicRecord()` |
-| `GET /api/v1/complaints?scope=mine` | Signed-in owner | Owner's cases with filters | `api.list(viewer)` |
+| `GET /api/v1/residents/me/complaints` | Signed-in resident | Owner's cases (implemented, section 2.2) | `api.list(viewer)` |
 | `GET /api/v1/complaints?scope=community` | Signed-in user | Community projection with filters | `api.list(viewer)` with community scope |
 | `GET /api/v1/complaints/{id}` | Role-dependent | Detail, projected by principal | `api.detail(id, viewer)` |
 | `GET /api/v1/complaints/{id}/receipt` | Submitter only | Receipt, including claim-code presence and evidence copy metadata | `api.receipt(id)` |
-| `POST /api/v1/complaints/claim` | Signed-in user | Claim by public ID and private code. Rate-limited; generic error on mismatch | `api.claim()` |
+| `POST /api/v1/residents/me/claims` | Signed-in resident | Claim by public ID and private code. Rate-limited; generic error on mismatch (implemented, section 2.2) | `api.claim()` |
 | `POST /api/v1/complaints/{id}/share` | Owner | Set `shareEvidence` for original evidence and location | `api.shareOriginal()` |
 | `PUT /api/v1/complaints/{id}/follow` | Signed-in user | Per-account follow state | `api.toggleFollow()` |
 
@@ -44,6 +44,20 @@ Claim codes are hashed server-side and shown once, to the submitting client, at 
 - Concurrent requests with one key create one complaint.
 
 Rate limits (per client IP unless stated; configurable, in-process, reset on restart): create 5 per 10 min; tracking 60 per min; upload-token 5 per 15 min per IP and 10 per hour per complaint; evidence 30 per hour per IP before authorisation and 10 authorised attempts per hour per complaint. Exceeded → `429 rate_limited` with `Retry-After`. Forwarded headers are honoured only from configured trusted proxies.
+
+### 2.2 Implemented: resident accounts and ownership
+
+Implemented in `backend/app/residents_api.py` (exact shapes: `backend/README.md`, "Resident accounts API").
+Passerby, resident and staff are separate principals:
+
+| Principal | How it is established | Complaint ownership |
+| --- | --- | --- |
+| Passerby | No credentials | None. The complaint stays unowned until claimed. |
+| Resident | `POST /residents/sessions` (or registration), then a resident bearer token | Taken from the session on `POST /complaints`, or set by `POST /residents/me/claims` with the private claim code |
+| Staff | `POST /staff/sessions`, then a staff bearer token; role and departments come from the server | Staff act on complaints but never own them |
+
+Tokens are not interchangeable: a resident token is `401` on `/staff/*`, a staff token is `401` on
+`/residents/*` and on `POST /complaints`. The server never reads `owner` or `role` from a request body.
 
 ## 3. Staff operations
 

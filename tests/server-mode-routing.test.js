@@ -9,7 +9,7 @@ globalThis.sessionStorage = shim;
 
 const {mediaDB} = await import('../dist/services.js');
 const {submitReport, rememberedServerReports, rememberServerReport, forgetServerReport} = await import('../dist/report-gateway.js');
-const {serverModeRoute} = await import('../dist/router.js');
+const {serverModeRoute, serverWorkspaceAccess} = await import('../dist/router.js');
 
 mediaDB.put = async () => {};
 
@@ -76,12 +76,12 @@ test('unavailable browser storage never breaks a submission', async () => {
   assert.equal(saved.id, 'NCL-2026-NOSTOR');
 });
 
-test('in server mode, the original workspaces stay: admin on server data, residents on this device', () => {
+test('in server mode, the original workspaces stay for signed-in staff and residents', () => {
   for (const page of [undefined, 'complaints', 'map', 'workorders', 'intelligence', 'video-review', 'notifications']) {
     assert.equal(serverModeRoute(page ? ['official', page] : ['official'], {staff: true}), null);
   }
   for (const page of [undefined, 'complaints', 'community', 'map', 'claim', 'settings']) {
-    assert.equal(serverModeRoute(page ? ['resident', page] : ['resident']), null, 'the resident shell shows this device');
+    assert.equal(serverModeRoute(page ? ['resident', page] : ['resident']), null, 'the resident shell (app.js admits only a server resident)');
   }
   assert.equal(serverModeRoute(['resident', 'notifications']), 'notifications', 'the citizen inbox page');
   assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123'], {staff: true}), null, 'staff open the original case page');
@@ -147,4 +147,42 @@ test('the staff case keeps its verification history (used by the restored case p
   });
   assert.deepEqual(r.verificationLog, [{id: 'v1', date: '2026-10-31T00:00:00Z', type: 'response', from: null, to: null, response: 'Still Present', by: 'citizen', actor: 'Citizen', note: ''}]);
   assert.deepEqual(toStaffComplaint({id: 'NCL-2026-ABC124', gps: {lat: 13, lng: 77}, timeline: []}).verificationLog, []);
+});
+
+// ---------- Role boundaries in server mode (passerby / resident / staff) ----------
+const STAFF = {token: 's'.repeat(43), staff: {username: 'demo_admin', displayName: 'Demo admin', role: 'admin'}};
+const RESIDENT = {token: 'r'.repeat(43), resident: {email: 'resident@civiclens.demo', displayName: 'Demo resident'}};
+
+test('a passerby opening #/resident gets the sign-in page, never a resident identity', () => {
+  for (const page of [undefined, 'complaints', 'community', 'map', 'claim', 'settings', 'notifications']) {
+    const access = serverWorkspaceAccess('resident', {session: null});
+    assert.equal(access.redirect, 'login/resident', `#/resident/${page ?? ''}`);
+    assert.equal(access.identity, undefined, 'no identity is created');
+  }
+});
+
+test('the old "this device" pseudo-resident and local demo profiles do not open the resident workspace', () => {
+  const device = {role: 'resident', name: 'This device', email: '', server: true, device: true};
+  const demo = {role: 'resident', name: 'Demo resident', email: 'resident@civiclens.demo'};
+  for (const session of [device, demo]) {
+    assert.deepEqual(serverWorkspaceAccess('resident', {session}), {redirect: 'login/resident', clear: true});
+  }
+});
+
+test('only a server resident session opens the resident workspace', () => {
+  const access = serverWorkspaceAccess('resident', {resident: RESIDENT, session: null});
+  assert.equal(access.redirect, undefined);
+  assert.deepEqual(access.identity, {role: 'resident', name: 'Demo resident', email: 'resident@civiclens.demo', server: true});
+  assert.deepEqual(serverWorkspaceAccess('resident', {resident: RESIDENT, session: access.identity}), {});
+});
+
+test('a staff session does not open the resident workspace, and a resident session does not open the admin one', () => {
+  assert.equal(serverWorkspaceAccess('resident', {staff: STAFF, session: {role: 'official', server: true}}).redirect, 'login/resident');
+  assert.equal(serverWorkspaceAccess('official', {resident: RESIDENT, session: {role: 'resident', server: true}}).redirect, 'login/official');
+  assert.equal(serverWorkspaceAccess('official', {session: {role: 'official', email: 'official@civiclens.demo'}}).clear, true, 'a demo admin identity is dropped');
+});
+
+test('a passerby opening a case URL is sent to public tracking', () => {
+  assert.deepEqual(serverWorkspaceAccess('issue', {session: null}), {});
+  assert.equal(serverModeRoute(['issue', 'NCL-2026-ABC123']), 'track/NCL-2026-ABC123');
 });
