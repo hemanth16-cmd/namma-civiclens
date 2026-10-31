@@ -11,6 +11,7 @@ import {residentSession} from '../resident-session.js';
 import {endStaffSession} from './staff.js';
 import {ApiError} from '../api-client.js';
 import {mountInbox} from './notifications.js';
+import {renderMyComplaints} from './my-complaints.js';
 
 const isAdmin = () => viewer().role === 'official';
 
@@ -56,13 +57,13 @@ export async function endResidentSession() {
 }
 
 // ---------- Shared pieces ----------
-export function issueRow(r) {
+export function issueRow(r, href = `#/issue/${r.id}`) {
   const state_ = resolutionState(r);
   const meta = [r.area, r.id].map(esc).join(' · ');
   return `<li class="issue-row">
     <span class="issue-symbol ${state_.className}" title="${esc(state_.label)}" aria-label="${esc(r.category)}, ${esc(state_.label)}">${categoryIcon(r.category)}</span>
     <div class="issue-row-body">
-      <h3 class="issue-title"><a href="#/issue/${esc(r.id)}">${esc(r.title)}</a></h3>
+      <h3 class="issue-title"><a href="${esc(href)}">${esc(r.title)}</a></h3>
       <p class="issue-meta">${meta}</p>
       <p class="issue-tags">${statusPill(r.status)} ${verificationPill(r.verification)}${r.priority ? priorityPill(r.priority.band) : ''}</p>
     </div>
@@ -134,7 +135,7 @@ export async function renderOverview(root) {
       </div>
       <div class="split">
         ${panel(`${panelHead('My recent reports', link('All my complaints', '#/resident/complaints', 'ghost'))}
-          ${mine.length ? `<ul class="issue-list">${mine.slice(0, 5).map(issueRow).join('')}</ul>` : empty('No reports linked to your profile yet', 'Report an issue from the camera, or claim an anonymous report with its public ID and private claim code.', `<div class="row-actions">${link('Claim a complaint', '#/resident/claim', 'secondary')}${link('Report an issue', '#/camera', 'primary')}</div>`)}`, 'panel-main')}
+          ${mine.length ? `<ul class="issue-list">${mine.slice(0, 5).map(r => issueRow(r, account ? `#/resident/complaints/${r.id}` : undefined)).join('')}</ul>` : empty('No reports linked to your profile yet', 'Report an issue from the camera, or claim an anonymous report with its public ID and private claim code.', `<div class="row-actions">${link('Claim a complaint', '#/resident/claim', 'secondary')}${link('Report an issue', '#/camera', 'primary')}</div>`)}`, 'panel-main')}
         <div class="stack">
           ${panel(`${panelHead('Neighbourhood map', link('Open map', '#/resident/map', 'ghost'))}<div class="map-compact" id="overview-map"></div>`)}
           ${panel(`<h2>Close the loop</h2><p>When a repair is marked resolved, you can confirm it, report that it is still present, or say you cannot confirm. Those answers are kept beside the official status.</p><a class="inline-link" href="#/resident/community">Browse community issues ${icon('forward')}</a>`)}
@@ -179,6 +180,7 @@ function sampleChart() {
 // ---------- Complaint lists ----------
 export async function renderComplaints(root, mode) {
   if (mode === 'community' && await isServerResident(viewer())) return renderServerCommunity(root);
+  if (mode === 'mine' && await isServerResident(viewer())) return renderMyComplaints(root);  // the account's own complaints and evidence
   const records = await loadRecords();
   const admin = isAdmin();
   const base = admin ? records : mode === 'community' ? records : records.filter(r => r.mine);

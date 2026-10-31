@@ -182,3 +182,36 @@ def test_owner_view_reads_private_supabase_storage_like_staff(supabase_api, fake
     r = supabase_api.post(f"{API}/complaints/{receipt['id']}/evidence/view", json={"claim": receipt["claim"]})
     assert r.status_code == 200 and r.content == JPEG, "streamed from the private bucket through the API"
     assert "supabase" not in str(dict(r.headers)).lower()
+
+
+def _evidence_id(db, public_id):
+    with closing(dbutil.connect(db)) as conn:
+        return conn.execute("SELECT e.evidence_id FROM evidence e JOIN complaints c ON c.pk = e.complaint_pk WHERE c.public_id = ?",
+                            (public_id,)).fetchone()[0]
+
+
+def test_my_complaints_per_file_route_is_the_shared_service_audited_and_owner_only(api, isolated_db_path):
+    """GET /residents/me/complaints/{id}/evidence/{evidenceId} (My Complaints) streams through the same service,
+    writes an owner audit entry and refuses anyone else; staff views are still the only access-log rows."""
+    owner, other = resident(api), resident(api, "bina@example.org")
+    receipt = report(api, headers=owner)
+    ev = _evidence_id(isolated_db_path, receipt["id"])
+    url = f"{API}/residents/me/complaints/{receipt['id']}/evidence/{ev}"
+    got = api.get(url, headers=owner)
+    assert got.status_code == 200 and got.content == JPEG
+    assert got.headers["cache-control"] == "no-store, private" and got.headers["content-security-policy"] == "default-src 'none'; sandbox"
+    rows = audit(isolated_db_path)
+    assert len(rows) == 1 and '"via":"resident"' in rows[0][1] and ev in rows[0][1]
+    assert access_log_count(isolated_db_path) == 0
+    assert api.get(url, headers=other).status_code == 404
+    assert api.get(url).status_code == 401
+    assert api.get(f"{API}/residents/me/complaints/{receipt['id']}/evidence/ev_{'x' * 22}", headers=owner).status_code == 404
+    assert len(audit(isolated_db_path)) == 1, "refused requests are not audited as views"
+
+
+def test_my_complaints_per_file_route_is_rate_limited(make_api, isolated_db_path):
+    api = make_api(rate_limit_settings=replace(RateLimitSettings(), owner_evidence_per_ip=Rule(2, 900)))
+    owner = resident(api)
+    receipt = report(api, headers=owner)
+    url = f"{API}/residents/me/complaints/{receipt['id']}/evidence/{_evidence_id(isolated_db_path, receipt['id'])}"
+    assert [api.get(url, headers=owner).status_code for _ in range(3)] == [200, 200, 429]
