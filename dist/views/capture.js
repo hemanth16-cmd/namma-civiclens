@@ -104,13 +104,14 @@ function locationView(st, now = Date.now()) {
 }
 
 function locationDL(fix, now = Date.now()) {
-  if (!fix) return `<div><dt>Latitude</dt><dd>—</dd></div><div><dt>Longitude</dt><dd>—</dd></div><div><dt>Accuracy</dt><dd>—</dd></div><div><dt>Fix obtained</dt><dd>—</dd></div><div class="span-2"><dt>Source</dt><dd>No location yet</dd></div>`;
+  if (!fix) return `<div><dt>Latitude</dt><dd>—</dd></div><div><dt>Longitude</dt><dd>—</dd></div><div><dt>Accuracy</dt><dd>—</dd></div><div><dt>Fix obtained</dt><dd>—</dd></div><div class="span-2"><dt>Source</dt><dd>No location yet</dd></div><div class="span-2"><dt>Street address</dt><dd id="live-address">Not looked up (optional)</dd></div>`;
   const quality = fixQuality(fix);
   const flag = quality === 'approximate' ? ' <span class="pill pill-coral">Approximate</span>' : quality === 'poor' ? ' <span class="pill pill-coral">Low accuracy</span>' : '';
   return `<div><dt>Latitude</dt><dd>${fix.lat.toFixed(6)}</dd></div><div><dt>Longitude</dt><dd>${fix.lng.toFixed(6)}</dd></div>
   <div><dt>Accuracy</dt><dd>${Number.isFinite(fix.accuracy) ? `±${Math.round(fix.accuracy)} m` : 'Not reported'}${flag}</dd></div>
   <div><dt>Fix obtained</dt><dd>${fmtTime(new Date(fix.timestamp).toISOString())} <span class="muted">· ${ago(fixAgeMs(fix, now))}</span></dd></div>
-  <div class="span-2"><dt>Source</dt><dd>${esc(locationSourceLabel(fix))}</dd></div>`;
+  <div class="span-2"><dt>Source</dt><dd>${esc(locationSourceLabel(fix))}</dd></div>
+  <div class="span-2"><dt>Street address</dt><dd id="live-address">${esc(addressResolver.addressFor(fix)?.address || 'Not looked up (optional)')}</dd></div>`;
 }
 
 /** Three-word summary for the location card: Detecting, Located or Needs attention. */
@@ -205,6 +206,11 @@ export function renderCapture(root) {
               <p class="micro address-status" id="address-status" role="status" aria-live="polite"></p>
               <button type="button" class="btn btn-secondary" data-action="lookup-live" disabled>${icon('refresh')}<span>Retry address</span></button>
               <p class="micro">The address is looked up automatically by sending your coordinates to Photon (OpenStreetMap data). If the lookup fails, your GPS coordinates are still saved.</p>
+            </div>
+            <div class="address-box">
+              <p class="micro"><strong>Optional street address.</strong> Looking up an address sends these coordinates to Photon (OpenStreetMap data). Your GPS coordinates are kept even if the lookup fails.</p>
+              <button type="button" class="btn btn-ghost btn-block" data-action="lookup-street" disabled>${icon('search')}<span>Look up street address</span></button>
+              <p class="micro address-status" id="street-status" role="status" aria-live="polite"></p>
             </div>
           </section>
           <section class="card" aria-labelledby="tips-title">
@@ -506,6 +512,11 @@ function updateAddressUI() {
     vf.dataset.state = line.state;
     set('vf-address', line.state === 'resolved' ? line.short : line.state === 'resolving' ? 'Finding address…' : 'Address unavailable · GPS saved');
   }
+  const live = $('live-address');
+  if (live) live.textContent = line.state === 'resolved' ? line.text : fix ? (line.state === 'resolving' ? 'Looking up…' : 'Not looked up (optional)') : 'Not looked up (optional)';
+  const street = document.querySelector('[data-action="lookup-street"]');
+  if (street) street.disabled = !fix || line.state === 'resolving';
+  set('street-status', line.state === 'resolved' ? 'Address found. GPS coordinates remain the primary evidence.' : line.state === 'failed' ? line.status : '');
   const button = document.querySelector('[data-action="lookup-live"]');
   if (button) {
     button.disabled = !fix || line.state === 'resolving';
@@ -819,6 +830,9 @@ export function renderReview(root) {
               </dl>` : notice('<strong>No location is attached to this evidence.</strong> Live reports need a location fix. Retake the photo once the camera screen shows “Location acquired”.', 'error', 'alert')}
               <p class="address-line"><span class="micro">Nearest address (approximate):</span> <span id="review-address">${gps?.address ? esc(gps.address) : gps ? 'Finding the nearest address…' : 'Not available'}</span></p>
               <button type="button" class="btn btn-secondary" data-action="lookup-review" ${gps ? '' : 'disabled'}>${icon('refresh')}<span>Look up again</span></button>
+              <p class="address-line"><span class="micro">Street address:</span> <span id="review-street-address">${gps?.address ? esc(gps.address) : 'Not looked up'}</span></p>
+              <button type="button" class="btn btn-secondary" data-action="lookup-review-street" ${gps ? '' : 'disabled'}>${icon('search')}<span>Look up street address</span></button>
+              <p class="micro">Optional. Sends these coordinates to Photon (OpenStreetMap). If it fails, your coordinates are still saved.</p>
               <p class="micro">Looked up automatically from Photon (OpenStreetMap). If it fails, your coordinates are still saved.</p>
               ${gps && !inServiceArea(gps.lat, gps.lng) ? notice('These coordinates are outside the Bengaluru service area. Check them before you submit.', 'warn', 'alert') : ''}
             </div>
@@ -883,7 +897,12 @@ export function renderReview(root) {
   root.querySelector('#auto-save')?.addEventListener('change', e => writePhotoPrefs({autoSave: e.target.checked}));
 
   // Address: filled automatically, also when the photo was taken before the lookup finished.
-  const showAddress = text => { const el = $('review-address'); if (el && el.textContent !== text) el.textContent = text; };
+  const showAddress = text => {
+    for (const id of ['review-address', 'review-street-address']) {
+      const el = $(id);
+      if (el && el.textContent !== text) el.textContent = text;
+    }
+  };
   const applyAddress = a => {
     if (!a || !c.gps) return;
     const changed = c.gps.address !== a.address;
@@ -908,6 +927,10 @@ export function renderReview(root) {
         if ((st.status === 'failed' || st.status === 'offline') && nearPoint(st.point, gps)) showAddress(st.message);
       }
     }
+    root.querySelector('[data-action="lookup-review-street"]')?.addEventListener('click', () => {
+      showAddress('Looking up the nearest mapped address…');
+      addressResolver.resolve(c.gps, {force: true});
+    });
     root.querySelector('[data-action="lookup-review"]')?.addEventListener('click', () => {
       showAddress('Finding the nearest address…');
       addressResolver.resolve(c.gps, {force: true});
@@ -1119,8 +1142,10 @@ export async function renderReceipt(root, id) {
             : notice('The original file is not available on this device. Summary and reference remain valid.', 'info', 'alert')}
           <div class="row-actions">
             ${url ? btn(icon('download') + `<span>${r.mediaType === 'video' ? 'Download video and metadata' : saveLabel(method)}</span>`, `data-evidence="${esc(r.id)}"`, 'primary') : ''}
+            ${isPhoto && blob ? btn(icon('download') + '<span>Download evidence copy</span>', `data-evidence-copy="${esc(r.id)}"`, 'secondary') : ''}
             ${btn(icon('file') + '<span>Download private receipt</span>', `data-receipt="${esc(r.id)}"`, 'secondary')}
           </div>
+          ${isPhoto && blob ? '<p class="micro">The evidence copy is a JPEG with a navy strip showing the public ID, category, capture time and location. Your original file is kept unchanged.</p>' : ''}
           ${isPhoto && url ? `<p class="save-status" id="save-status" role="status" aria-live="polite"></p>` : ''}
           <p class="micro">${isPhoto
             ? `Saved as <span class="code-inline">${esc(stamped?.name || stampFileName(r.id, r.capturedAt || r.uploadedAt))}</span>. The stamp shows the logo, complaint ID, evidence reference, capture time and, if you chose it, the address and coordinates. Never the claim code. Your original file is kept unchanged.${method === 'share' ? ' On iPhone choose “Save Image”; on Android choose your gallery or Files.' : ''}`
@@ -1137,6 +1162,7 @@ export async function renderReceipt(root, id) {
     return showSaveResult(await savePhoto(stamped.blob, stamped.name, {key: r.id}));
   });
   root.querySelector('[data-receipt]')?.addEventListener('click', () => downloadReceipt(r));
+  root.querySelector('[data-evidence-copy]')?.addEventListener('click', () => downloadNavyCopy(r, blob));
   if (isPhoto && !stamped && blob) showSaveResult({outcome: 'failed', message: 'The stamped copy could not be created on this device. Use “Save original to device” from a new report, or try again later.'});
   const job = saveJobs.get(id);
   if (job) {
@@ -1233,8 +1259,10 @@ async function renderServerReceipt(root, {receipt: r, evidenceKept, following = 
             : notice('The original file is not available in this browser. The server receipt and public ID remain valid.', 'info', 'alert')}
           <div class="row-actions">
             ${url ? btn(icon('download') + `<span>${r.mediaType === 'video' ? 'Download video and metadata' : saveLabel(method)}</span>`, `data-evidence="${esc(r.id)}"`, 'primary') : ''}
+            ${isPhoto && blob ? btn(icon('download') + '<span>Download evidence copy</span>', `data-evidence-copy="${esc(r.id)}"`, 'secondary') : ''}
           </div>
           ${isPhoto && url ? `<p class="save-status" id="save-status" role="status" aria-live="polite"></p>` : ''}
+          ${isPhoto && blob ? '<p class="micro">The evidence copy is a JPEG with a navy strip showing the public ID, category, capture time and location. Your original file is kept unchanged.</p>' : ''}
           <p class="micro">This preview comes from this browser’s copy, which is kept even after the upload. ${isPhoto ? 'The server receives the original photo, not the stamped copy. The stamp shows the logo, complaint ID, evidence reference, capture time and, if you chose it, the address and coordinates; never the claim code. ' : ''}Uploaded evidence is private: it is not shown in public tracking, and it cannot yet be viewed from the server.</p>
         </section>
       </div>
@@ -1247,6 +1275,7 @@ async function renderServerReceipt(root, {receipt: r, evidenceKept, following = 
     return showSaveResult(await savePhoto(stamped.blob, stamped.name, {key: r.id}));
   });
   if (isPhoto && !stamped && blob) showSaveResult({outcome: 'failed', message: 'The stamped copy could not be created on this device. The original was kept and is what the server receives.'});
+  root.querySelector('[data-evidence-copy]')?.addEventListener('click', () => downloadNavyCopy(r, blob));
   const job = saveJobs.get(r.id);
   if (job) {
     saveJobs.delete(r.id); // show the automatic outcome once
@@ -1336,6 +1365,58 @@ async function downloadEvidence(r, blob) {
   } catch {
     toast('The stamped copy could not be created. The original is still on this device.');
   }
+}
+
+/** v5.1 evidence copy (navy strip), offered beside the v5.2 stamped photo. */
+async function downloadNavyCopy(r, blob) {
+  if (!blob) return toast('The original file is not available on this device.');
+  try {
+    download(await buildNavyEvidenceCopy(blob, r), `${r.id}-evidence-copy.jpg`);
+  } catch {
+    toast('The evidence copy could not be created. The original is still on this device.');
+  }
+}
+
+/** JPEG with a navy/coral strip: public ID, category, capture time and location. Never a claim code. */
+export async function buildNavyEvidenceCopy(blob, r) {
+  const img = new Image();
+  img.src = URL.createObjectURL(blob);
+  try {
+    await img.decode();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(img.src), 5000);
+  }
+  if (document.fonts?.load) await document.fonts.load('700 20px Inter').catch(() => {});
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const strip = Math.max(110, Math.round(w * 0.1));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h + strip;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, w, h);
+  ctx.fillStyle = '#18324A';
+  ctx.fillRect(0, h, w, strip);
+  ctx.fillStyle = '#F07861';
+  ctx.fillRect(0, h, Math.max(8, w * 0.01), strip);
+  const fs = Math.max(16, Math.round(w * 0.024));
+  const pad = fs * 1.4;
+  const font = (weight, size) => `${weight} ${size}px Inter, "Segoe UI", Arial, sans-serif`;
+  const fitText = (text, x, y, maxW) => {
+    let t = text;
+    while (ctx.measureText(t).width > maxW && t.length > 4) t = t.slice(0, -2) + '…';
+    ctx.fillText(t, x, y);
+  };
+  const maxW = w - pad * 2;
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = font(700, fs);
+  fitText(`NAMMA CIVICLENS  ·  ${r.id}`, pad, h + strip * 0.34, maxW);
+  ctx.font = font(500, Math.round(fs * 0.78));
+  ctx.fillStyle = '#D9D9D2';
+  const captured = r.capturedAt ? new Date(r.capturedAt).toLocaleString('en-IN', {day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata'}) : 'capture time not recorded';
+  fitText(`${r.category}  |  Captured ${captured} IST`, pad, h + strip * 0.62, maxW);
+  const where = r.gps ? `${r.gps.lat.toFixed(6)}, ${r.gps.lng.toFixed(6)}${r.gps.accuracy ? ` ±${Math.round(r.gps.accuracy)} m` : ''}  ·  ${r.gps.source}` : `Location not recorded  ·  ${r.area}`;
+  fitText(where, pad, h + strip * 0.86, maxW);
+  return new Promise((resolve, reject) => canvas.toBlob(b => b ? resolve(b) : reject(new Error('encode failed')), 'image/jpeg', 0.95));
 }
 
 /** Stamped JPEG for an existing record: logo, public ID, evidence ref, time, optional location. Never a claim code. */

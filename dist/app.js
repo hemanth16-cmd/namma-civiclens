@@ -78,13 +78,33 @@ async function render({focus = true} = {}) {
   const path = currentPath();
   const parts = path.split('/').filter(Boolean);
   const head = parts[0] || 'camera';
-  const role = viewer().role;
+  let role = viewer().role;
 
-  // Server mode: the demonstration workspaces hold only browser-local sample data, so they must never
-  // stand in for server complaints. Officials go to the staff console, residents to their reports.
+  // Server mode: the workspaces must never show browser-local sample data in place of server complaints.
+  // The admin workspace needs a server staff session (kept in memory only) and then reads server
+  // complaints; residents go to their reports; a case opens in the staff console.
   if (['official', 'resident', 'issue'].includes(head) && await reportMode() === 'backend') {
     if (seq !== renderSeq) return;
-    const target = serverModeRoute(parts);
+    const staff = staffSession.get();
+    if (head === 'issue' && !staff && state.session?.server && !state.session?.device) {
+      setSession(null);  // a staff member whose memory-only session ended (e.g. reload): sign in again
+      return navigate('login/official');
+    }
+    if (head === 'official' || (head === 'issue' && staff)) {
+      if (!staff) {
+        if (role === 'official') setSession(null);  // a demo or expired identity must not open the workspace
+        return navigate('login/official');
+      }
+      if (role !== 'official' || !state.session?.server) {
+        setSession({role: 'official', name: staff.staff.displayName, email: staff.staff.username, server: true});
+        role = 'official';
+      }
+    }
+    if (head === 'resident' && role !== 'resident') {
+      setSession({role: 'resident', name: 'This device', email: '', server: true, device: true});
+      role = 'resident';
+    }
+    const target = serverModeRoute(parts, {staff: !!staff});
     if (target) return navigate(target);
   }
 
@@ -130,6 +150,7 @@ const CAMERA = {
   'switch-camera': () => cameraActions.switchCamera(),
   'refresh-location': () => cameraActions.locate(),
   'lookup-live': () => cameraActions.lookupLive(),
+  'lookup-street': () => cameraActions.lookupLive(),
   'gallery': () => cameraActions.openGallery(),
   'stop-recording': () => cameraActions.stopRecording(),
   'retake': () => cameraActions.retake(),

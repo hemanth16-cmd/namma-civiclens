@@ -62,16 +62,12 @@ def who_am_i(staff: dict = Depends(current_staff)) -> dict:
     return staff
 
 
-def _summary(record: dict) -> dict:
-    return {k: record[k] for k in ("id", "category", "area", "status", "verification", "created", "updated", "mediaType", "mergedInto")} | {"hasEvidence": record["evidence"] is not None}
-
-
 @router.get("/complaints", response_model=StaffComplaintList)
 def list_complaints(request: Request, response: Response, staff: dict = Depends(current_staff),
                     limit: int = Query(50, ge=1, le=STAFF_LIST_MAX), offset: int = Query(0, ge=0)) -> dict:
     records, total = request.app.state.store.list_complaints(limit, offset, staff_pk=staff["pk"])
     response.headers["Cache-Control"] = "no-store"
-    return {"items": [_summary(r) for r in records], "total": total, "limit": limit, "offset": offset}
+    return {"items": records, "total": total, "limit": limit, "offset": offset}
 
 
 def _record_or_404(request: Request, public_id: str, staff: dict) -> dict:
@@ -117,14 +113,14 @@ def stream_evidence(request: Request, evidence: dict, staff: dict, basename: str
     # Read from the backend that stored this file (local evidence stays readable after switching to Supabase Storage).
     storage = request.app.state.evidence_storages.get(evidence["storageBackend"])
     if storage is None:
-        logger.warning("Evidence %s is in the %r backend, which this server is not configured for", basename, evidence["storageBackend"])
+        logger.warning("Evidence for %s is in the %r backend, which this server is not configured for", basename, evidence["storageBackend"])
         raise ApiProblem(404, "evidence_unavailable", UNAVAILABLE.get(evidence["storageBackend"], UNAVAILABLE["other"]))
     try:
         handle = storage.open_read(evidence["storageKey"])
     except StoreError:
         # A file that is definitely absent is a permanent condition, not an outage: say so instead of 503.
         if _definitely_missing(storage, evidence["storageKey"]):
-            logger.warning("Evidence file %s is missing from the %r backend", basename, evidence["storageBackend"])
+            logger.warning("Evidence file for %s is missing from the %r backend", basename, evidence["storageBackend"])
             raise ApiProblem(404, "evidence_unavailable", MISSING_FILE)
         raise  # → 503 storage_unavailable (e.g. Supabase unreachable)
     try:

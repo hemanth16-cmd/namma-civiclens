@@ -1227,9 +1227,10 @@ class ComplaintStore:
     # ---------- Staff views of complaints ----------
 
     def list_complaints(self, limit: int = 50, offset: int = 0, staff_pk: int | None = None) -> tuple[list[dict], int]:
-        """Newest first. Returns (records, total). Records come from _load plus an evidence summary.
-        With `staff_pk`, an official sees only their scope (lifecycle.in_scope): their departments, their
-        own assignments and the unassigned triage queue."""
+        """Newest first. Returns (summaries, total). With `staff_pk`, an official sees only their scope
+        (lifecycle.in_scope): their departments, their own assignments and the unassigned triage queue.
+        A fixed number of queries whatever the page size: the list must not cost a round trip per
+        complaint (the database can be far from the API)."""
         limit = max(1, min(int(limit), STAFF_LIST_MAX))
         try:
             with closing(self._connect()) as conn:
@@ -1238,16 +1239,27 @@ class ComplaintStore:
                     actor = self._actor(conn, staff_pk)
                     if not lc.has_role(actor, "supervisor"):
                         marks = ", ".join("?" * len(actor["departmentPks"])) or "NULL"
-                        where = f" WHERE department_pk IS NULL OR department_pk IN ({marks}) OR assigned_staff_pk = ?"
+                        where = f" WHERE c.department_pk IS NULL OR c.department_pk IN ({marks}) OR c.assigned_staff_pk = ?"
                         params = (*actor["departmentPks"], actor["pk"])
-                total = conn.execute("SELECT COUNT(*) FROM complaints" + where, params).fetchone()[0]
-                ids = [r[0] for r in conn.execute("SELECT public_id FROM complaints" + where + " ORDER BY pk DESC LIMIT ? OFFSET ?",
-                                                  (*params, limit, max(0, int(offset))))]
-                return [self._staff_record(conn, i) for i in ids], total
+                total = conn.execute("SELECT COUNT(*) FROM complaints c" + where, params).fetchone()[0]
+                rows = conn.execute(
+                    "SELECT c.public_id, c.title, c.category, c.area, c.status, c.verification, c.department, c.created_at, "
+                    "c.updated_at, c.media_type, c.gps_lat, c.gps_lng, c.gps_accuracy, c.gps_source_type, "
+                    "EXISTS (SELECT 1 FROM evidence e WHERE e.complaint_pk = c.pk AND e.role = 'original') AS has_evidence, "
+                    "(SELECT m.public_id FROM complaints m WHERE m.pk = c.merged_into_pk) AS merged_into "
+                    "FROM complaints c" + where + " ORDER BY c.pk DESC LIMIT ? OFFSET ?",
+                    (*params, limit, max(0, int(offset)))).fetchall()
         except RuleViolation:
             raise
         except DB_ERRORS as exc:
             raise StoreError("Complaints could not be listed") from exc
+        return [{
+            "id": r["public_id"], "title": r["title"], "category": r["category"], "area": r["area"], "status": r["status"],
+            "verification": r["verification"], "department": r["department"], "created": r["created_at"],
+            "updated": r["updated_at"], "mediaType": r["media_type"], "hasEvidence": bool(r["has_evidence"]),
+            "gps": {"lat": r["gps_lat"], "lng": r["gps_lng"], "accuracy": r["gps_accuracy"], "sourceType": r["gps_source_type"]},
+            "mergedInto": r["merged_into"],
+        } for r in rows], total
 
     def require_case_scope(self, public_id: str, staff_pk: int) -> None:
         """Raises RuleViolation 403 when an official may not see this complaint (lifecycle.in_scope)."""

@@ -4,6 +4,8 @@ import {icon, btn, statusPill, verificationPill, heading, notice, publicTopbar, 
 import {setSession, viewer} from '../state.js';
 import {navigate} from '../router.js';
 import {reportMode, trackPublic, respondToResolution} from '../report-gateway.js';
+import {staffSession} from '../staff-session.js';
+import {serverClient} from '../server-records.js';
 
 const SAMPLE_ID = /^NCL-2026-DEMO0[1-8]$/;
 
@@ -13,7 +15,7 @@ export async function renderEntry(root) {
   // Server mode: the two cards lead to the real screens, not the demonstration workspaces.
   const server = await reportMode() === 'backend';
   const residentCard = server
-    ? `<a class="entry-card entry-link" href="#/my-reports" data-entry="my-reports">
+    ? `<a class="entry-card entry-link" href="#/resident" data-entry="my-reports">
           <span class="entry-icon">${icon('user')}</span>
           <div><p class="eyebrow">Residents · this device</p><h2>My reports</h2><p>Complaints you submitted from this browser and their current status on the CivicLens server.</p></div>
           <span class="entry-go">${icon('forward')}</span>
@@ -24,9 +26,9 @@ export async function renderEntry(root) {
           <span class="entry-go">${icon('forward')}</span>
         </a>`;
   const adminCard = server
-    ? `<a class="entry-card entry-link" href="#/staff" data-entry="staff">
+    ? `<a class="entry-card entry-link" href="#/login/official" data-entry="staff">
           <span class="entry-icon">${icon('shield')}</span>
-          <div><p class="eyebrow">Civic operations · staff account</p><h2>Staff console</h2><p>Complaints stored on the CivicLens server, their private evidence and the evidence access log.</p></div>
+          <div><p class="eyebrow">Civic operations · staff account</p><h2>Login as admin</h2><p>Dashboard, incident management and city map of the complaints on the CivicLens server, with their private evidence.</p></div>
           <span class="entry-go">${icon('forward')}</span>
         </a>`
     : `<a class="entry-card entry-link" href="#/login/official">
@@ -197,7 +199,8 @@ function trackResult(r, signedIn) {
   </article>`;
 }
 
-export function renderLogin(root, role = 'resident', register = false) {
+export async function renderLogin(root, role = 'resident', register = false) {
+  if (role === 'official' && await reportMode() === 'backend') return renderServerAdminLogin(root);
   const official = role === 'official';
   root.innerHTML = `<div class="page">
     ${publicTopbar({fallback: 'home'})}
@@ -223,9 +226,7 @@ export function renderLogin(root, role = 'resident', register = false) {
   </div>`;
   reportMode().then(mode => {
     if (mode !== 'backend') return;
-    root.querySelector('.auth-panel')?.insertAdjacentHTML('afterbegin', official
-      ? notice('<strong>Server mode:</strong> complaints stored on the CivicLens server are in the <a class="inline-link" href="#/staff">staff console</a>, which uses a server staff account. This demonstration sign-in does not show server complaints.', 'info', 'shield')
-      : notice('<strong>Server mode:</strong> reports you sent to the CivicLens server are under <a class="inline-link" href="#/my-reports">My reports</a>. No sign-in is needed.', 'info', 'user'));
+    root.querySelector('.auth-panel')?.insertAdjacentHTML('afterbegin', notice('<strong>Server mode:</strong> reports you sent to the CivicLens server are in <a class="inline-link" href="#/resident">your reports</a>. No sign-in is needed.', 'info', 'user'));
   });
   root.querySelector('#login-form').onsubmit = async e => {
     e.preventDefault();
@@ -240,6 +241,48 @@ export function renderLogin(root, role = 'resident', register = false) {
     } catch (err) {
       submit.disabled = false;
       document.getElementById('login-error').innerHTML = notice(esc(err.message), 'error', 'alert');
+    }
+  };
+}
+
+// Server mode: the admin workspace signs in with a server staff account (python -m app.staff create).
+// The session token stays in this tab's memory only (staff-session.js); the dashboard, incident list
+// and city map then show the complaints stored on the server.
+function renderServerAdminLogin(root) {
+  if (staffSession.get()) return navigate('official');
+  root.innerHTML = `<div class="page">
+    ${publicTopbar({fallback: 'home'})}
+    <main id="main" class="narrow" tabindex="-1">
+      <section class="panel auth-panel" aria-labelledby="login-title">
+        <p class="pill pill-coral">${icon('shield', 'pill-icon')}<span>Civic operations · server account</span></p>
+        <h1 id="login-title" tabindex="-1">Civic operations sign-in</h1>
+        <p class="lead">Sign in with the staff account created for you on the CivicLens server. Your dashboard, incident list and city map then show the complaints stored on the server.</p>
+        <form id="login-form" class="stack" data-server-login autocomplete="on">
+          <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required maxlength="64" spellcheck="false"></div>
+          <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256"></div>
+          <div id="login-error" role="alert"></div>
+          <button class="btn btn-primary btn-block btn-lg" type="submit">Sign in ${icon('forward')}</button>
+        </form>
+        ${notice('Your session is kept only in this tab’s memory: reloading or closing the page signs you out. Staff accounts are created by an administrator with <code>python -m app.staff create</code>.', 'info', 'lock', 'mt')}
+        <div class="auth-foot"><a class="inline-link" href="#/my-reports">Looking for your own reports? Open My reports</a></div>
+      </section>
+    </main>
+  </div>`;
+  root.querySelector('#login-form').onsubmit = async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const submit = e.target.querySelector('button[type=submit]');
+    submit.disabled = true;
+    try {
+      const session = await (await serverClient()).staffSignIn(String(fd.get('username')), String(fd.get('password')));
+      staffSession.set(session);
+      setSession({role: 'official', name: session.staff.displayName, email: session.staff.username, server: true});
+      toast(`Signed in as ${session.staff.displayName}.`, 'success');
+      navigate('official');
+    } catch (err) {
+      submit.disabled = false;
+      e.target.querySelector('#login-password').value = '';
+      document.getElementById('login-error').innerHTML = notice(esc(err?.name === 'ApiError' ? err.message : 'Sign-in failed.'), 'error', 'alert');
     }
   };
 }

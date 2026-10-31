@@ -161,7 +161,8 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
         items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
           id: i.id, category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
           verification: String(i.verification ?? ''), created: i.created ?? null, updated: i.updated ?? null,
-          mediaType: i.mediaType === 'video' ? 'video' : 'photo', hasEvidence: i.hasEvidence === true, mergedInto: publicIdOrNull(i.mergedInto)
+          mediaType: i.mediaType === 'video' ? 'video' : 'photo', hasEvidence: i.hasEvidence === true,
+          title: String(i.title ?? ''), department: String(i.department ?? ''), gps: toListGps(i.gps), mergedInto: publicIdOrNull(i.mergedInto)
         }))
       };
     },
@@ -398,6 +399,13 @@ function toDevice(d) {
 }
 
 const EVIDENCE_TYPES = ['image/jpeg', 'video/webm', 'video/mp4'];
+
+/** Staff-list location for the admin map; null unless both coordinates are valid. */
+function toListGps(g) {
+  if (!g || !Number.isFinite(g.lat) || !Number.isFinite(g.lng) || Math.abs(g.lat) > 90 || Math.abs(g.lng) > 180) return null;
+  return {lat: g.lat, lng: g.lng, accuracy: Number.isFinite(g.accuracy) && g.accuracy >= 0 ? g.accuracy : null,
+    sourceType: SOURCE_TYPES.includes(g.sourceType) ? g.sourceType : null};
+}
 const staffAuth = token => ({Authorization: 'Bearer ' + token});
 
 const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update', 'review_duplicates', 'merge', 'revert_merge'];
@@ -458,6 +466,7 @@ export function toStaffComplaint(d) {
     captureSource: d.captureSource ?? null, mediaType: d.mediaType === 'video' ? 'video' : 'photo', shareEvidence: d.shareEvidence === true,
     gps: {lat: g.lat, lng: g.lng, accuracy: g.accuracy ?? null, source: g.source ?? null, sourceType: g.sourceType ?? null, timestamp: g.timestamp ?? null, address: g.address ?? null},
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
+    verificationLog: toVerificationLog(d.verificationLog),
     evidence: e && typeof e === 'object' ? {evidenceId: String(e.evidenceId ?? ''), mediaType: e.mediaType === 'video' ? 'video' : 'photo',
       contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, sha256: String(e.sha256 ?? ''), capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null} : null,
     ...toManagement(d)
@@ -575,9 +584,14 @@ export function toPublicRecord(d) {
     verification: String(d.verification ?? ''), department: String(d.department ?? ''), updated: d.updated ?? null,
     mergedInto: publicIdOrNull(d.mergedInto),
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
-    verificationLog: (Array.isArray(d.verificationLog) ? d.verificationLog : []).map(e => ({
-      id: String(e?.id ?? ''), date: e?.date ?? null, type: String(e?.type ?? ''), from: e?.from ?? null, to: e?.to ?? null,
-      response: e?.response ?? null, by: String(e?.by ?? ''), actor: String(e?.actor ?? ''), note: String(e?.note ?? '')
-    }))
+    verificationLog: toVerificationLog(d.verificationLog)
   };
+}
+
+/** Verification history (citizen responses and verification changes): known fields only. */
+function toVerificationLog(list) {
+  return (Array.isArray(list) ? list : []).map(e => ({
+    id: String(e?.id ?? ''), date: e?.date ?? null, type: String(e?.type ?? ''), from: e?.from ?? null, to: e?.to ?? null,
+    response: e?.response ?? null, by: String(e?.by ?? ''), actor: String(e?.actor ?? ''), note: String(e?.note ?? '')
+  }));
 }
