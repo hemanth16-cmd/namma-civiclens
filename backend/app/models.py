@@ -114,6 +114,8 @@ class PublicComplaint(BaseModel):
     updated: str
     timeline: list[TimelineEntry]
     verificationLog: list[VerificationEntry]
+    # Public ID of the complaint this report was merged into as a duplicate (schema 8), else null.
+    mergedInto: str | None = None
 
 
 class ReceiptGps(BaseModel):
@@ -221,6 +223,7 @@ class StaffComplaintSummary(BaseModel):
     mediaType: str
     hasEvidence: bool
     gps: StaffListGps
+    mergedInto: str | None = None
 
 
 class StaffComplaintList(BaseModel):
@@ -251,6 +254,7 @@ class StaffComplaint(BaseModel):
     timeline: list[TimelineEntry]
     verificationLog: list[VerificationEntry]
     evidence: StaffEvidenceSummary | None
+    mergedInto: str | None = None
 
 
 class EvidenceAccessEntry(BaseModel):
@@ -507,9 +511,24 @@ class AllowedAction(BaseModel):
     needsExplanation: bool = False
 
 
+class MergeOut(BaseModel):
+    id: str
+    duplicate: str
+    canonical: str
+    reason: str
+    score: float | None
+    label: str | None
+    by: str
+    at: str
+    revertedAt: str | None
+    revertedBy: str | None
+    revertReason: str | None
+
+
 class StaffCase(StaffComplaint):
     """StaffComplaint plus management data. Internal notes and staff names appear only here."""
     version: int
+    merges: list[MergeOut] = []
     assignment: AssignmentOut
     assignmentHistory: list[AssignmentHistoryEntry]
     workOrders: list[WorkOrderOut]
@@ -622,3 +641,78 @@ class ResidentPreferences(_Strict):
     updates: bool = True
     verification: bool = True
     hotspots: bool = False
+
+
+# ---------- Duplicate detection (schema 8) ----------
+
+class DuplicateFactor(BaseModel):
+    name: str
+    value: float | None
+    weight: float
+    contribution: float
+    detail: str
+
+
+class DuplicateCandidate(BaseModel):
+    id: str
+    category: str
+    area: str
+    created: str
+    status: str
+    verification: str
+    score: float
+    label: Literal["likely_duplicate", "possible_duplicate", "recurrence", "nearby_separate"]
+    distanceM: float
+    factors: list[DuplicateFactor]
+    reasons: list[str]
+    caution: str | None
+
+
+class DuplicateCandidates(BaseModel):
+    complaintId: str
+    radiusM: float
+    days: int
+    candidates: list[DuplicateCandidate]
+    note: str | None
+
+
+class MergeIn(_Strict):
+    canonical: Annotated[str, Field(pattern=r"^NCL-\d{4}-[A-Z0-9]{6}$")]
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class ReasonIn(_Strict):
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+# ---------- Public community list ----------
+
+class PublicComplaintSummary(BaseModel):
+    """One row of the community list: the public-tracking allowlist without the timeline."""
+    id: str
+    title: str
+    category: str
+    area: str
+    status: str
+    verification: str
+    department: str
+    created: str
+    updated: str
+
+
+class Facet(BaseModel):
+    name: str
+    count: int
+
+
+class CommunityFacets(BaseModel):
+    categories: list[Facet]
+    areas: list[Facet]
+
+
+class PublicComplaintList(BaseModel):
+    items: list[PublicComplaintSummary]
+    total: int
+    limit: int
+    offset: int
+    facets: CommunityFacets

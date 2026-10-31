@@ -197,7 +197,7 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
           id: i.id, category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
           verification: String(i.verification ?? ''), created: i.created ?? null, updated: i.updated ?? null,
           mediaType: i.mediaType === 'video' ? 'video' : 'photo', hasEvidence: i.hasEvidence === true,
-          title: String(i.title ?? ''), department: String(i.department ?? ''), gps: toListGps(i.gps)
+          title: String(i.title ?? ''), department: String(i.department ?? ''), gps: toListGps(i.gps), mergedInto: publicIdOrNull(i.mergedInto)
         }))
       };
     },
@@ -294,6 +294,57 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
     async submitCitizenResponse(id, claim, response) {
       const d = await request('POST', `/complaints/${encodeURIComponent(id)}/citizen-responses`, {claim, response});
       return {verification: String(d.verification ?? ''), changed: d.changed === true};
+    },
+
+    // ---------- Duplicate detection (staff). Suggestions only; merging needs a supervisor. ----------
+
+    async getDuplicateCandidates(token, id, {radius = null, days = null} = {}) {
+      const q = new URLSearchParams();
+      if (radius) q.set('radius', String(radius));
+      if (days) q.set('days', String(days));
+      const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/duplicates${q.size ? '?' + q : ''}`, undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d.candidates)) throw new ApiError('The CivicLens server sent duplicate suggestions this app could not read.', {code: 'malformed_response'});
+      return {radiusM: Number(d.radiusM) || 0, days: Number(d.days) || 0, note: typeof d.note === 'string' ? d.note : null,
+        candidates: d.candidates.filter(c => publicIdOrNull(c?.id) && DUPLICATE_LABELS.includes(c.label)).map(c => ({
+          id: c.id, category: String(c.category ?? ''), area: String(c.area ?? ''), created: c.created ?? null, status: String(c.status ?? ''),
+          verification: String(c.verification ?? ''), score: Number(c.score) || 0, label: c.label, distanceM: Number(c.distanceM) || 0,
+          factors: (Array.isArray(c.factors) ? c.factors : []).map(f => ({name: String(f?.name ?? ''), value: Number.isFinite(f?.value) ? f.value : null,
+            weight: Number(f?.weight) || 0, contribution: Number(f?.contribution) || 0, detail: String(f?.detail ?? '')})),
+          reasons: (Array.isArray(c.reasons) ? c.reasons : []).map(String), caution: typeof c.caution === 'string' ? c.caution : null}))};
+    },
+
+    /** Merge complaint `id` (the duplicate) into `canonical`. Resolves to the duplicate's updated staff case. */
+    async mergeComplaint(token, id, {canonical, reason}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/merge`, {canonical, reason}, {headers: staffAuth(token)}));
+    },
+
+    async revertMerge(token, mergeId, reason) {
+      return toStaffComplaint(await request('POST', `/staff/merges/${encodeURIComponent(mergeId)}/revert`, {reason}, {headers: staffAuth(token)}));
+    },
+
+    async dismissDuplicate(token, id, otherId, reason) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/duplicates/${encodeURIComponent(otherId)}/dismiss`, {reason}, {headers: staffAuth(token)}));
+    },
+
+    /**
+     * GET /complaints: community issues across Bengaluru (public fields only), newest first, filtered by
+     * issue type (category), neighbourhood (area) and status. Facets give the counts for the filter menus.
+     */
+    async listPublicComplaints({category = '', area = '', status = '', limit = 50, offset = 0} = {}) {
+      const q = new URLSearchParams({limit: String(limit), offset: String(offset)});
+      if (category) q.set('category', category);
+      if (area) q.set('area', area);
+      if (status) q.set('status', status);
+      const d = await request('GET', '/complaints?' + q);
+      if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a community list this app could not read.', {code: 'malformed_response'});
+      const facet = list => (Array.isArray(list) ? list : []).filter(f => typeof f?.name === 'string').map(f => ({name: f.name, count: Number(f.count) || 0}));
+      return {
+        total: Number(d.total) || 0,
+        items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
+          id: i.id, title: String(i.title ?? ''), category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
+          verification: String(i.verification ?? ''), department: String(i.department ?? ''), created: i.created ?? null, updated: i.updated ?? null})),
+        facets: {categories: facet(d.facets?.categories), areas: facet(d.facets?.areas)}
+      };
     },
 
     async getEvidenceAccessLog(token, id) {
@@ -442,7 +493,10 @@ function toListGps(g) {
 }
 const staffAuth = token => ({Authorization: 'Bearer ' + token});
 
-const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update'];
+const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update', 'review_duplicates', 'merge', 'revert_merge'];
+const DUPLICATE_LABELS = ['likely_duplicate', 'possible_duplicate', 'recurrence', 'nearby_separate'];
+const MERGE_ID = /^mg_[A-Za-z0-9_-]{16}$/;
+const publicIdOrNull = v => (typeof v === 'string' && PUBLIC_ID.test(v) ? v : null);
 const staffRef = s => (s && typeof s.username === 'string' ? {username: s.username, displayName: String(s.displayName ?? s.username)} : null);
 
 /** Work order for staff. Only known fields are copied. */
@@ -473,6 +527,11 @@ function toManagement(d) {
     workOrders: (Array.isArray(d.workOrders) ? d.workOrders : []).map(toWorkOrder).filter(Boolean),
     notes: (Array.isArray(d.notes) ? d.notes : []).map(n => ({id: String(n?.id ?? ''), body: String(n?.body ?? ''), createdAt: n?.createdAt ?? null,
       author: staffRef(n?.author)})),
+    mergedInto: publicIdOrNull(d.mergedInto),
+    merges: (Array.isArray(d.merges) ? d.merges : []).filter(m => typeof m?.id === 'string' && MERGE_ID.test(m.id)).map(m => ({
+      id: m.id, duplicate: publicIdOrNull(m.duplicate), canonical: publicIdOrNull(m.canonical), reason: String(m.reason ?? ''),
+      score: Number.isFinite(m.score) ? m.score : null, label: DUPLICATE_LABELS.includes(m.label) ? m.label : null, by: String(m.by ?? ''),
+      at: m.at ?? null, revertedAt: m.revertedAt ?? null, revertedBy: m.revertedBy ?? null, revertReason: m.revertReason ?? null})),
     allowedActions: (Array.isArray(d.allowedActions) ? d.allowedActions : []).filter(x => STAFF_ACTIONS.includes(x?.action)).map(x => ({
       action: x.action, label: String(x.label ?? ''), to: typeof x.to === 'string' ? x.to : null, needsExplanation: x.needsExplanation === true}))
   };
@@ -608,6 +667,7 @@ export function toPublicRecord(d) {
   return {
     id: d.id, category: String(d.category ?? ''), area: String(d.area ?? ''), status: String(d.status ?? ''),
     verification: String(d.verification ?? ''), department: String(d.department ?? ''), updated: d.updated ?? null,
+    mergedInto: publicIdOrNull(d.mergedInto),
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
     verificationLog: toVerificationLog(d.verificationLog)
   };

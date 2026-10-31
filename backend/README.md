@@ -757,6 +757,17 @@ Set up roles and departments with the CLI (the database follows `DATABASE_BACKEN
 
 Migration 7 upgrades an existing database in place and keeps every row. Existing staff stay `official`, and existing complaints are unassigned (the triage queue). On SQLite, two tables (`staff_accounts`, `evidence`) are rebuilt to change their constraints; `apply_schema` turns foreign keys off for that and checks them before committing. On PostgreSQL the constraints are altered in place. Take a backup before deploying it to Supabase (`pg_dump`, or the dashboard's backup) and let the API apply it at startup, as with earlier migrations.
 
+## Duplicate detection (Workstream 2, schema 8)
+
+`GET /staff/complaints/{id}/duplicates` returns ranked, explained suggestions (see `docs/api-contract.md` §3.3). Supervisors merge, revert or dismiss; nothing is merged automatically.
+
+- **Candidates** come from a bounding-box query on the new `(gps_lat, gps_lng)` index (plain comparisons, identical on SQLite and PostgreSQL), filtered by category, time window, merge state and dismissed pairs, then measured exactly with the haversine distance in Python. No PostGIS or `pg_trgm`; both engines behave the same.
+- **Scoring** (`app/duplicates.py`) weighs location relative to the two reports' combined GPS uncertainty, so precise fixes 40 m apart are separate issues while coarse fixes at the same distance may be one. It also weighs category, time and description overlap. Each factor's contribution is returned, so a supervisor can see why.
+- **Merges** (`complaint_merges`) keep both complaints intact. `complaints.merged_into_pk` points at the canonical complaint, a partial unique index allows one active merge per duplicate, and rows cannot be deleted. Chains and double merges are refused under row locks. Every merge, revert and dismissal is in the audit log of both complaints.
+- **Not done:** perceptual image similarity (needs Pillow/imagehash and decoding private files; proposed separately); followers of a merged report receiving the canonical complaint's notifications (an interface request to the notification work).
+
+Migration 8 only adds a column, two tables and indexes; no existing row changes.
+
 ## Not included yet
 
 Authentication and sessions for residents, shared (multi-process) rate limiting, claiming complaints, **evidence viewing for owners or the public** (staff viewing exists since Phase 3.6; never permanent public links), MFA, migration of existing local evidence to Supabase Storage, a Supabase Storage orphan audit, server-side EXIF re-parsing, malware scanning, transcoding, PostGIS, AI models, notifications for case status changes (needs an agreed interface with the notification work), a push retry queue, Telegram. Each is a later phase; see `../docs/IMPLEMENTATION_PROGRESS.md`.

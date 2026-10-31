@@ -254,6 +254,8 @@ Test results (2026-10-30):
 | Manual browser run (local API, scratch DB) | assign → work order start/complete (missing note refused) → resolve → audit trail; citizen dispute on public tracking [verified] |
 | Live Supabase (read-only check) | PostgreSQL 17.11, schema 6, 12 complaints; migration 7 **not yet applied there** [verified] |
 
+**Core platform, Workstream 2 — duplicate detection: implemented (2026-10-31) on the same branch.** Schema 8 adds merge records, dismissals and a location index. Staff get ranked, explained suggestions; supervisors merge, revert or dismiss; public tracking shows `mergedInto`. Results: SQLite 388 passed/19 skipped; PostgreSQL 399 passed/8 skipped; `npm test` 159/160 (known `api-config` failure); browser e2e with a local config all passing (one camera timing flake on a first run, then 45/45 twice); manual browser check of review, merge and public notice. Details: `docs/CORE_PLATFORM_PLAN.md` §13. [verified]
+
 Not done in Workstream 1: notifications for management events (needs an interface with the notification owner; notification kinds are a CHECK list in their table), and a Telegram facade (the store methods are the shared entry points).
 
 
@@ -477,7 +479,7 @@ Files created: `backend/app/push.py`, `backend/app/notifications.py`, `backend/a
 
 ## 10. Next actions (priority order)
 
-**Next exact step (core platform): review Workstream 1 on `feature/core-platform-development`; after approval, back up Supabase and deploy migration 7, then start Workstream 2 (duplicate detection) per `docs/CORE_PLATFORM_PLAN.md`.**
+**Next exact step (core platform): review Workstreams 1–2 on `feature/core-platform-development`; after approval, back up Supabase and deploy (the API applies migrations 7 and 8 at startup), then Workstream 3 (geospatial) per `docs/CORE_PLATFORM_PLAN.md`.**
 
 Earlier next step, still open: verify Web Push on real devices (see `backend/README.md` → "Web Push notifications"):
 

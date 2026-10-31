@@ -308,7 +308,7 @@ def test_internal_notes_and_staff_identities_never_reach_the_public(api, staff):
                    receipt["claim"], str(payload()["gps"]["lat"])):
         assert secret not in raw, secret
     pub = public(api, cid)
-    assert set(pub) == {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog"}
+    assert set(pub) == {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog", "mergedInto"}
     assert "Inspection scheduled for Monday." in [t["text"] for t in pub["timeline"]]
     assert {e["actor"] for e in pub["verificationLog"]} <= {"Citizen", "Civic team"}
     staff_view = api.get(f"{API}/staff/complaints/{cid}", headers=staff["ravi"]).json()
