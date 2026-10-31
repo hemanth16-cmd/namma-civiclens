@@ -15,7 +15,7 @@ assigned to them, or not yet assigned to any department (the triage queue).
 
 from dataclasses import dataclass
 
-STATUSES = ("Submitted", "Under Review", "Assigned", "In Progress", "Marked Resolved")
+STATUSES = ("Submitted", "Under Review", "Assigned", "In Progress", "Under Construction", "Work Completed", "Verification In Progress", "On Hold", "Marked Resolved")
 VERIFICATIONS = ("Pending Verification", "Citizen Confirmed", "Disputed", "Reinspection Required")
 CITIZEN_RESPONSES = ("Appears Resolved", "Still Present", "Cannot Confirm")
 WORK_ORDER_STATUSES = ("Open", "In Progress", "Completed", "Cancelled")
@@ -41,6 +41,23 @@ STATUS_TRANSITIONS: dict[tuple[str, str], Transition] = {
     ("In Progress", "Marked Resolved"): Transition("official", True, "Mark resolved"),    # no active work orders
     ("Marked Resolved", "In Progress"): Transition("supervisor", True, "Reopen"),
 }
+
+
+# Additional progress stages retain the existing final status and independent citizen verification.
+# Officials can advance operational work; supervisors can correct an earlier stage or reopen a case.
+for source in ("Assigned", "In Progress", "Under Construction", "Work Completed", "Verification In Progress", "On Hold"):
+    for target, label in (("In Progress", "Resume work"), ("Under Construction", "Construction underway"),
+                          ("Work Completed", "Work finished; awaiting checks"),
+                          ("Verification In Progress", "Inspect completed work"), ("On Hold", "Put work on hold")):
+        if source != target:
+            STATUS_TRANSITIONS.setdefault((source, target), Transition("official", True, label))
+    if source != "Assigned":
+        STATUS_TRANSITIONS.setdefault((source, "Marked Resolved"), Transition("official", True, "Completed / mark resolved"))
+# Administrators can correct a stage directly, with a public reason.
+for source in STATUSES:
+    for target in STATUSES:
+        if source != target:
+            STATUS_TRANSITIONS.setdefault((source, target), Transition("admin", True, "Update stage"))
 
 
 class RuleViolation(Exception):
@@ -82,7 +99,7 @@ def require_scope(case: dict, staff: dict) -> None:
 def require_expected(current: str, expected: str | None, what: str = "status") -> None:
     """Optimistic concurrency: the client says which state it saw; if the case moved on, refuse."""
     if expected is not None and expected != current:
-        raise RuleViolation(409, "conflict", f"The {what} changed to “{current}” since you loaded it. Reload and try again.")
+        raise RuleViolation(409, "conflict", f"The {what} changed to \"{current}\" since you loaded it. Reload and try again.")
 
 
 def require_not_merged(case: dict) -> None:
@@ -98,12 +115,12 @@ def check_status_transition(case: dict, staff: dict, to: str, explanation: str =
     current = case["status"]
     rule = STATUS_TRANSITIONS.get((current, to))
     if rule is None:
-        raise RuleViolation(409, "invalid_transition", f"A complaint cannot move from “{current}” to “{to}”.")
-    require_role(staff, rule.min_role, f"move a complaint from “{current}” to “{to}”")
+        raise RuleViolation(409, "invalid_transition", f"A complaint cannot move from \"{current}\" to \"{to}\".")
+    require_role(staff, rule.min_role, f"move a complaint from \"{current}\" to \"{to}\"")
     require_scope(case, staff)
     require_not_merged(case)
     if rule.needs_explanation and not explanation.strip():
-        raise RuleViolation(422, "explanation_required", f"Explain publicly why the complaint moves to “{to}”.")
+        raise RuleViolation(422, "explanation_required", f"Explain publicly why the complaint moves to \"{to}\".")
     if to == "Assigned" and case.get("departmentPk") is None:
         raise RuleViolation(409, "department_required", "Assign a department before marking the complaint assigned.")
     if to == "Marked Resolved" and active_work_orders:
@@ -145,7 +162,7 @@ def check_note(case: dict, staff: dict) -> None:
 def check_work_order_create(case: dict, staff: dict) -> None:
     require_scope(case, staff)
     require_not_merged(case)
-    if case["status"] not in ("Assigned", "In Progress"):
+    if case["status"] not in ("Assigned", "In Progress", "Under Construction", "Work Completed", "Verification In Progress", "On Hold"):
         raise RuleViolation(409, "invalid_transition", "Assign the complaint before creating a work order.")
 
 
@@ -158,7 +175,7 @@ def check_work_order_change(case: dict, order: dict, staff: dict, to: str, note:
     if to not in WORK_ORDER_STATUSES:
         raise RuleViolation(422, "invalid_status", "Choose a valid work-order status.")
     if (current, to) not in allowed:
-        raise RuleViolation(409, "invalid_transition", f"A work order cannot move from “{current}” to “{to}”.")
+        raise RuleViolation(409, "invalid_transition", f"A work order cannot move from \"{current}\" to \"{to}\".")
     if to == "Cancelled":
         require_role(staff, "supervisor", "cancel work orders")
     if to in ("Completed", "Cancelled") and not note.strip():
@@ -239,7 +256,7 @@ def allowed_actions(case: dict, staff: dict, active_work_orders: int = 0) -> lis
         actions.append({"action": "transition", "to": to, "label": rule.label, "needsExplanation": rule.needs_explanation})
     if has_role(staff, "supervisor") and case["status"] != "Marked Resolved":
         actions.append({"action": "assign", "label": "Assign or reassign"})
-    if case["status"] in ("Assigned", "In Progress"):
+    if case["status"] in ("Assigned", "In Progress", "Under Construction", "Work Completed", "Verification In Progress", "On Hold"):
         actions.append({"action": "create_work_order", "label": "Create work order"})
     if has_role(staff, "supervisor") and case["status"] == "Marked Resolved" and case["verification"] != "Reinspection Required":
         actions.append({"action": "request_reinspection", "label": "Request reinspection"})

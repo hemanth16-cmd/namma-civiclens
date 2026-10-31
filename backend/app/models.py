@@ -101,9 +101,17 @@ class VerificationEntry(BaseModel):
     note: str = ""
 
 
+class PublicEvidenceSummary(BaseModel):
+    evidenceId: str
+    phase: Literal["before", "after"]
+    mediaType: str
+    uploadedAt: str
+
+
 class PublicComplaint(BaseModel):
     """Public tracking projection: the same allowlist as api.publicRecord() in dist/services.js.
-    No claim code or hash, owner, precise GPS, media, description or internal fields."""
+    No claim code or hash, owner, precise GPS, storage keys, description or internal fields.
+    Only public-safe media descriptors are included; file access is checked separately."""
 
     id: str
     category: str
@@ -114,6 +122,7 @@ class PublicComplaint(BaseModel):
     updated: str
     timeline: list[TimelineEntry]
     verificationLog: list[VerificationEntry]
+    publicEvidence: list[PublicEvidenceSummary] = Field(default_factory=list)
     # Public ID of the complaint this report was merged into as a duplicate (schema 8), else null.
     mergedInto: str | None = None
 
@@ -190,6 +199,7 @@ class StaffEvidenceSummary(BaseModel):
     sha256: str
     capturedAt: str | None
     uploadedAt: str
+    gps: StaffGps | None = None
 
 
 class StaffGps(BaseModel):
@@ -355,7 +365,7 @@ class ReadAllResult(BaseModel):
 # Inputs are strict (unknown fields refused, lengths capped). Outputs are explicit allowlists: the
 # public projection (PublicComplaint above) is unchanged and never includes any of these fields.
 
-Status = Literal["Submitted", "Under Review", "Assigned", "In Progress", "Marked Resolved"]
+Status = Literal["Submitted", "Under Review", "Assigned", "In Progress", "Under Construction", "Work Completed", "Verification In Progress", "On Hold", "Marked Resolved"]
 WorkOrderStatus = Literal["Open", "In Progress", "Completed", "Cancelled"]
 DepartmentCode = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")]
 Username = Annotated[str, Field(pattern=r"^[a-z0-9._-]{3,64}$")]
@@ -457,6 +467,8 @@ class WorkOrderEvidence(BaseModel):
     byteSize: int
     sha256: str
     uploadedAt: str
+    capturedAt: str | None = None
+    gps: StaffGps | None = None
 
 
 class WorkOrderEvent(BaseModel):
@@ -525,8 +537,203 @@ class MergeOut(BaseModel):
     revertReason: str | None
 
 
+# ---------- Wards, zones and supervisor operations ----------
+
+WardNumber = Annotated[int, Field(ge=1, le=9999)]
+Priority = Literal["low", "normal", "high", "urgent"]
+PublicId = Annotated[str, Field(pattern=r"^NCL-\d{4}-[A-Z0-9]{6}$")]
+
+
+class ZoneRef(BaseModel):
+    number: int | None
+    name: str | None
+
+
+class WardRef(BaseModel):
+    number: int
+    name: str
+    zone: ZoneRef
+
+
+class WardOut(WardRef):
+    active: bool
+    testing: bool
+    hasBoundary: bool
+
+
+class WardHistoryEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    from_: int | None = Field(default=None, alias="from")
+    to: int | None
+    method: Literal["auto", "manual", "unverified"]
+    reason: str
+    gps: dict
+    by: str | None
+    at: str
+
+
+class AllocationSide(BaseModel):
+    department: str | None
+    assignee: str | None
+    priority: str | None
+    dueAt: str | None
+    status: str
+
+
+class AllocationEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    batch: str
+    kind: Literal["allocated", "reallocated"]
+    ward: int | None
+    zone: int | None
+    from_: AllocationSide = Field(alias="from")
+    to: AllocationSide
+    reason: str
+    note: str
+    by: str
+    at: str
+
+
+class WardSetIn(_Strict):
+    ward: WardNumber
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class AllocationIn(_Strict):
+    complaints: Annotated[list[PublicId], Field(min_length=1, max_length=100)]
+    department: DepartmentCode | None = None
+    assignee: Username
+    priority: Priority = "normal"
+    dueAt: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")] | None = None  # a local (IST) date
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+    note: Annotated[str, Field(max_length=2000)] = ""
+
+    @field_validator("dueAt")
+    @classmethod
+    def _real_date(cls, v: str | None) -> str | None:
+        if v is not None:
+            datetime.strptime(v, "%Y-%m-%d")
+        return v
+
+
+class AllocationResult(BaseModel):
+    id: str
+    outcome: Literal["allocated", "reallocated", "unchanged"]
+    allocationId: str | None = None
+    status: str | None = None
+
+
+class AllocationOut(BaseModel):
+    batch: str
+    results: list[AllocationResult]
+    changed: int
+    unchanged: int
+
+
+class ScopeWard(BaseModel):
+    number: int
+    name: str
+    hasBoundary: bool
+
+
+class ScopeZone(BaseModel):
+    number: int
+    name: str
+    wards: list[ScopeWard]
+
+
+class SupervisorScope(BaseModel):
+    role: str
+    cityWide: bool
+    zones: list[ScopeZone]
+    wardCount: int
+
+
+class SupervisorComplaint(BaseModel):
+    id: str
+    title: str
+    category: str
+    area: str
+    status: str
+    verification: str
+    department: str
+    received: str
+    ageDays: int
+    priority: str | None
+    dueAt: str | None
+    overdue: bool
+    ward: WardRef | None
+    wardAssignmentStatus: str
+    assignee: StaffRef | None
+    gps: dict
+
+
+class SupervisorComplaintList(BaseModel):
+    items: list[SupervisorComplaint]
+    total: int
+    limit: int
+    offset: int
+
+
+class Counts(BaseModel):
+    total: int
+    open: int
+    resolved: int
+    pendingVerification: int
+    overdue: int
+
+
+class CategoryCounts(Counts):
+    category: str
+
+
+class ZoneCounts(Counts):
+    number: int
+    name: str
+    wards: int
+
+
+class WardCounts(Counts):
+    number: int
+    name: str
+    active: bool
+    testing: bool
+    zone: ZoneRef
+
+
+class StatusCount(BaseModel):
+    status: str
+    count: int
+
+
+class SupervisorDashboard(BaseModel):
+    level: Literal["city", "zone", "ward"]
+    cityWide: bool
+    zone: int | None
+    ward: int | None
+    today: str
+    totals: Counts
+    unverifiedWard: Counts | None
+    byStatus: list[StatusCount]
+    byCategory: list[CategoryCounts]
+    byZone: list[ZoneCounts]
+    byWard: list[WardCounts]
+
+
+class AssignableStaff(BaseModel):
+    username: str
+    displayName: str
+    role: str
+    departments: list[str]
+
+
 class StaffCase(StaffComplaint):
     """StaffComplaint plus management data. Internal notes and staff names appear only here."""
+    repairEvidence: list[StaffEvidenceSummary] = Field(default_factory=list)
     version: int
     merges: list[MergeOut] = []
     assignment: AssignmentOut
@@ -534,6 +741,12 @@ class StaffCase(StaffComplaint):
     workOrders: list[WorkOrderOut]
     notes: list[StaffNoteOut]
     allowedActions: list[AllowedAction]
+    ward: WardOut | None = None
+    wardAssignmentStatus: Literal["auto", "manual", "unverified"] = "unverified"
+    priority: Priority | None = None
+    dueAt: str | None = None
+    wardHistory: list[WardHistoryEntry] = []
+    allocations: list[AllocationEntry] = []
 
 
 class AuditEntry(BaseModel):
@@ -596,9 +809,21 @@ class OwnerGps(BaseModel):
     address: str | None = None
 
 
+class OwnerEvidence(BaseModel):
+    """Evidence metadata for the complaint's owner. The file itself is fetched with the resident session from
+    GET /residents/me/complaints/{id}/evidence/{evidenceId}; never a storage key, path or public URL."""
+    evidenceId: str
+    role: Literal["original", "repair"]
+    mediaType: str
+    contentType: str
+    byteSize: int
+    capturedAt: str | None
+    uploadedAt: str
+
+
 class ResidentComplaint(BaseModel):
-    """A complaint as its owning resident sees it: the public fields plus the resident's own description
-    and location. Never the claim code or hash, upload tokens, staff notes, assignees or storage keys."""
+    """A complaint as its owning resident sees it: the public fields plus the resident's own description,
+    location and evidence list. Never the claim code or hash, upload tokens, staff notes, assignees or storage keys."""
     id: str
     title: str
     category: str
@@ -617,6 +842,7 @@ class ResidentComplaint(BaseModel):
     ownedAt: str | None
     timeline: list[TimelineEntry]
     verificationLog: list[VerificationEntry]
+    evidence: list[OwnerEvidence] = []
 
 
 class ResidentComplaintList(BaseModel):
@@ -641,6 +867,7 @@ class ResidentPreferences(_Strict):
     updates: bool = True
     verification: bool = True
     hotspots: bool = False
+
 
 
 # ---------- Duplicate detection (schema 8) ----------

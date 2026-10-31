@@ -9,10 +9,12 @@ Mutations return the updated staff view of the complaint (StaffCase) so the cons
 from server data. Write methods are POST only, matching the CORS allowlist (GET, POST, DELETE).
 """
 
+from datetime import datetime, timezone
+import json
 import re
 import secrets
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 
 from .auth import current_staff
@@ -125,23 +127,48 @@ def list_work_orders(request: Request, response: Response, staff: dict = Depends
 
 
 @router.post("/work-orders/{work_order_id}/evidence", status_code=201, response_model=RepairEvidenceReceipt)
-async def upload_repair_evidence(work_order_id: str, request: Request, response: Response, staff: dict = Depends(current_staff)) -> dict:
-    """After-repair photo for a work order, through the same streaming checks as citizen evidence
+async def upload_repair_evidence(work_order_id: str, request: Request, response: Response, background: BackgroundTasks,
+                                 staff: dict = Depends(current_staff)) -> dict:
+    return await _upload_repair(request, response, staff, background, work_order_id=work_order_id)
+
+
+@router.post("/complaints/{public_id}/repair-evidence", status_code=201, response_model=RepairEvidenceReceipt)
+async def upload_case_repair(public_id: str, request: Request, response: Response, background: BackgroundTasks,
+                             staff: dict = Depends(current_staff)) -> dict:
+    _check_id(public_id)
+    return await _upload_repair(request, response, staff, background, public_id=public_id)
+
+
+REPAIR_ALLOWED_FIELDS = (
+    "file", "capturedAt", "lat", "lng", "accuracy", "source", "sourceType",
+    "timestamp", "address", "gpsLat", "gpsLng", "gpsAccuracy", "gpsSource",
+    "gpsSourceType", "gpsTimestamp", "gpsAddress", "fixAgeSeconds", "gps"
+)
+
+
+async def _upload_repair(request: Request, response: Response, staff: dict, background: BackgroundTasks, *,
+                         work_order_id: str | None = None, public_id: str | None = None) -> dict:
+    """After-repair photo, through the same streaming checks as citizen evidence
     (signature sniffing, size limit, SHA-256, quota). Authorised before the body is read."""
     store = _store(request)
     storage: EvidenceStorage = request.app.state.evidence_storage
     settings: UploadSettings = request.app.state.upload_settings
     response.headers["Cache-Control"] = "no-store"
     enforce(request, "evidence_per_ip", "ip")
-    _check_order_id(work_order_id)
-    await run_in_threadpool(store.work_order_context, work_order_id, staff["pk"])
+    if work_order_id:
+        _check_order_id(work_order_id)
+        await run_in_threadpool(store.work_order_context, work_order_id, staff["pk"])
+    else:
+        record = await run_in_threadpool(store.case_detail, public_id, staff["pk"])
+        if record is None:
+            raise ApiProblem(404, "not_found", NOT_FOUND)
     declared = request.headers.get("content-length", "")
     declared_size = int(declared) if declared.isdigit() else None
     if declared_size is not None and declared_size > settings.max_request_bytes:
         raise ApiProblem(413, "payload_too_large", "The upload is larger than the allowed size.")
     quota: EvidenceQuota = request.app.state.evidence_quota
     with quota.reserve(declared_size or settings.max_request_bytes) as reservation:
-        reader, captured_at = await receive_upload(request, storage, settings)
+        reader, captured_at = await receive_upload(request, storage, settings, allowed_fields=REPAIR_ALLOWED_FIELDS)
         pending, kind = reader.pending, reader.kind
         try:
             if kind.media_type != "photo":
@@ -150,16 +177,111 @@ async def upload_repair_evidence(work_order_id: str, request: Request, response:
         except BaseException:
             pending.abort()
             raise
+
+        fields = reader.text_fields
+        gps_input = None
+        if "gps" in fields and fields["gps"]:
+            try:
+                raw_json = json.loads(fields["gps"])
+                if isinstance(raw_json, dict):
+                    gps_input = raw_json
+            except (json.JSONDecodeError, ValueError):
+                raise ApiProblem(422, "validation_error", "Malformed gps JSON in upload.")
+        else:
+            lat_str = fields.get("lat") or fields.get("gpsLat")
+            lng_str = fields.get("lng") or fields.get("gpsLng")
+            if lat_str is not None or lng_str is not None:
+                gps_input = {
+                    "lat": lat_str,
+                    "lng": lng_str,
+                    "accuracy": fields.get("accuracy") or fields.get("gpsAccuracy"),
+                    "source": fields.get("source") or fields.get("gpsSource"),
+                    "sourceType": fields.get("sourceType") or fields.get("gpsSourceType"),
+                    "timestamp": fields.get("timestamp") or fields.get("gpsTimestamp"),
+                    "address": fields.get("address") or fields.get("gpsAddress"),
+                    "fixAgeSeconds": fields.get("fixAgeSeconds"),
+                }
+
+        parsed_gps = None
+        if gps_input:
+            try:
+                lat = float(gps_input["lat"])
+                lng = float(gps_input["lng"])
+            except (KeyError, TypeError, ValueError):
+                raise ApiProblem(422, "validation_error", "GPS latitude and longitude must be numbers.")
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):
+                raise ApiProblem(422, "validation_error", "GPS coordinates out of range.")
+
+            acc = None
+            if gps_input.get("accuracy") not in (None, ""):
+                try:
+                    acc = float(gps_input["accuracy"])
+                    if acc < 0:
+                        raise ValueError()
+                except (TypeError, ValueError):
+                    raise ApiProblem(422, "validation_error", "GPS accuracy must be a positive number.")
+
+            source_type = gps_input.get("sourceType") or ("gps" if gps_input.get("source") == "Device GPS" else "exif")
+            if source_type not in ("gps", "exif", "manual"):
+                raise ApiProblem(422, "validation_error", "Invalid GPS source type.")
+
+            source = str(gps_input.get("source") or ("Device GPS" if source_type == "gps" else "Submitted EXIF metadata"))[:120]
+
+            ts = gps_input.get("timestamp")
+            if ts:
+                try:
+                    if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.isdigit()):
+                        ts = datetime.fromtimestamp(float(ts) / 1000.0, tz=timezone.utc).isoformat()
+                    else:
+                        datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except Exception:
+                    raise ApiProblem(422, "validation_error", "GPS timestamp must be a valid ISO 8601 string or epoch ms.")
+
+            fix_age = None
+            if gps_input.get("fixAgeSeconds") not in (None, ""):
+                try:
+                    fix_age = int(gps_input["fixAgeSeconds"])
+                except (TypeError, ValueError):
+                    pass
+
+            address = str(gps_input.get("address"))[:500] if gps_input.get("address") else None
+
+            parsed_gps = {
+                "lat": lat,
+                "lng": lng,
+                "accuracy": acc,
+                "source": source,
+                "sourceType": source_type,
+                "timestamp": ts,
+                "fixAgeSeconds": fix_age,
+                "address": address,
+            }
+
         meta = {"evidenceId": "ev_" + secrets.token_urlsafe(16), "storageKey": key, "mediaType": kind.media_type,
                 "contentType": kind.content_type, "byteSize": pending.size, "sha256": pending.sha256,
-                "capturedAt": captured_at, "uploadedAt": utc_now(), "storageBackend": storage.name}
+                "capturedAt": captured_at, "uploadedAt": utc_now(), "storageBackend": storage.name,
+                "gps": parsed_gps}
         try:
-            row = await run_in_threadpool(store.add_repair_evidence, work_order_id, staff["pk"], meta, _ip(request))
+            if work_order_id:
+                row = await run_in_threadpool(store.add_repair_evidence, work_order_id, staff["pk"], meta, _ip(request))
+            else:
+                row = await run_in_threadpool(store.add_case_repair_evidence, public_id, staff["pk"], meta, _ip(request))
         except BaseException:
             await run_in_threadpool(storage.delete, key)  # no file without a row, and no row without a file
             raise
         reservation.commit(pending.size)
-        return {k: row[k] for k in ("evidenceId", "mediaType", "contentType", "byteSize", "sha256", "capturedAt", "uploadedAt")}
+        # After the response: AI analysis of the repair photo and a before/after suggestion (app/ai/service.py).
+        background.add_task(request.app.state.ai.repair_evidence_added, row["evidenceId"])
+        return {
+            "evidenceId": row["evidenceId"],
+            "mediaType": row["mediaType"],
+            "contentType": row["contentType"],
+            "byteSize": row["byteSize"],
+            "sha256": row["sha256"],
+            "capturedAt": row["capturedAt"],
+            "uploadedAt": row["uploadedAt"],
+            "gps": row.get("gps"),
+        }
 
 
 @router.get("/work-orders/{work_order_id}/evidence/{evidence_id}")
@@ -189,6 +311,16 @@ def departments(request: Request, response: Response, staff: dict = Depends(curr
     response.headers["Cache-Control"] = "no-store"
     return _store(request).list_departments()
 
+
+@router.get("/complaints/{public_id}/repair-evidence/{evidence_id}")
+def view_case_repair(public_id: str, evidence_id: str, request: Request, staff: dict = Depends(current_staff)):
+    _check_id(public_id)
+    if not EVIDENCE_ID.fullmatch(evidence_id):
+        raise ApiProblem(404, "evidence_not_found", "No such repair evidence.")
+    evidence = _store(request).case_evidence(public_id, evidence_id, staff["pk"])
+    if evidence is None or evidence["role"] != "repair":
+        raise ApiProblem(404, "evidence_not_found", "No such repair evidence.")
+    return stream_evidence(request, evidence, staff, f"{public_id}-repair")
 
 # ---------- Duplicate detection (Workstream 2) ----------
 

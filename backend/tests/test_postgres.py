@@ -15,12 +15,14 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from app import auth
+from app import auth, wards
 from app.db import DatabaseConfigError, PostgresDatabase, SQLiteDatabase, database_from_env, selected_backend
 from app.db_migrate import main as migrate_cli
-from app.db_migrate import migrate
+from app.db_migrate import _norm_row, migrate
 from app.main import create_app
 from app.store import POSTGRES_BASE_VERSION, POSTGRES_SCHEMA, SCHEMA, SCHEMA_VERSION, TABLES, ComplaintStore, StoreError
+from app.ai.service import InlineExecutor
+from tests.aiutil import FakeProvider, ai_settings, photo
 from tests.test_complaints import payload
 from tests.test_evidence import JPEG
 from tests.test_notifications import subscription
@@ -130,7 +132,9 @@ def test_version_5_postgres_database_is_upgraded_in_place(pg_url):
         assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(5,)]
         ComplaintStore(database=db).initialize()
         assert pg_query(pg_url, "SELECT version FROM civiclens_schema") == [(SCHEMA_VERSION,)] == [(7,)]
-        assert db.features() == {"duplicate_detection": "applied", "resident_accounts": "applied"}
+        assert db.features() == {"duplicate_detection": "applied", "resident_accounts": "applied",
+                                    "ward_zone_operations": "applied", "ai_analysis": "applied",
+                                    "repair_evidence_geotagging": "applied"}
         assert old.get(record["id"])["id"] == record["id"]
         for table in ("notification_recipients", "notification_follows", "push_subscriptions", "notifications"):
             assert pg_query(pg_url, f"SELECT COUNT(*) FROM {table}") == [(0,)]
@@ -264,8 +268,12 @@ def test_pool_can_restart_after_close(pg_url):
 
 @pytest.fixture
 def populated_sqlite(isolated_db_path, evidence_dir):
-    """A SQLite database with every table populated through the real API (local evidence storage)."""
-    with TestClient(create_app(db_path=isolated_db_path, evidence_dir=evidence_dir), client=("10.0.0.5", 1)) as client:
+    """A SQLite database with every table populated through the real API (local evidence storage). AI analysis
+    (schema 8) runs with a fake provider on real photos, so its tables are populated too."""
+    original, repair = photo(1, "damage"), photo(1, "clear", moved=True)
+    app = create_app(db_path=isolated_db_path, evidence_dir=evidence_dir, ai_settings=ai_settings(), ai_provider=FakeProvider(),
+                     ai_executor=InlineExecutor())
+    with TestClient(app, client=("10.0.0.5", 1)) as client:
         store = client.app.state.store
         store.create_staff("asha", "Asha", auth.hash_password(PASSWORD))
         receipts = [client.post("/api/v1/complaints", json=payload(), headers={"Idempotency-Key": "k" * 40}).json(),
@@ -275,12 +283,12 @@ def populated_sqlite(isolated_db_path, evidence_dir):
         assert client.post("/api/v1/notifications/follows", json={"complaintId": receipts[0]["id"], "claim": receipts[0]["claim"]},
                            headers=citizen).status_code == 201
         assert client.post("/api/v1/notifications/subscriptions", json=subscription(), headers=citizen).status_code == 201
-        upload = client.post(f"/api/v1/complaints/{receipts[0]['id']}/evidence", files={"file": ("e.jpg", JPEG, "image/jpeg")},
+        upload = client.post(f"/api/v1/complaints/{receipts[0]['id']}/evidence", files={"file": ("e.jpg", original, "image/jpeg")},
                              headers={"Authorization": f"Bearer {receipts[0]['uploadToken']}"})
         assert upload.status_code == 201
         token = client.post("/api/v1/staff/sessions", json={"username": "asha", "password": PASSWORD}).json()["token"]
         staff = {"Authorization": f"Bearer {token}"}
-        assert client.get(f"/api/v1/staff/complaints/{receipts[0]['id']}/evidence", headers=staff).content == JPEG
+        assert client.get(f"/api/v1/staff/complaints/{receipts[0]['id']}/evidence", headers=staff).content == original
         # Complaint management (schema 7): department, assignment, note, work order with before/after evidence, audit.
         store.create_department("roads", "Road maintenance")
         store.set_staff_role("asha", "supervisor")
@@ -290,7 +298,7 @@ def populated_sqlite(isolated_db_path, evidence_dir):
                            headers=staff).status_code == 200
         assert client.post(f"/api/v1/staff/complaints/{cid}/notes", json={"body": "internal"}, headers=staff).status_code == 201
         order = client.post(f"/api/v1/staff/complaints/{cid}/work-orders", json={"team": "crew"}, headers=staff).json()["workOrders"][0]["id"]
-        assert client.post(f"/api/v1/staff/work-orders/{order}/evidence", files={"file": ("a.jpg", JPEG, "image/jpeg")},
+        assert client.post(f"/api/v1/staff/work-orders/{order}/evidence", files={"file": ("a.jpg", repair, "image/jpeg")},
                            headers=staff).status_code == 201
         # Resident accounts: an account, its session and preferences, and a claimed complaint.
         resident = client.post("/api/v1/residents", json={"email": "bina@example.org", "password": "resident passphrase 1",
@@ -305,6 +313,14 @@ def populated_sqlite(isolated_db_path, evidence_dir):
                            headers=staff).status_code == 200
         assert client.post(f"/api/v1/staff/complaints/{cid}/duplicates/{third}/dismiss", json={"reason": "different"},
                            headers=staff).status_code == 200
+        # AI analysis (named migration ai_analysis): both photos analysed and compared on upload.
+        assert client.get(f"/api/v1/staff/complaints/{cid}/repair-assessment", headers=staff).json()["assessments"][0]["state"] == "completed"
+        # Ward/zone operations: seeded wards, a city-wide scope, a manual ward and an allocation.
+        store.seed_wards(wards.load_seed())
+        store.set_staff_scope("asha", "city", None, True)
+        assert client.post(f"/api/v1/staff/complaints/{cid}/ward", json={"ward": 5, "reason": "checked"}, headers=staff).status_code == 200
+        assert client.post("/api/v1/staff/supervisor/allocations", json={"complaints": [cid], "assignee": "asha", "priority": "high",
+                                                                          "reason": "drive"}, headers=staff).status_code == 200
     with closing(sqlite3.connect(isolated_db_path)) as conn:
         counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
     assert all(counts[t] > 0 for t in TABLES if t != "verification_log"), counts
@@ -341,7 +357,8 @@ def test_migration_preserves_everything_and_the_app_runs_on_it(populated_sqlite,
     for table in TABLES:
         cols = [r[1] for r in sqlite3.connect(path).execute(f"PRAGMA table_info({table})")]
         target = pg_query(pg_url, f"SELECT {', '.join(cols)} FROM {table} ORDER BY pk")
-        assert [tuple(r) for r in target] == [tuple(r) for r in source[table]], table
+        # JSONB columns come back parsed; compare them as JSON values (db_migrate does the same).
+        assert [_norm_row(table, cols, r) for r in target] == [_norm_row(table, cols, r) for r in source[table]], table
 
     monkeypatch.setenv("DATABASE_BACKEND", "postgres")
     monkeypatch.setenv("DATABASE_URL", pg_url)
@@ -350,7 +367,7 @@ def test_migration_preserves_everything_and_the_app_runs_on_it(populated_sqlite,
         assert public.status_code == 200 and public.json()["timeline"][0]["status"] == "Submitted"
         token = client.post("/api/v1/staff/sessions", json={"username": "asha", "password": PASSWORD}).json()["token"]
         view = client.get(f"/api/v1/staff/complaints/{receipts[0]['id']}/evidence", headers={"Authorization": f"Bearer {token}"})
-        assert view.status_code == 200 and view.content == JPEG, "migrated metadata still points at the local file"
+        assert view.status_code == 200 and view.content == photo(1, "damage"), "migrated metadata still points at the local file"
         assert len(client.get(f"/api/v1/staff/complaints/{receipts[0]['id']}/evidence/access", headers={"Authorization": f"Bearer {token}"}).json()) == 2
         replay = client.post("/api/v1/complaints", json=payload(), headers={"Idempotency-Key": "k" * 40})
         assert replay.status_code == 409 and replay.json()["error"]["code"] in ("idempotency_key_used", "idempotency_key_conflict"), "idempotency state migrated"

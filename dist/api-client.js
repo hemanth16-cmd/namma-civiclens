@@ -160,6 +160,29 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       if (!Array.isArray(d.items)) throw new ApiError('The CivicLens server sent a complaint list this app could not read.', {code: 'malformed_response'});
       return {items: d.items.map(toResidentComplaint), total: Number(d.total) || 0};
     },
+    /** GET /residents/me/complaints/{id}: one complaint, only if the signed-in resident owns it (else null/404). */
+    async getResidentComplaint(token, id) {
+      try {
+        return toResidentComplaint(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}`, undefined, {headers: bearer(token)}));
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+
+    /** An evidence file of the resident's own complaint, as a Blob of an allowed media type (owner-only endpoint). */
+    async fetchResidentEvidence(token, id, evidenceId = '') {
+      const suffix = evidenceId ? `/${encodeURIComponent(evidenceId)}` : '';
+      return evidenceBlob(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}/evidence${suffix}`, undefined,
+        {headers: bearer(token), timeout: uploadTimeoutMs, raw: true}));
+    },
+
+    /** One evidence file (original or after-repair) of the resident's own complaint, as a Blob of an allowed media
+     * type: GET /residents/me/complaints/{id}/evidence/{evidenceId}. Used by My Complaints. */
+    async fetchResidentEvidenceFile(token, id, evidenceId) {
+      return this.fetchResidentEvidence(token, id, evidenceId);
+    },
+
     /** POST /residents/me/claims. The claim code travels in the JSON body only. */
     async claimComplaint(token, id, claim) {
       const d = await request('POST', '/residents/me/claims', {id, claim}, {headers: bearer(token)});
@@ -218,10 +241,10 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return evidenceBlob(await request('POST', `/complaints/${encodeURIComponent(id)}/evidence/view`, {claim}, {timeout: uploadTimeoutMs, raw: true}));
     },
     /** GET /residents/me/complaints/{id}/evidence, for a complaint in the signed-in resident's account. */
-    async fetchResidentEvidence(token, id) {
-      return evidenceBlob(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}/evidence`, undefined, {headers: bearer(token), timeout: uploadTimeoutMs, raw: true}));
+    async fetchResidentEvidence(token, id, evidenceId = '') {
+      const suffix = evidenceId ? `/${encodeURIComponent(evidenceId)}` : '';
+      return evidenceBlob(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}/evidence${suffix}`, undefined, {headers: bearer(token), timeout: uploadTimeoutMs, raw: true}));
     },
-    /** GET /residents/me/complaints/{id}: one complaint of the signed-in resident, or null if it is not theirs. */
     async getResidentComplaint(token, id) {
       try {
         return toResidentComplaint(await request('GET', `/residents/me/complaints/${encodeURIComponent(id)}`, undefined, {headers: bearer(token)}));
@@ -265,13 +288,49 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return toStaffComplaint(await request('POST', `/staff/work-orders/${encodeURIComponent(workOrderId)}/transitions`, {to, expectedStatus, note}, {headers: staffAuth(token)}));
     },
 
-    /** After-repair JPEG for a work order (multipart). Resolves to the evidence receipt. */
-    async uploadRepairEvidence(token, workOrderId, blob) {
+    async uploadCaseRepairEvidence(token, id, blob, meta = {}) {
       const form = new FormData();
       form.append('file', blob, 'repair.jpg');
+      if (meta?.capturedAt) form.append('capturedAt', meta.capturedAt);
+      if (meta?.gps) {
+        if (meta.gps.lat != null) form.append('lat', String(meta.gps.lat));
+        if (meta.gps.lng != null) form.append('lng', String(meta.gps.lng));
+        if (meta.gps.accuracy != null) form.append('accuracy', String(meta.gps.accuracy));
+        if (meta.gps.source) form.append('source', String(meta.gps.source));
+        if (meta.gps.sourceType) form.append('sourceType', String(meta.gps.sourceType));
+        if (meta.gps.timestamp) form.append('timestamp', String(meta.gps.timestamp));
+        if (meta.gps.address) form.append('address', String(meta.gps.address));
+      }
+      const d = await request('POST', `/staff/complaints/${encodeURIComponent(id)}/repair-evidence`, form, {headers: staffAuth(token), timeout: uploadTimeoutMs});
+      if (typeof d.evidenceId !== 'string') throw new ApiError('Repair evidence could not be confirmed.', {code: 'malformed_response'});
+      return d;
+    },
+
+    async fetchCaseRepairEvidence(token, id, evidenceId) {
+      return evidenceBlob(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/repair-evidence/${encodeURIComponent(evidenceId)}`, undefined, {headers: staffAuth(token), timeout: uploadTimeoutMs, raw: true}));
+    },
+
+    async fetchPublicEvidence(id, evidenceId) {
+      return evidenceBlob(await request('GET', `/complaints/${encodeURIComponent(id)}/public-evidence/${encodeURIComponent(evidenceId)}`, undefined, {timeout: uploadTimeoutMs, raw: true}));
+    },
+
+    /** After-repair JPEG for a work order (multipart). Resolves to the evidence receipt. */
+    async uploadRepairEvidence(token, workOrderId, blob, meta = {}) {
+      const form = new FormData();
+      form.append('file', blob, 'repair.jpg');
+      if (meta?.capturedAt) form.append('capturedAt', meta.capturedAt);
+      if (meta?.gps) {
+        if (meta.gps.lat != null) form.append('lat', String(meta.gps.lat));
+        if (meta.gps.lng != null) form.append('lng', String(meta.gps.lng));
+        if (meta.gps.accuracy != null) form.append('accuracy', String(meta.gps.accuracy));
+        if (meta.gps.source) form.append('source', String(meta.gps.source));
+        if (meta.gps.sourceType) form.append('sourceType', String(meta.gps.sourceType));
+        if (meta.gps.timestamp) form.append('timestamp', String(meta.gps.timestamp));
+        if (meta.gps.address) form.append('address', String(meta.gps.address));
+      }
       const d = await request('POST', `/staff/work-orders/${encodeURIComponent(workOrderId)}/evidence`, form, {headers: staffAuth(token), timeout: uploadTimeoutMs});
       if (typeof d.evidenceId !== 'string') throw new ApiError('The CivicLens server sent an upload result this app could not read.', {code: 'malformed_response'});
-      return {evidenceId: d.evidenceId, byteSize: Number(d.byteSize) || 0, sha256: String(d.sha256 ?? ''), uploadedAt: d.uploadedAt ?? null};
+      return {evidenceId: d.evidenceId, byteSize: Number(d.byteSize) || 0, sha256: String(d.sha256 ?? ''), uploadedAt: d.uploadedAt ?? null, capturedAt: d.capturedAt ?? null, gps: d.gps ?? null};
     },
 
     /** GET a before/after file of a work order as a Blob. Each view is logged by the server. */
@@ -304,6 +363,69 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent an audit trail this app could not read.', {code: 'malformed_response'});
       return d.map(e => ({id: String(e?.id ?? ''), actorType: String(e?.actorType ?? ''), actor: e?.actor ?? null, actorName: e?.actorName ?? null,
         action: String(e?.action ?? ''), details: e?.details && typeof e.details === 'object' ? e.details : {}, at: e?.at ?? null}));
+    },
+
+    // ---------- Supervisor operations (supervisors and admins; 403 for officials) ----------
+
+    /** The wards this supervisor may act on, grouped by zone. Admins are city-wide. */
+    async supervisorScope(token) {
+      const d = await request('GET', '/staff/supervisor/scope', undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d?.zones)) throw new ApiError('The CivicLens server sent a ward list this app could not read.', {code: 'malformed_response'});
+      return {cityWide: d.cityWide === true, role: String(d.role ?? ''), wardCount: Number(d.wardCount) || 0,
+        zones: d.zones.filter(z => Number.isInteger(z?.number)).map(z => ({number: z.number, name: String(z.name ?? ''),
+          wards: (Array.isArray(z.wards) ? z.wards : []).filter(w => Number.isInteger(w?.number)).map(w => ({number: w.number, name: String(w.name ?? ''), hasBoundary: w.hasBoundary === true}))}))};
+    },
+
+    /** City, zone or ward counts from the server's complaint rows. */
+    async supervisorDashboard(token, {zone = null, ward = null} = {}) {
+      const q = new URLSearchParams();
+      if (ward) q.set('ward', String(ward)); else if (zone) q.set('zone', String(zone));
+      const query = q.toString();
+      const d = await request('GET', '/staff/supervisor/dashboard' + (query ? '?' + query : ''), undefined, {headers: staffAuth(token)});
+      if (!d?.totals || !Array.isArray(d.byWard)) throw new ApiError('The CivicLens server sent a dashboard this app could not read.', {code: 'malformed_response'});
+      return {level: ['city', 'zone', 'ward'].includes(d.level) ? d.level : 'city', cityWide: d.cityWide === true, zone: d.zone ?? null, ward: d.ward ?? null,
+        totals: toCounts(d.totals), unverifiedWard: d.unverifiedWard ? toCounts(d.unverifiedWard) : null,
+        byStatus: (Array.isArray(d.byStatus) ? d.byStatus : []).map(s => ({status: String(s?.status ?? ''), count: Number(s?.count) || 0})),
+        byCategory: (Array.isArray(d.byCategory) ? d.byCategory : []).map(c => ({category: String(c?.category ?? ''), ...toCounts(c)})),
+        byZone: (Array.isArray(d.byZone) ? d.byZone : []).filter(z => Number.isInteger(z?.number)).map(z => ({number: z.number, name: String(z.name ?? ''), wards: Number(z.wards) || 0, ...toCounts(z)})),
+        byWard: d.byWard.filter(w => Number.isInteger(w?.number)).map(w => ({...toWardRef(w), ...toCounts(w)}))};
+    },
+
+    /** Unresolved complaints in the selected wards (or with no verified ward), oldest first. */
+    async supervisorComplaints(token, {wards = [], category = '', status = '', minAgeDays = null, maxAgeDays = null, unverifiedWard = false, limit = 100, offset = 0} = {}) {
+      const q = new URLSearchParams({limit: String(limit), offset: String(offset)});
+      if (unverifiedWard) q.set('unverifiedWard', 'true'); else q.set('wards', wards.join(','));
+      if (category) q.set('category', category);
+      if (status) q.set('status', status);
+      if (minAgeDays !== null && minAgeDays !== '') q.set('minAgeDays', String(minAgeDays));
+      if (maxAgeDays !== null && maxAgeDays !== '') q.set('maxAgeDays', String(maxAgeDays));
+      const d = await request('GET', '/staff/supervisor/complaints?' + q, undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d?.items)) throw new ApiError('The CivicLens server sent a complaint list this app could not read.', {code: 'malformed_response'});
+      return {total: Number(d.total) || 0, items: d.items.filter(i => typeof i?.id === 'string' && PUBLIC_ID.test(i.id)).map(i => ({
+        id: i.id, title: String(i.title ?? ''), category: String(i.category ?? ''), area: String(i.area ?? ''), status: String(i.status ?? ''),
+        verification: String(i.verification ?? ''), department: String(i.department ?? ''), received: i.received ?? null, ageDays: Number(i.ageDays) || 0,
+        priority: typeof i.priority === 'string' ? i.priority : null, dueAt: typeof i.dueAt === 'string' ? i.dueAt : null, overdue: i.overdue === true,
+        ward: toWardRef(i.ward), wardAssignmentStatus: WARD_STATUSES.includes(i.wardAssignmentStatus) ? i.wardAssignmentStatus : 'unverified', assignee: staffRef(i.assignee)}))};
+    },
+
+    async supervisorStaff(token) {
+      const d = await request('GET', '/staff/supervisor/staff', undefined, {headers: staffAuth(token)});
+      if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent a staff list this app could not read.', {code: 'malformed_response'});
+      return d.filter(x => typeof x?.username === 'string').map(x => ({username: x.username, displayName: String(x.displayName ?? x.username), role: String(x.role ?? ''),
+        departments: Array.isArray(x.departments) ? x.departments.map(String) : []}));
+    },
+
+    /** Bulk allocation. All or nothing on the server; returns the per-complaint outcome. */
+    async allocateComplaints(token, {complaints, department = null, assignee, priority = 'normal', dueAt = null, reason, note = ''}) {
+      const d = await request('POST', '/staff/supervisor/allocations', {complaints, department, assignee, priority, dueAt, reason, note}, {headers: staffAuth(token)});
+      if (!Array.isArray(d?.results)) throw new ApiError('The CivicLens server sent an allocation result this app could not read.', {code: 'malformed_response', ambiguous: true});
+      return {batch: String(d.batch ?? ''), changed: Number(d.changed) || 0, unchanged: Number(d.unchanged) || 0,
+        results: d.results.map(r => ({id: String(r?.id ?? ''), outcome: String(r?.outcome ?? '')}))};
+    },
+
+    /** Manual ward by a supervisor or admin (audited; the original GPS is kept). */
+    async setComplaintWard(token, id, {ward, reason}) {
+      return toStaffComplaint(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/ward`, {ward, reason}, {headers: staffAuth(token)}));
     },
 
     /** Citizen response with the private claim code (in the JSON body only). No staff session. */
@@ -368,6 +490,38 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       const d = await request('GET', `/staff/complaints/${encodeURIComponent(id)}/evidence/access`, undefined, {headers: staffAuth(token)});
       if (!Array.isArray(d)) throw new ApiError('The CivicLens server sent an access log this app could not read.', {code: 'malformed_response'});
       return d.map(e => ({username: String(e?.username ?? ''), displayName: String(e?.displayName ?? ''), action: String(e?.action ?? ''), accessedAt: e?.accessedAt ?? null}));
+    },
+
+    // ---------- AI analysis (staff). Results are suggestions; the server never changes a case because of them. ----------
+
+    /** Public: whether photos may be analysed by an external AI service, and the notice to show before upload. */
+    async getAiDisclosure() {
+      const d = await request('GET', '/ai');
+      return {enabled: d.enabled === true, disclosure: typeof d.disclosure === 'string' ? d.disclosure.slice(0, 500) : null};
+    },
+
+    async getAiAnalysis(token, id) {
+      return toAiAnalysis(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/ai`, undefined, {headers: staffAuth(token)}));
+    },
+
+    async retryAiAnalysis(token, id) {
+      return toAiAnalysis(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/ai/retry`, {}, {headers: staffAuth(token)}));
+    },
+
+    async getRepairAssessments(token, id) {
+      return toRepairAssessments(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/repair-assessment`, undefined, {headers: staffAuth(token)}));
+    },
+
+    /** Compare the original photo with an after-repair photo (default: the latest). */
+    async verifyRepair(token, id, repairEvidenceId = null) {
+      return toRepairAssessments(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/verify-repair`,
+        repairEvidenceId ? {repairEvidenceId} : {}, {headers: staffAuth(token)}));
+    },
+
+    /** Supervisor review of an AI suggestion: decision 'approved' or 'rejected' (a note is required to reject). */
+    async reviewRepairAssessment(token, id, assessmentId, {decision, note = ''}) {
+      return toRepairAssessment(await request('POST', `/staff/complaints/${encodeURIComponent(id)}/repair-assessment/${encodeURIComponent(assessmentId)}/review`,
+        {decision, note}, {headers: staffAuth(token)}));
     },
 
     // ---------- Notifications. `token` is a staff session token or this device's citizen inbox token. ----------
@@ -444,6 +598,57 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
     async sendTestNotification(token) {
       const d = await request('POST', '/notifications/test', {}, {headers: bearer(token)});
       return {pushEnabled: d.pushEnabled === true};
+    },
+
+    // ---------- Civic Intelligence Engine ----------
+
+    async getIntelligenceSummary(token) {
+      return await request('GET', '/intelligence/summary', undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligencePredictions(token) {
+      return await request('GET', '/intelligence/predictions', undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligenceHotspots(token, options) {
+      const radius = (options && options.radius) || 150;
+      const topWards = (options && options.topWards) || 15;
+      const q = '?radius=' + encodeURIComponent(radius) + '&top_wards=' + encodeURIComponent(topWards);
+      return await request('GET', '/intelligence/hotspots' + q, undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligenceGraph(token, options) {
+      const limit = (options && options.limit) || 50;
+      let q = '?limit=' + encodeURIComponent(limit);
+      if (options && options.complaintId) q += '&complaint_id=' + encodeURIComponent(options.complaintId);
+      if (options && options.ward) q += '&ward=' + encodeURIComponent(options.ward);
+      return await request('GET', '/intelligence/graph' + q, undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligenceFcm(token) {
+      return await request('GET', '/intelligence/fcm/live', undefined, {headers: bearer(token)});
+    },
+
+    async runFcmScenario(token, body) {
+      return await request('POST', '/intelligence/fcm/scenario', {base: (body && body.base) || {}, deltas: (body && body.deltas) || {}}, {headers: bearer(token)});
+    },
+
+    async getSimulationDefaults(token) {
+      return await request('GET', '/intelligence/simulations/defaults', undefined, {headers: bearer(token)});
+    },
+
+    async runSimulation(token, body) {
+      return await request('POST', '/intelligence/simulations/run', {base_rate: (body && body.baseRate) || 100, capacity: (body && body.capacity) || null, n_runs: (body && body.nRuns) || 2000, seed: (body && body.seed) || 42}, {headers: bearer(token)});
+    },
+
+    async getPriorityScore(token, body) {
+      const q = '?category=' + encodeURIComponent((body && body.category) || '') + '&description=' + encodeURIComponent((body && body.description) || '') + '&recurrence_count=' + encodeURIComponent((body && body.recurrenceCount) || 0) + '&corroboration_count=' + encodeURIComponent((body && body.corroborationCount) || 1);
+      return await request('GET', '/intelligence/priority/score' + q, undefined, {headers: bearer(token)});
+    },
+
+    async getIntelligencePriorityQueue(token, options) {
+      const limit = (options && options.limit) || 100;
+      return await request('GET', '/intelligence/priority/queue?limit=' + encodeURIComponent(limit), undefined, {headers: bearer(token)});
     }
   };
 }
@@ -482,8 +687,19 @@ export function toResidentComplaint(d) {
     verification: String(d.verification), department: String(d.department ?? ''), ownedVia: d.ownedVia === 'claimed' ? 'claimed' : 'submitted',
     ownedAt: d.ownedAt ?? null,
     timeline: Array.isArray(d.timeline) ? d.timeline.map(t => ({status: String(t.status), text: String(t.text), date: t.date})) : [],
-    verificationLog: toVerificationLog(d.verificationLog)
+    verificationLog: toVerificationLog(d.verificationLog),
+    publicEvidence: (Array.isArray(d.publicEvidence) ? d.publicEvidence : []).filter(e => /^ev_[A-Za-z0-9_-]{22}$/.test(e?.evidenceId) && ['before', 'after'].includes(e.phase)).map(e => ({
+      evidenceId: e.evidenceId, phase: e.phase, mediaType: e.mediaType === 'video' ? 'video' : 'photo', uploadedAt: e.uploadedAt ?? null, capturedAt: e.capturedAt ?? null
+    })),
+    evidence: toOwnerEvidence(d.evidence)
   };
+}
+
+/** The owner's evidence list: known fields only, valid IDs only. Never a storage key or URL. */
+export function toOwnerEvidence(list) {
+  return (Array.isArray(list) ? list : []).filter(e => typeof e?.evidenceId === 'string' && /^ev_[A-Za-z0-9_-]{22}$/.test(e.evidenceId)).map(e => ({
+    evidenceId: e.evidenceId, role: e.role === 'repair' ? 'repair' : 'original', mediaType: e.mediaType === 'video' ? 'video' : 'photo',
+    contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null}));
 }
 const NOTIFICATION_ID = /^nt_[A-Za-z0-9_-]{16,40}$/;
 const SUBSCRIPTION_ID = /^ps_[A-Za-z0-9_-]{16,40}$/;
@@ -524,7 +740,18 @@ function toListGps(g) {
 }
 const staffAuth = token => ({Authorization: 'Bearer ' + token});
 
-const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update', 'review_duplicates', 'merge', 'revert_merge'];
+const STAFF_ACTIONS = ['transition', 'assign', 'create_work_order', 'request_reinspection', 'add_note', 'add_public_update', 'review_duplicates', 'merge', 'revert_merge', 'set_ward'];
+const WARD_STATUSES = ['auto', 'manual', 'unverified'];
+
+function toWardRef(w) {
+  if (!w || !Number.isInteger(w.number)) return null;
+  return {number: w.number, name: String(w.name ?? ''), zone: {number: Number.isInteger(w.zone?.number) ? w.zone.number : null, name: String(w.zone?.name ?? '')}};
+}
+
+function toCounts(c) {
+  const n = k => Number.isInteger(c?.[k]) ? c[k] : 0;
+  return {total: n('total'), open: n('open'), resolved: n('resolved'), pendingVerification: n('pendingVerification'), overdue: n('overdue')};
+}
 const DUPLICATE_LABELS = ['likely_duplicate', 'possible_duplicate', 'recurrence', 'nearby_separate'];
 const MERGE_ID = /^mg_[A-Za-z0-9_-]{16}$/;
 const publicIdOrNull = v => (typeof v === 'string' && PUBLIC_ID.test(v) ? v : null);
@@ -538,9 +765,25 @@ export function toWorkOrder(w) {
     description: String(w.description ?? ''), dueAt: w.dueAt ?? null, status: String(w.status ?? ''), startedAt: w.startedAt ?? null,
     completedAt: w.completedAt ?? null, completionNote: String(w.completionNote ?? ''), createdBy: String(w.createdBy ?? ''),
     createdAt: w.createdAt ?? null, overdue: w.overdue === true,
-    evidence: (Array.isArray(w.evidence) ? w.evidence : []).filter(e => typeof e?.evidenceId === 'string').map(e => ({
-      phase: e.phase === 'after' ? 'after' : 'before', evidenceId: e.evidenceId, contentType: String(e.contentType ?? ''),
-      byteSize: Number(e.byteSize) || 0, uploadedAt: e.uploadedAt ?? null})),
+    evidence: (Array.isArray(w.evidence) ? w.evidence : []).filter(e => typeof e?.evidenceId === 'string').map(e => {
+      const item = {
+        phase: e.phase === 'after' ? 'after' : 'before', evidenceId: e.evidenceId, contentType: String(e.contentType ?? ''),
+        byteSize: Number(e.byteSize) || 0, uploadedAt: e.uploadedAt ?? null
+      };
+      if (e.capturedAt) item.capturedAt = e.capturedAt;
+      if (e.gps) {
+        item.gps = {
+          lat: Number(e.gps.lat),
+          lng: Number(e.gps.lng),
+          accuracy: e.gps.accuracy != null ? Number(e.gps.accuracy) : null,
+          source: e.gps.source ?? null,
+          sourceType: String(e.gps.sourceType ?? 'gps'),
+          timestamp: e.gps.timestamp ?? null,
+          address: e.gps.address ?? null
+        };
+      }
+      return item;
+    }),
     history: (Array.isArray(w.history) ? w.history : []).map(h => ({action: String(h?.action ?? ''), to: h?.to ?? null, note: String(h?.note ?? ''),
       by: String(h?.by ?? ''), at: h?.at ?? null}))
   };
@@ -563,6 +806,16 @@ function toManagement(d) {
       id: m.id, duplicate: publicIdOrNull(m.duplicate), canonical: publicIdOrNull(m.canonical), reason: String(m.reason ?? ''),
       score: Number.isFinite(m.score) ? m.score : null, label: DUPLICATE_LABELS.includes(m.label) ? m.label : null, by: String(m.by ?? ''),
       at: m.at ?? null, revertedAt: m.revertedAt ?? null, revertedBy: m.revertedBy ?? null, revertReason: m.revertReason ?? null})),
+    ward: toWardRef(d.ward),
+    wardAssignmentStatus: WARD_STATUSES.includes(d.wardAssignmentStatus) ? d.wardAssignmentStatus : 'unverified',
+    priority: typeof d.priority === 'string' ? d.priority : null,
+    dueAt: typeof d.dueAt === 'string' ? d.dueAt : null,
+    wardHistory: (Array.isArray(d.wardHistory) ? d.wardHistory : []).map(h => ({from: Number.isInteger(h?.from) ? h.from : null, to: Number.isInteger(h?.to) ? h.to : null,
+      method: WARD_STATUSES.includes(h?.method) ? h.method : 'unverified', reason: String(h?.reason ?? ''), by: h?.by ?? null, at: h?.at ?? null})),
+    allocations: (Array.isArray(d.allocations) ? d.allocations : []).map(a => ({kind: String(a?.kind ?? ''), ward: a?.ward ?? null,
+      from: {assignee: a?.from?.assignee ?? null, priority: a?.from?.priority ?? null, dueAt: a?.from?.dueAt ?? null},
+      to: {assignee: a?.to?.assignee ?? null, department: a?.to?.department ?? null, priority: a?.to?.priority ?? null, dueAt: a?.to?.dueAt ?? null},
+      reason: String(a?.reason ?? ''), note: String(a?.note ?? ''), by: String(a?.by ?? ''), at: a?.at ?? null})),
     allowedActions: (Array.isArray(d.allowedActions) ? d.allowedActions : []).filter(x => STAFF_ACTIONS.includes(x?.action)).map(x => ({
       action: x.action, label: String(x.label ?? ''), to: typeof x.to === 'string' ? x.to : null, needsExplanation: x.needsExplanation === true}))
   };
@@ -585,6 +838,18 @@ export function toStaffComplaint(d) {
     verificationLog: toVerificationLog(d.verificationLog),
     evidence: e && typeof e === 'object' ? {evidenceId: String(e.evidenceId ?? ''), mediaType: e.mediaType === 'video' ? 'video' : 'photo',
       contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, sha256: String(e.sha256 ?? ''), capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null} : null,
+    repairEvidence: (Array.isArray(d.repairEvidence) ? d.repairEvidence : []).map(e => ({
+      evidenceId: String(e.evidenceId ?? ''), mediaType: 'photo', uploadedAt: e.uploadedAt ?? null, capturedAt: e.capturedAt ?? null,
+      gps: e.gps ? {
+        lat: Number(e.gps.lat),
+        lng: Number(e.gps.lng),
+        accuracy: e.gps.accuracy != null ? Number(e.gps.accuracy) : null,
+        source: e.gps.source ?? null,
+        sourceType: String(e.gps.sourceType ?? 'gps'),
+        timestamp: e.gps.timestamp ?? null,
+        address: e.gps.address ?? null
+      } : null
+    })),
     ...toManagement(d)
   };
 }
@@ -700,7 +965,11 @@ export function toPublicRecord(d) {
     verification: String(d.verification ?? ''), department: String(d.department ?? ''), updated: d.updated ?? null,
     mergedInto: publicIdOrNull(d.mergedInto),
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
-    verificationLog: toVerificationLog(d.verificationLog)
+    mergedInto: publicIdOrNull(d.mergedInto),
+    verificationLog: toVerificationLog(d.verificationLog),
+    publicEvidence: (Array.isArray(d.publicEvidence) ? d.publicEvidence : []).filter(e => /^ev_[A-Za-z0-9_-]{22}$/.test(e?.evidenceId) && ['before', 'after'].includes(e.phase)).map(e => ({
+      evidenceId: e.evidenceId, phase: e.phase, mediaType: e.mediaType === 'video' ? 'video' : 'photo', uploadedAt: e.uploadedAt ?? null, capturedAt: e.capturedAt ?? null
+    }))
   };
 }
 
@@ -710,4 +979,66 @@ function toVerificationLog(list) {
     id: String(e?.id ?? ''), date: e?.date ?? null, type: String(e?.type ?? ''), from: e?.from ?? null, to: e?.to ?? null,
     response: e?.response ?? null, by: String(e?.by ?? ''), actor: String(e?.actor ?? ''), note: String(e?.note ?? '')
   }));
+}
+
+// ---------- AI analysis ----------
+
+const AI_STATES = ['pending', 'running', 'completed', 'failed', 'skipped'];
+const OUTCOMES = ['likely_repaired', 'damage_visible', 'inconclusive'];
+const unit = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null);
+const px = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+
+function toAiStatus(a) {
+  return {enabled: a?.enabled === true, provider: typeof a?.provider === 'string' ? a.provider : null,
+    reason: typeof a?.reason === 'string' ? a.reason : null, disclosure: typeof a?.disclosure === 'string' ? a.disclosure : null,
+    thresholds: {present: unit(a?.thresholds?.present) ?? 0.5, low: unit(a?.thresholds?.low) ?? 0.25}};
+}
+
+/** One detection: class, mapped category (or null), model confidence and a top-left pixel box in the original photo. */
+export function toAiDetection(d) {
+  if (typeof d?.className !== 'string' || unit(d.confidence) === null || !d.bbox || typeof d.bbox !== 'object') return null;
+  return {className: d.className.slice(0, 100), category: typeof d.category === 'string' ? d.category : null, confidence: d.confidence,
+    bbox: {x: px(d.bbox.x), y: px(d.bbox.y), width: px(d.bbox.width), height: px(d.bbox.height)}};
+}
+
+function toAiInference(i) {
+  if (typeof i?.id !== 'string' || !AI_STATES.includes(i.state)) return null;
+  return {id: i.id, evidenceId: String(i.evidenceId ?? ''), evidenceRole: i.evidenceRole === 'repair' ? 'repair' : 'original',
+    detector: String(i.detector ?? ''), provider: String(i.provider ?? ''), mechanism: i.mechanism === 'model' ? 'model' : 'workflow',
+    modelId: String(i.modelId ?? ''), modelVersion: i.modelVersion ?? null, classPrompt: i.classPrompt ?? null, state: i.state,
+    detectedCategory: i.detectedCategory ?? null, originalClass: i.originalClass ?? null, topConfidence: unit(i.topConfidence),
+    detections: (Array.isArray(i.detections) ? i.detections : []).map(toAiDetection).filter(Boolean),
+    imageWidth: Number(i.imageWidth) || null, imageHeight: Number(i.imageHeight) || null, errorCode: i.errorCode ?? null,
+    attempts: Number(i.attempts) || 0, completedAt: i.completedAt ?? null};
+}
+
+export function toAiAnalysis(d) {
+  if (!d || typeof d !== 'object' || !Array.isArray(d.inferences)) throw new ApiError('The CivicLens server sent AI results this app could not read.', {code: 'malformed_response'});
+  return {complaintId: String(d.complaintId ?? ''), category: String(d.category ?? ''), ai: toAiStatus(d.ai),
+    routing: {detectors: (Array.isArray(d.routing?.detectors) ? d.routing.detectors : []).map(String)},
+    inferences: d.inferences.map(toAiInference).filter(Boolean), reset: Number.isFinite(d.reset) ? d.reset : null};
+}
+
+export function toRepairAssessment(a) {
+  if (typeof a?.id !== 'string' || !/^ra_[A-Za-z0-9_-]{22}$/.test(a.id)) return null;
+  const details = a.details && typeof a.details === 'object' ? a.details : {};
+  const review = a.review && typeof a.review === 'object' ? a.review : {};
+  return {id: a.id, workOrderId: a.workOrderId ?? null, originalEvidenceId: String(a.originalEvidenceId ?? ''), repairEvidenceId: String(a.repairEvidenceId ?? ''),
+    state: String(a.state ?? ''), suggestedOutcome: OUTCOMES.includes(a.suggestedOutcome) ? a.suggestedOutcome : null,
+    verificationConfidence: unit(a.verificationConfidence),
+    locationCheck: ['match', 'mismatch', 'unverified'].includes(a.locationCheck) ? a.locationCheck : null,
+    gpsDistanceM: typeof a.gpsDistanceM === 'number' && Number.isFinite(a.gpsDistanceM) ? a.gpsDistanceM : null,
+    reasons: (Array.isArray(details.reasons) ? details.reasons : []).map(r => String(r).slice(0, 300)),
+    visualMatch: typeof details.visualMatch === 'string' ? details.visualMatch : null,
+    matchedFeatures: Number(details.alignment?.inliers) || 0,
+    errorCode: a.errorCode ?? null,
+    review: {status: ['pending_review', 'approved', 'rejected'].includes(review.status) ? review.status : 'pending_review',
+      reviewer: review.reviewer ?? null, reviewerName: review.reviewerName ?? null, note: String(review.note ?? ''), reviewedAt: review.reviewedAt ?? null},
+    verifiedResolution: ['verified_repaired', 'verified_not_repaired'].includes(a.verifiedResolution) ? a.verifiedResolution : 'unverified',
+    requestedBy: a.requestedBy ?? null, createdAt: a.createdAt ?? null, completedAt: a.completedAt ?? null};
+}
+
+function toRepairAssessments(d) {
+  if (!d || typeof d !== 'object' || !Array.isArray(d.assessments)) throw new ApiError('The CivicLens server sent repair assessments this app could not read.', {code: 'malformed_response'});
+  return {ai: toAiStatus(d.ai), assessments: d.assessments.map(toRepairAssessment).filter(Boolean)};
 }

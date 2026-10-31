@@ -33,12 +33,17 @@ from .claims import hash_claim_code, hash_upload_token, new_claim_code, new_publ
 from . import duplicates as dup
 from . import geo
 from . import lifecycle as lc
+from . import wards as wd
 from .lifecycle import RuleViolation
 
 logger = logging.getLogger("civiclens.store")
 
 MAX_ID_ATTEMPTS = 5
 SCHEMA_VERSION = 7
+# Numbered versions that other branches shipped before named migrations: main's version 8 (AI analysis) and
+# feature/core-platform-development's version 8 (duplicate detection). A database at one of these numbers is
+# fully supported: its objects are adopted by the matching named migration and its number is left as it is.
+LEGACY_SCHEMA_VERSIONS = (8,)
 DEFAULT_UPLOAD_TOKEN_TTL = timedelta(hours=1)
 
 INITIAL_STATUS = "Submitted"
@@ -882,17 +887,389 @@ ALTER TABLE complaints ADD COLUMN owned_at TEXT;
 CREATE INDEX complaints_by_owner ON complaints (owner_resident_pk, pk);
 """
 
+WARD_ZONE_OPERATIONS_SQLITE = """
+-- Ward/zone operations: the e-Aasthi zone and ward master list (seeded by `python -m app.staff wards seed`),
+-- supervisor geographic scope, complaint → ward with an append-only history, and multi-ward allocations.
+-- boundary_geojson is NULL until an official boundary file is imported; without it a complaint's ward
+-- stays 'unverified' (never guessed from the address or neighbourhood text).
+CREATE TABLE zones (
+    pk            INTEGER PRIMARY KEY,
+    zone_number   INTEGER NOT NULL UNIQUE,
+    name          TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+    active        INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    testing       INTEGER NOT NULL DEFAULT 0 CHECK (testing IN (0, 1)),
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE TABLE wards (
+    pk                   INTEGER PRIMARY KEY,
+    ward_number          INTEGER NOT NULL UNIQUE,
+    name                 TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+    zone_pk              INTEGER NOT NULL REFERENCES zones(pk),
+    active               INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    testing              INTEGER NOT NULL DEFAULT 0 CHECK (testing IN (0, 1)),
+    boundary_geojson     TEXT,
+    boundary_source      TEXT,
+    boundary_updated_at  TEXT,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL
+);
+CREATE INDEX wards_by_zone ON wards (zone_pk);
+CREATE TABLE staff_geographic_scope (
+    pk          INTEGER PRIMARY KEY,
+    staff_pk    INTEGER NOT NULL REFERENCES staff_accounts(pk),
+    scope_type  TEXT NOT NULL CHECK (scope_type IN ('city', 'zone', 'ward')),
+    zone_pk     INTEGER REFERENCES zones(pk),
+    ward_pk     INTEGER REFERENCES wards(pk),
+    created_at  TEXT NOT NULL,
+    CHECK ((scope_type = 'city' AND zone_pk IS NULL AND ward_pk IS NULL)
+        OR (scope_type = 'zone' AND zone_pk IS NOT NULL AND ward_pk IS NULL)
+        OR (scope_type = 'ward' AND ward_pk IS NOT NULL AND zone_pk IS NULL))
+);
+CREATE UNIQUE INDEX staff_geographic_scope_unique ON staff_geographic_scope (staff_pk, scope_type, COALESCE(zone_pk, 0), COALESCE(ward_pk, 0));
+
+ALTER TABLE complaints ADD COLUMN ward_pk INTEGER REFERENCES wards(pk);
+ALTER TABLE complaints ADD COLUMN ward_assignment_status TEXT NOT NULL DEFAULT 'unverified' CHECK (ward_assignment_status IN ('auto', 'manual', 'unverified'));
+ALTER TABLE complaints ADD COLUMN priority TEXT CHECK (priority IS NULL OR priority IN ('low', 'normal', 'high', 'urgent'));
+ALTER TABLE complaints ADD COLUMN due_at TEXT;
+CREATE INDEX complaints_by_ward ON complaints (ward_pk, status);
+
+-- Every ward decision for a complaint: automatic, manual or unverified, with the GPS it was based on.
+CREATE TABLE ward_assignment_history (
+    pk              INTEGER PRIMARY KEY,
+    history_id      TEXT NOT NULL UNIQUE,
+    complaint_pk    INTEGER NOT NULL REFERENCES complaints(pk),
+    from_ward_pk    INTEGER REFERENCES wards(pk),
+    to_ward_pk      INTEGER REFERENCES wards(pk),
+    method          TEXT NOT NULL CHECK (method IN ('auto', 'manual', 'unverified')),
+    reason          TEXT NOT NULL DEFAULT '',
+    gps_lat         REAL,
+    gps_lng         REAL,
+    actor_staff_pk  INTEGER REFERENCES staff_accounts(pk),
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX ward_assignment_history_by_complaint ON ward_assignment_history (complaint_pk, pk);
+
+-- Multi-ward allocations by a supervisor: one row per complaint per allocation, previous → new.
+CREATE TABLE ward_allocations (
+    pk                      INTEGER PRIMARY KEY,
+    allocation_id           TEXT NOT NULL UNIQUE,
+    batch_id                TEXT NOT NULL,
+    complaint_pk            INTEGER NOT NULL REFERENCES complaints(pk),
+    ward_pk                 INTEGER REFERENCES wards(pk),
+    zone_pk                 INTEGER REFERENCES zones(pk),
+    kind                    TEXT NOT NULL CHECK (kind IN ('allocated', 'reallocated')),
+    from_department_pk      INTEGER REFERENCES departments(pk),
+    to_department_pk        INTEGER NOT NULL REFERENCES departments(pk),
+    from_assignee_staff_pk  INTEGER REFERENCES staff_accounts(pk),
+    to_assignee_staff_pk    INTEGER REFERENCES staff_accounts(pk),
+    from_priority           TEXT,
+    to_priority             TEXT NOT NULL CHECK (to_priority IN ('low', 'normal', 'high', 'urgent')),
+    from_due_at             TEXT,
+    to_due_at               TEXT,
+    from_status             TEXT NOT NULL,
+    to_status               TEXT NOT NULL,
+    reason                  TEXT NOT NULL,
+    note                    TEXT NOT NULL DEFAULT '',
+    actor_staff_pk          INTEGER NOT NULL REFERENCES staff_accounts(pk),
+    created_at              TEXT NOT NULL
+);
+CREATE INDEX ward_allocations_by_complaint ON ward_allocations (complaint_pk, pk);
+CREATE INDEX ward_allocations_by_batch ON ward_allocations (batch_id);
+CREATE TRIGGER ward_assignment_history_no_update BEFORE UPDATE ON ward_assignment_history BEGIN SELECT RAISE(ABORT, 'ward_assignment_history is append-only'); END;
+CREATE TRIGGER ward_assignment_history_no_delete BEFORE DELETE ON ward_assignment_history BEGIN SELECT RAISE(ABORT, 'ward_assignment_history is append-only'); END;
+CREATE TRIGGER ward_allocations_no_update BEFORE UPDATE ON ward_allocations BEGIN SELECT RAISE(ABORT, 'ward_allocations is append-only'); END;
+CREATE TRIGGER ward_allocations_no_delete BEFORE DELETE ON ward_allocations BEGIN SELECT RAISE(ABORT, 'ward_allocations is append-only'); END;
+"""
+
+WARD_ZONE_OPERATIONS_POSTGRES = """
+-- PostgreSQL: the same tables, columns and indexes as WARD_ZONE_OPERATIONS_SQLITE.
+CREATE TABLE zones (
+    pk            BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    zone_number   INTEGER NOT NULL UNIQUE,
+    name          TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+    active        INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    testing       INTEGER NOT NULL DEFAULT 0 CHECK (testing IN (0, 1)),
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE TABLE wards (
+    pk                   BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    ward_number          INTEGER NOT NULL UNIQUE,
+    name                 TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+    zone_pk              BIGINT NOT NULL REFERENCES zones(pk),
+    active               INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    testing              INTEGER NOT NULL DEFAULT 0 CHECK (testing IN (0, 1)),
+    boundary_geojson     TEXT,
+    boundary_source      TEXT,
+    boundary_updated_at  TEXT,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL
+);
+CREATE INDEX wards_by_zone ON wards (zone_pk);
+CREATE TABLE staff_geographic_scope (
+    pk          BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    staff_pk    BIGINT NOT NULL REFERENCES staff_accounts(pk),
+    scope_type  TEXT NOT NULL CHECK (scope_type IN ('city', 'zone', 'ward')),
+    zone_pk     BIGINT REFERENCES zones(pk),
+    ward_pk     BIGINT REFERENCES wards(pk),
+    created_at  TEXT NOT NULL,
+    CHECK ((scope_type = 'city' AND zone_pk IS NULL AND ward_pk IS NULL)
+        OR (scope_type = 'zone' AND zone_pk IS NOT NULL AND ward_pk IS NULL)
+        OR (scope_type = 'ward' AND ward_pk IS NOT NULL AND zone_pk IS NULL))
+);
+CREATE UNIQUE INDEX staff_geographic_scope_unique ON staff_geographic_scope (staff_pk, scope_type, COALESCE(zone_pk, 0), COALESCE(ward_pk, 0));
+
+ALTER TABLE complaints ADD COLUMN ward_pk BIGINT REFERENCES wards(pk);
+ALTER TABLE complaints ADD COLUMN ward_assignment_status TEXT NOT NULL DEFAULT 'unverified' CHECK (ward_assignment_status IN ('auto', 'manual', 'unverified'));
+ALTER TABLE complaints ADD COLUMN priority TEXT CHECK (priority IS NULL OR priority IN ('low', 'normal', 'high', 'urgent'));
+ALTER TABLE complaints ADD COLUMN due_at TEXT;
+CREATE INDEX complaints_by_ward ON complaints (ward_pk, status);
+
+-- Every ward decision for a complaint: automatic, manual or unverified, with the GPS it was based on.
+CREATE TABLE ward_assignment_history (
+    pk              BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    history_id      TEXT NOT NULL UNIQUE,
+    complaint_pk    BIGINT NOT NULL REFERENCES complaints(pk),
+    from_ward_pk    BIGINT REFERENCES wards(pk),
+    to_ward_pk      BIGINT REFERENCES wards(pk),
+    method          TEXT NOT NULL CHECK (method IN ('auto', 'manual', 'unverified')),
+    reason          TEXT NOT NULL DEFAULT '',
+    gps_lat         DOUBLE PRECISION,
+    gps_lng         DOUBLE PRECISION,
+    actor_staff_pk  BIGINT REFERENCES staff_accounts(pk),
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX ward_assignment_history_by_complaint ON ward_assignment_history (complaint_pk, pk);
+
+-- Multi-ward allocations by a supervisor: one row per complaint per allocation, previous → new.
+CREATE TABLE ward_allocations (
+    pk                      BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    allocation_id           TEXT NOT NULL UNIQUE,
+    batch_id                TEXT NOT NULL,
+    complaint_pk            BIGINT NOT NULL REFERENCES complaints(pk),
+    ward_pk                 BIGINT REFERENCES wards(pk),
+    zone_pk                 BIGINT REFERENCES zones(pk),
+    kind                    TEXT NOT NULL CHECK (kind IN ('allocated', 'reallocated')),
+    from_department_pk      BIGINT REFERENCES departments(pk),
+    to_department_pk        BIGINT NOT NULL REFERENCES departments(pk),
+    from_assignee_staff_pk  BIGINT REFERENCES staff_accounts(pk),
+    to_assignee_staff_pk    BIGINT REFERENCES staff_accounts(pk),
+    from_priority           TEXT,
+    to_priority             TEXT NOT NULL CHECK (to_priority IN ('low', 'normal', 'high', 'urgent')),
+    from_due_at             TEXT,
+    to_due_at               TEXT,
+    from_status             TEXT NOT NULL,
+    to_status               TEXT NOT NULL,
+    reason                  TEXT NOT NULL,
+    note                    TEXT NOT NULL DEFAULT '',
+    actor_staff_pk          BIGINT NOT NULL REFERENCES staff_accounts(pk),
+    created_at              TEXT NOT NULL
+);
+CREATE INDEX ward_allocations_by_complaint ON ward_allocations (complaint_pk, pk);
+CREATE INDEX ward_allocations_by_batch ON ward_allocations (batch_id);
+CREATE TRIGGER ward_assignment_history_append_only BEFORE UPDATE OR DELETE ON ward_assignment_history FOR EACH ROW EXECUTE FUNCTION civiclens_append_only();
+CREATE TRIGGER ward_assignment_history_no_truncate BEFORE TRUNCATE ON ward_assignment_history FOR EACH STATEMENT EXECUTE FUNCTION civiclens_append_only();
+CREATE TRIGGER ward_allocations_append_only BEFORE UPDATE OR DELETE ON ward_allocations FOR EACH ROW EXECUTE FUNCTION civiclens_append_only();
+CREATE TRIGGER ward_allocations_no_truncate BEFORE TRUNCATE ON ward_allocations FOR EACH STATEMENT EXECUTE FUNCTION civiclens_append_only();
+"""
+
+# AI-assisted analysis (app/ai). Shipped on main as numbered MIGRATIONS[8]; now a named migration so it
+# coexists with duplicate_detection (core-platform's own version 8). A database that ran main's version 8
+# already has these tables and adopts the feature without re-running it (docs/MIGRATION_RECONCILIATION.md).
+AI_ANALYSIS_SQLITE = """
+-- AI-assisted analysis (app/ai, docs/ARCHITECTURE.md "AI analysis"). Everything here is a suggestion for
+-- staff: nothing in these tables changes a complaint's status or citizen verification. JSON columns are
+-- TEXT here and JSONB on PostgreSQL.
+
+-- One row per (evidence file, detector). The UNIQUE key makes scheduling idempotent: a retry re-runs
+-- the same row instead of adding another.
+CREATE TABLE ai_inferences (
+    pk                 INTEGER PRIMARY KEY,
+    inference_id       TEXT NOT NULL UNIQUE,
+    complaint_pk       INTEGER NOT NULL REFERENCES complaints(pk),
+    evidence_pk        INTEGER NOT NULL REFERENCES evidence(pk),
+    detector           TEXT NOT NULL,
+    provider           TEXT NOT NULL,
+    mechanism          TEXT NOT NULL CHECK (mechanism IN ('model', 'workflow')),
+    model_id           TEXT NOT NULL,
+    model_version      TEXT,
+    class_prompt       TEXT,
+    state              TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed', 'skipped')),
+    original_class     TEXT,
+    detected_category  TEXT,
+    top_confidence     REAL CHECK (top_confidence IS NULL OR (top_confidence >= 0 AND top_confidence <= 1)),
+    detection_count    INTEGER NOT NULL DEFAULT 0,
+    predictions        TEXT NOT NULL DEFAULT '[]',
+    confidence_meta    TEXT NOT NULL DEFAULT '{}',
+    image_width        INTEGER,
+    image_height       INTEGER,
+    error_code         TEXT,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    started_at         TEXT,
+    completed_at       TEXT,
+    updated_at         TEXT NOT NULL,
+    UNIQUE (evidence_pk, detector)
+);
+CREATE INDEX ai_inferences_by_complaint ON ai_inferences (complaint_pk, pk);
+CREATE INDEX ai_inferences_by_state ON ai_inferences (state, updated_at);
+
+-- Before/after comparison of one original and one repair photo. The AI suggestion (suggested_outcome,
+-- verification_confidence) is kept apart from the human review (review_status), and both are apart from
+-- the complaint's administrative status.
+CREATE TABLE repair_assessments (
+    pk                       INTEGER PRIMARY KEY,
+    assessment_id            TEXT NOT NULL UNIQUE,
+    complaint_pk             INTEGER NOT NULL REFERENCES complaints(pk),
+    work_order_pk            INTEGER REFERENCES work_orders(pk),
+    original_evidence_pk     INTEGER NOT NULL REFERENCES evidence(pk),
+    repair_evidence_pk       INTEGER NOT NULL REFERENCES evidence(pk),
+    state                    TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed')),
+    suggested_outcome        TEXT CHECK (suggested_outcome IS NULL OR suggested_outcome IN ('likely_repaired', 'damage_visible', 'inconclusive')),
+    verification_confidence  REAL CHECK (verification_confidence IS NULL OR (verification_confidence >= 0 AND verification_confidence <= 1)),
+    location_check           TEXT CHECK (location_check IS NULL OR location_check IN ('match', 'mismatch', 'unverified')),
+    gps_distance_m           REAL,
+    details                  TEXT NOT NULL DEFAULT '{}',
+    error_code               TEXT,
+    attempts                 INTEGER NOT NULL DEFAULT 0,
+    requested_by_staff_pk    INTEGER REFERENCES staff_accounts(pk),
+    review_status            TEXT NOT NULL DEFAULT 'pending_review' CHECK (review_status IN ('pending_review', 'approved', 'rejected')),
+    reviewer_staff_pk        INTEGER REFERENCES staff_accounts(pk),
+    review_note              TEXT NOT NULL DEFAULT '',
+    reviewed_at              TEXT,
+    created_at               TEXT NOT NULL,
+    completed_at             TEXT,
+    updated_at               TEXT NOT NULL,
+    UNIQUE (original_evidence_pk, repair_evidence_pk)
+);
+CREATE INDEX repair_assessments_by_complaint ON repair_assessments (complaint_pk, pk);
+
+-- Which inference results an assessment compared.
+CREATE TABLE repair_assessment_inferences (
+    pk             INTEGER PRIMARY KEY,
+    assessment_pk  INTEGER NOT NULL REFERENCES repair_assessments(pk),
+    inference_pk   INTEGER NOT NULL REFERENCES ai_inferences(pk),
+    phase          TEXT NOT NULL CHECK (phase IN ('original', 'repair')),
+    UNIQUE (assessment_pk, inference_pk)
+);
+"""
+
+AI_ANALYSIS_POSTGRES = """
+-- AI-assisted analysis (app/ai): the same tables as SQLite MIGRATIONS[8], with JSONB for JSON columns.
+
+-- One row per (evidence file, detector). The UNIQUE key makes scheduling idempotent: a retry re-runs
+-- the same row instead of adding another.
+CREATE TABLE ai_inferences (
+    pk                 BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    inference_id       TEXT NOT NULL UNIQUE,
+    complaint_pk       BIGINT NOT NULL REFERENCES complaints(pk),
+    evidence_pk        BIGINT NOT NULL REFERENCES evidence(pk),
+    detector           TEXT NOT NULL,
+    provider           TEXT NOT NULL,
+    mechanism          TEXT NOT NULL CHECK (mechanism IN ('model', 'workflow')),
+    model_id           TEXT NOT NULL,
+    model_version      TEXT,
+    class_prompt       TEXT,
+    state              TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed', 'skipped')),
+    original_class     TEXT,
+    detected_category  TEXT,
+    top_confidence     REAL CHECK (top_confidence IS NULL OR (top_confidence >= 0 AND top_confidence <= 1)),
+    detection_count    INTEGER NOT NULL DEFAULT 0,
+    predictions        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    confidence_meta    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    image_width        INTEGER,
+    image_height       INTEGER,
+    error_code         TEXT,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    started_at         TEXT,
+    completed_at       TEXT,
+    updated_at         TEXT NOT NULL,
+    UNIQUE (evidence_pk, detector)
+);
+CREATE INDEX ai_inferences_by_complaint ON ai_inferences (complaint_pk, pk);
+CREATE INDEX ai_inferences_by_state ON ai_inferences (state, updated_at);
+
+-- Before/after comparison of one original and one repair photo. The AI suggestion (suggested_outcome,
+-- verification_confidence) is kept apart from the human review (review_status), and both are apart from
+-- the complaint's administrative status.
+CREATE TABLE repair_assessments (
+    pk                       BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    assessment_id            TEXT NOT NULL UNIQUE,
+    complaint_pk             BIGINT NOT NULL REFERENCES complaints(pk),
+    work_order_pk            BIGINT REFERENCES work_orders(pk),
+    original_evidence_pk     BIGINT NOT NULL REFERENCES evidence(pk),
+    repair_evidence_pk       BIGINT NOT NULL REFERENCES evidence(pk),
+    state                    TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'failed')),
+    suggested_outcome        TEXT CHECK (suggested_outcome IS NULL OR suggested_outcome IN ('likely_repaired', 'damage_visible', 'inconclusive')),
+    verification_confidence  REAL CHECK (verification_confidence IS NULL OR (verification_confidence >= 0 AND verification_confidence <= 1)),
+    location_check           TEXT CHECK (location_check IS NULL OR location_check IN ('match', 'mismatch', 'unverified')),
+    gps_distance_m           REAL,
+    details                  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error_code               TEXT,
+    attempts                 INTEGER NOT NULL DEFAULT 0,
+    requested_by_staff_pk    BIGINT REFERENCES staff_accounts(pk),
+    review_status            TEXT NOT NULL DEFAULT 'pending_review' CHECK (review_status IN ('pending_review', 'approved', 'rejected')),
+    reviewer_staff_pk        BIGINT REFERENCES staff_accounts(pk),
+    review_note              TEXT NOT NULL DEFAULT '',
+    reviewed_at              TEXT,
+    created_at               TEXT NOT NULL,
+    completed_at             TEXT,
+    updated_at               TEXT NOT NULL,
+    UNIQUE (original_evidence_pk, repair_evidence_pk)
+);
+CREATE INDEX repair_assessments_by_complaint ON repair_assessments (complaint_pk, pk);
+
+-- Which inference results an assessment compared.
+CREATE TABLE repair_assessment_inferences (
+    pk             BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    assessment_pk  BIGINT NOT NULL REFERENCES repair_assessments(pk),
+    inference_pk   BIGINT NOT NULL REFERENCES ai_inferences(pk),
+    phase          TEXT NOT NULL CHECK (phase IN ('original', 'repair')),
+    UNIQUE (assessment_pk, inference_pk)
+);
+"""
+
+
+REPAIR_EVIDENCE_GEOTAGGING_SQLITE = """
+-- Repair evidence geotagging: store capture coordinates and fix metadata for each repair photo.
+ALTER TABLE evidence ADD COLUMN gps_lat REAL;
+ALTER TABLE evidence ADD COLUMN gps_lng REAL;
+ALTER TABLE evidence ADD COLUMN gps_accuracy REAL;
+ALTER TABLE evidence ADD COLUMN gps_source TEXT;
+ALTER TABLE evidence ADD COLUMN gps_source_type TEXT CHECK (gps_source_type IS NULL OR gps_source_type IN ('gps', 'network', 'manual', 'unverified'));
+ALTER TABLE evidence ADD COLUMN gps_timestamp TEXT;
+ALTER TABLE evidence ADD COLUMN gps_address TEXT;
+"""
+
+REPAIR_EVIDENCE_GEOTAGGING_POSTGRES = """
+-- Repair evidence geotagging: store capture coordinates and fix metadata for each repair photo.
+ALTER TABLE evidence ADD COLUMN gps_lat DOUBLE PRECISION;
+ALTER TABLE evidence ADD COLUMN gps_lng DOUBLE PRECISION;
+ALTER TABLE evidence ADD COLUMN gps_accuracy DOUBLE PRECISION;
+ALTER TABLE evidence ADD COLUMN gps_source TEXT;
+ALTER TABLE evidence ADD COLUMN gps_source_type TEXT CHECK (gps_source_type IS NULL OR gps_source_type IN ('gps', 'network', 'manual', 'unverified'));
+ALTER TABLE evidence ADD COLUMN gps_timestamp TEXT;
+ALTER TABLE evidence ADD COLUMN gps_address TEXT;
+"""
+
 FEATURES: tuple[Feature, ...] = (
     Feature("duplicate_detection", DUPLICATE_DETECTION_SQLITE, DUPLICATE_DETECTION_POSTGRES, adopt_if="complaint_merges"),
     Feature("resident_accounts", RESIDENT_ACCOUNTS_SQLITE, RESIDENT_ACCOUNTS_POSTGRES),
+    Feature("ward_zone_operations", WARD_ZONE_OPERATIONS_SQLITE, WARD_ZONE_OPERATIONS_POSTGRES),
+    Feature("ai_analysis", AI_ANALYSIS_SQLITE, AI_ANALYSIS_POSTGRES, adopt_if="ai_inferences"),
+    Feature("repair_evidence_geotagging", REPAIR_EVIDENCE_GEOTAGGING_SQLITE, REPAIR_EVIDENCE_GEOTAGGING_POSTGRES),
 )
 
-TABLES = ("staff_accounts", "departments", "staff_departments", "resident_accounts",
+TABLES = ("staff_accounts", "departments", "staff_departments", "resident_accounts", "zones", "wards", "staff_geographic_scope",
           "complaints", "complaint_timeline", "verification_log", "evidence", "idempotency_keys",
           "staff_sessions", "evidence_access_log",
           "notification_recipients", "notification_follows", "push_subscriptions", "notifications",
           "complaint_assignments", "staff_notes", "work_orders", "work_order_events", "work_order_evidence", "audit_log",
-          "resident_sessions", "resident_preferences", "complaint_merges", "duplicate_dismissals")
+          "resident_sessions", "resident_preferences", "complaint_merges", "duplicate_dismissals",
+          "ward_assignment_history", "ward_allocations",
+          "ai_inferences", "repair_assessments", "repair_assessment_inferences")
 
 CREATE_SCOPE = "create_complaint"
 DEFAULT_REPLAY_WINDOW = timedelta(hours=24)
@@ -944,12 +1321,31 @@ def _notification_dict(row) -> dict:
 
 
 def _evidence_dict(row) -> dict:
-    return {
+    d = {
         "evidenceId": row["evidence_id"], "complaintPk": row["complaint_pk"], "role": row["role"],
         "storageKey": row["storage_key"], "mediaType": row["media_type"], "contentType": row["content_type"],
         "byteSize": row["byte_size"], "sha256": row["sha256"], "capturedAt": row["captured_at"],
         "uploadedAt": row["uploaded_at"], "storageBackend": row["storage_backend"],
     }
+    has_gps = False
+    try:
+        if row["gps_lat"] is not None and row["gps_lng"] is not None:
+            has_gps = True
+    except (IndexError, KeyError):
+        pass
+    if has_gps:
+        d["gps"] = {
+            "lat": float(row["gps_lat"]),
+            "lng": float(row["gps_lng"]),
+            "accuracy": float(row["gps_accuracy"]) if row["gps_accuracy"] is not None else None,
+            "source": row["gps_source"],
+            "sourceType": row["gps_source_type"] or "gps",
+            "timestamp": row["gps_timestamp"],
+            "address": row["gps_address"],
+        }
+    else:
+        d["gps"] = None
+    return d
 
 
 class StoreError(Exception):
@@ -977,6 +1373,7 @@ class ComplaintStore:
         self.db_path = self.db.path if isinstance(self.db, SQLiteDatabase) else None
         self._new_id = id_factory
         self.upload_token_ttl = upload_token_ttl
+        self._has_wards = False
 
     @property
     def backend(self) -> str:
@@ -1064,6 +1461,7 @@ class ComplaintStore:
                                 "INSERT INTO complaint_timeline (complaint_pk, status, text, date) VALUES (?, ?, ?, ?)",
                                 (complaint_pk, INITIAL_STATUS, "Report received by the Namma CivicLens API.", now),
                             )
+                            self._initial_ward(conn, complaint_pk, gps["lat"], gps["lng"], now)
                             if idempotency:
                                 conn.execute(
                                     "INSERT INTO idempotency_keys (scope, key_hash, fingerprint, complaint_pk, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1402,8 +1800,9 @@ class ComplaintStore:
                 out = []
                 for r in rows:
                     record = self._load(conn, r["public_id"])
-                    has_evidence = conn.execute("SELECT 1 FROM evidence WHERE complaint_pk = ? AND role = 'original'", (r["pk"],)).fetchone()
-                    out.append({**record, "ownedVia": r["owned_via"], "ownedAt": r["owned_at"], "hasEvidence": has_evidence is not None})
+                    evidence = self._owner_evidence(conn, r["pk"])
+                    out.append({**record, "ownedVia": r["owned_via"], "ownedAt": r["owned_at"],
+                                "hasEvidence": any(e["role"] == "original" for e in evidence), "evidence": evidence})
                 return out, int(total)
         except DB_ERRORS as exc:
             raise StoreError("Resident complaints could not be read") from exc
@@ -1416,10 +1815,36 @@ class ComplaintStore:
                                    (public_id, resident_pk)).fetchone()
                 if row is None:
                     return None
-                has_evidence = conn.execute("SELECT 1 FROM evidence WHERE complaint_pk = ? AND role = 'original'", (row["pk"],)).fetchone()
-                return {**self._load(conn, public_id), "ownedVia": row["owned_via"], "ownedAt": row["owned_at"], "hasEvidence": has_evidence is not None}
+                evidence = self._owner_evidence(conn, row["pk"])
+                return {**self._load(conn, public_id), "ownedVia": row["owned_via"], "ownedAt": row["owned_at"],
+                        "hasEvidence": any(e["role"] == "original" for e in evidence), "evidence": evidence}
         except DB_ERRORS as exc:
             raise StoreError("Complaint could not be read") from exc
+
+    @staticmethod
+    def _owner_evidence(conn, complaint_pk: int) -> list[dict]:
+        """Evidence metadata an owner may see for their own complaint: the file they reported (role
+        'original') and after-repair photos staff attached (role 'repair'), oldest first. Never the
+        storage key, storage backend or uploader; files are fetched through resident_evidence()."""
+        rows = conn.execute(
+            "SELECT evidence_id, role, media_type, content_type, byte_size, captured_at, uploaded_at FROM evidence "
+            "WHERE complaint_pk = ? ORDER BY CASE role WHEN 'original' THEN 0 ELSE 1 END, pk", (complaint_pk,)).fetchall()
+        return [{"evidenceId": r["evidence_id"], "role": r["role"], "mediaType": r["media_type"], "contentType": r["content_type"],
+                 "byteSize": r["byte_size"], "capturedAt": r["captured_at"], "uploadedAt": r["uploaded_at"]} for r in rows]
+
+    def resident_evidence(self, resident_pk: int, public_id: str, evidence_id: str) -> dict | None:
+        """One evidence file's metadata (with pk and storage key, for streaming) only if it belongs to a
+        complaint this resident owns; None otherwise, so another resident's file is indistinguishable
+        from one that does not exist."""
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    "SELECT e.* FROM evidence e JOIN complaints c ON c.pk = e.complaint_pk "
+                    "WHERE c.public_id = ? AND c.owner_resident_pk = ? AND e.evidence_id = ?",
+                    (public_id, resident_pk, evidence_id)).fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Evidence could not be read") from exc
+        return _evidence_dict(row) | {"pk": row["pk"]} if row else None
 
     def claim_complaint(self, public_id: str, resident: dict, client_ip: str | None = None) -> str:
         """Attach an unowned complaint to `resident`. The caller has ALREADY verified the claim code.
@@ -1894,13 +2319,16 @@ class ComplaintStore:
 
     def _case(self, conn, public_id: str, lock: bool = False) -> dict | None:
         row = conn.execute(
-            "SELECT pk, public_id, status, verification, department, department_pk, assigned_staff_pk, version, merged_into_pk FROM complaints "
+            "SELECT pk, public_id, status, verification, department, department_pk, assigned_staff_pk, version, merged_into_pk, "
+            "ward_pk, ward_assignment_status, priority, due_at, gps_lat, gps_lng FROM complaints "
             "WHERE public_id = ?" + (self.db.for_update if lock else ""), (public_id,)).fetchone()
         if row is None:
             return None
         return {"pk": row["pk"], "id": row["public_id"], "status": row["status"], "verification": row["verification"],
                 "department": row["department"], "departmentPk": row["department_pk"], "assignedStaffPk": row["assigned_staff_pk"],
-                "version": row["version"], "mergedIntoPk": row["merged_into_pk"]}
+                "version": row["version"], "mergedIntoPk": row["merged_into_pk"], "wardPk": row["ward_pk"],
+                "wardStatus": row["ward_assignment_status"], "priority": row["priority"], "dueAt": row["due_at"],
+                "gpsLat": row["gps_lat"], "gpsLng": row["gps_lng"]}
 
     def _locked_case(self, conn, public_id: str) -> dict:
         case = self._case(conn, public_id, lock=True)
@@ -1939,7 +2367,8 @@ class ComplaintStore:
 
     @staticmethod
     def _touch(conn, complaint_pk: int, now: str, **fields) -> None:
-        allowed = ("status", "verification", "department", "department_pk", "assigned_staff_pk", "merged_into_pk")
+        allowed = ("status", "verification", "department", "department_pk", "assigned_staff_pk", "merged_into_pk",
+                   "ward_pk", "ward_assignment_status", "priority", "due_at")
         sets = [f"{k} = ?" for k in fields if k in allowed]
         if len(sets) != len(fields):
             raise ValueError("unknown complaint column")
@@ -2100,9 +2529,13 @@ class ComplaintStore:
             "assignmentHistory": [{"id": h["assignment_id"], "department": {"code": h["code"], "name": h["name"]}, "assignee": h["assignee"],
                                    "reason": h["reason"], "by": h["actor"], "at": h["assigned_at"]} for h in history],
             "workOrders": orders,
+            "repairEvidence": [_evidence_dict(e) for e in conn.execute(
+                "SELECT * FROM evidence WHERE complaint_pk = ? AND role = 'repair' ORDER BY uploaded_at, pk", (case["pk"],))],
             "notes": [{"id": n["note_id"], "body": n["body"], "createdAt": n["created_at"],
                        "author": {"username": n["username"], "displayName": n["display_name"]}} for n in notes],
-            "allowedActions": lc.allowed_actions(case, actor, active),
+            "allowedActions": lc.allowed_actions(case, actor, active) + (
+                [{"action": "set_ward", "label": "Set ward"}] if lc.has_role(actor, "supervisor") and case["mergedIntoPk"] is None else []),
+            **self._ward_management(conn, case),
         }
 
     def _work_orders(self, conn, where: str, params: tuple) -> list[dict]:
@@ -2115,7 +2548,8 @@ class ComplaintStore:
         result = []
         for r in rows:
             links = conn.execute(
-                "SELECT l.phase, e.evidence_id, e.role, e.content_type, e.byte_size, e.sha256, e.uploaded_at FROM work_order_evidence l "
+                "SELECT l.phase, e.evidence_id, e.role, e.content_type, e.byte_size, e.sha256, e.captured_at, e.uploaded_at, "
+                "e.gps_lat, e.gps_lng, e.gps_accuracy, e.gps_source, e.gps_source_type, e.gps_timestamp, e.gps_address FROM work_order_evidence l "
                 "JOIN evidence e ON e.pk = l.evidence_pk WHERE l.work_order_pk = ? ORDER BY l.pk", (r["pk"],)).fetchall()
             events = conn.execute(
                 "SELECT e.action, e.from_status, e.to_status, e.note, a.username, e.created_at FROM work_order_events e "
@@ -2126,8 +2560,16 @@ class ComplaintStore:
                 "startedAt": r["started_at"], "completedAt": r["completed_at"], "completionNote": r["completion_note"],
                 "createdBy": r["created_by"], "createdAt": r["created_at"], "updatedAt": r["updated_at"],
                 "overdue": bool(r["due_at"]) and r["status"] in lc.ACTIVE_WORK_ORDER and r["due_at"] < today,
-                "evidence": [{"phase": e["phase"], "evidenceId": e["evidence_id"], "role": e["role"], "contentType": e["content_type"],
-                              "byteSize": e["byte_size"], "sha256": e["sha256"], "uploadedAt": e["uploaded_at"]} for e in links],
+                "evidence": [{
+                    "phase": e["phase"], "evidenceId": e["evidence_id"], "role": e["role"], "contentType": e["content_type"],
+                    "byteSize": e["byte_size"], "sha256": e["sha256"], "capturedAt": e["captured_at"], "uploadedAt": e["uploaded_at"],
+                    "gps": {
+                        "lat": float(e["gps_lat"]), "lng": float(e["gps_lng"]),
+                        "accuracy": float(e["gps_accuracy"]) if e["gps_accuracy"] is not None else None,
+                        "source": e["gps_source"], "sourceType": e["gps_source_type"] or "gps",
+                        "timestamp": e["gps_timestamp"], "address": e["gps_address"],
+                    } if (e["gps_lat"] is not None and e["gps_lng"] is not None) else None,
+                } for e in links],
                 "history": [{"action": e["action"], "from": e["from_status"], "to": e["to_status"], "note": e["note"],
                              "by": e["username"], "at": e["created_at"]} for e in events],
             })
@@ -2157,38 +2599,46 @@ class ComplaintStore:
             department = {"pk": d["pk"], "code": d["code"], "name": d["name"], "active": bool(d["active"])} if d else None
             assignee = None
             if assignee_username:
-                a = conn.execute("SELECT pk, username, role, disabled_at FROM staff_accounts WHERE username = ?", (assignee_username,)).fetchone()
-                if a is None:
-                    raise RuleViolation(422, "invalid_assignee", "No staff account has that username.")
-                assignee = {"pk": a["pk"], "username": a["username"], "role": a["role"], "disabledAt": a["disabled_at"],
-                            "departmentPks": [r[0] for r in conn.execute("SELECT department_pk FROM staff_departments WHERE staff_pk = ?", (a["pk"],))]}
+                assignee = self._staff_assignee(conn, assignee_username)
             lc.check_assignment(case, actor, department, assignee)
-            reassign = case["departmentPk"] is not None or case["assignedStaffPk"] is not None
-            if reassign and not reason.strip():
-                raise RuleViolation(422, "reason_required", "Give a reason for reassigning this complaint.")
-            if case["departmentPk"] == department["pk"] and case["assignedStaffPk"] == (assignee["pk"] if assignee else None):
-                raise RuleViolation(409, "no_change", "The complaint is already assigned that way.")
-            before = {"department": case["department"] if case["departmentPk"] else None,
-                      "assignee": self._username(conn, case["assignedStaffPk"])}
-            conn.execute(
-                "INSERT INTO complaint_assignments (assignment_id, complaint_pk, department_pk, assignee_staff_pk, reason, actor_staff_pk, assigned_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("as_" + secrets.token_urlsafe(12), case["pk"], department["pk"], assignee["pk"] if assignee else None,
-                 reason.strip(), actor["pk"], now))
-            self._touch(conn, case["pk"], now, department=department["name"], department_pk=department["pk"],
-                        assigned_staff_pk=assignee["pk"] if assignee else None)
-            self._audit(conn, case["pk"], actor, "reassigned" if reassign else "assigned",
-                        {"from": before, "to": {"department": department["code"], "assignee": assignee["username"] if assignee else None},
-                         "reason": reason.strip()}, client_ip, now)
-            case.update(departmentPk=department["pk"], department=department["name"])
-            # Public text names the department only; individual staff are never named publicly. When the
-            # assignment also moves the status, the status change carries the text (one public entry, not two).
-            text = f"{'Reassigned' if reassign else 'Assigned'} to {department['name']}."
-            if to := lc.status_after_assignment(case):
-                self._change_status(conn, case, actor, to, text, now, client_ip)
-            else:
-                self._timeline(conn, case["pk"], case["status"], text, "assignment", actor, now)
+            self._apply_assignment(conn, case, actor, department, assignee, reason, now, client_ip)
         self._mutate("Assignment", run)
+
+    def _staff_assignee(self, conn, username: str) -> dict:
+        a = conn.execute("SELECT pk, username, role, disabled_at FROM staff_accounts WHERE username = ?", (username,)).fetchone()
+        if a is None:
+            raise RuleViolation(422, "invalid_assignee", "No staff account has that username.")
+        return {"pk": a["pk"], "username": a["username"], "role": a["role"], "disabledAt": a["disabled_at"],
+                "departmentPks": [r[0] for r in conn.execute("SELECT department_pk FROM staff_departments WHERE staff_pk = ?", (a["pk"],))]}
+
+    def _apply_assignment(self, conn, case: dict, actor: dict, department: dict, assignee: dict | None, reason: str, now: str,
+                          client_ip: str | None) -> None:
+        """Write an already validated (lc.check_assignment) assignment: history row, complaint, audit and public timeline."""
+        reassign = case["departmentPk"] is not None or case["assignedStaffPk"] is not None
+        if reassign and not reason.strip():
+            raise RuleViolation(422, "reason_required", "Give a reason for reassigning this complaint.")
+        if case["departmentPk"] == department["pk"] and case["assignedStaffPk"] == (assignee["pk"] if assignee else None):
+            raise RuleViolation(409, "no_change", "The complaint is already assigned that way.")
+        before = {"department": case["department"] if case["departmentPk"] else None,
+                  "assignee": self._username(conn, case["assignedStaffPk"])}
+        conn.execute(
+            "INSERT INTO complaint_assignments (assignment_id, complaint_pk, department_pk, assignee_staff_pk, reason, actor_staff_pk, assigned_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("as_" + secrets.token_urlsafe(12), case["pk"], department["pk"], assignee["pk"] if assignee else None,
+             reason.strip(), actor["pk"], now))
+        self._touch(conn, case["pk"], now, department=department["name"], department_pk=department["pk"],
+                    assigned_staff_pk=assignee["pk"] if assignee else None)
+        self._audit(conn, case["pk"], actor, "reassigned" if reassign else "assigned",
+                    {"from": before, "to": {"department": department["code"], "assignee": assignee["username"] if assignee else None},
+                     "reason": reason.strip()}, client_ip, now)
+        case.update(departmentPk=department["pk"], department=department["name"], assignedStaffPk=assignee["pk"] if assignee else None)
+        # Public text names the department only; individual staff are never named publicly. When the
+        # assignment also moves the status, the status change carries the text (one public entry, not two).
+        text = f"{'Reassigned' if reassign else 'Assigned'} to {department['name']}."
+        if to := lc.status_after_assignment(case):
+            self._change_status(conn, case, actor, to, text, now, client_ip)
+        else:
+            self._timeline(conn, case["pk"], case["status"], text, "assignment", actor, now)
 
     @staticmethod
     def _username(conn, staff_pk: int | None) -> str | None:
@@ -2363,11 +2813,16 @@ class ComplaintStore:
             lc.require_scope(case, actor)
             if order["status"] == "Cancelled":
                 raise RuleViolation(409, "invalid_transition", "Evidence cannot be added to a cancelled work order.")
+            gps_meta = meta.get("gps") or {}
             evidence_pk = conn.insert(
                 "INSERT INTO evidence (evidence_id, complaint_pk, role, storage_key, media_type, content_type, byte_size, sha256, captured_at, "
-                "uploaded_at, storage_backend, uploaded_by_staff_pk) VALUES (?, ?, 'repair', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "uploaded_at, storage_backend, uploaded_by_staff_pk, "
+                "gps_lat, gps_lng, gps_accuracy, gps_source, gps_source_type, gps_timestamp, gps_address) "
+                "VALUES (?, ?, 'repair', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (meta["evidenceId"], case["pk"], meta["storageKey"], meta["mediaType"], meta["contentType"], meta["byteSize"],
-                 meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"], meta.get("storageBackend", "local"), actor["pk"]))
+                 meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"], meta.get("storageBackend", "local"), actor["pk"],
+                 gps_meta.get("lat"), gps_meta.get("lng"), gps_meta.get("accuracy"), gps_meta.get("source"),
+                 gps_meta.get("sourceType"), gps_meta.get("timestamp"), gps_meta.get("address")))
             conn.execute("INSERT INTO work_order_evidence (work_order_pk, evidence_pk, phase, linked_by_staff_pk, linked_at) "
                          "VALUES (?, ?, 'after', ?, ?)", (order["pk"], evidence_pk, actor["pk"], now))
             self._timeline(conn, case["pk"], case["status"], "After-repair evidence was attached for review.", "work_order", actor, now)
@@ -2376,6 +2831,66 @@ class ComplaintStore:
                         {"workOrderId": work_order_id, "evidenceId": meta["evidenceId"], "sha256": meta["sha256"]}, client_ip, now)
             return _evidence_dict(conn.execute("SELECT * FROM evidence WHERE pk = ?", (evidence_pk,)).fetchone())
         return self._mutate("Repair evidence", run)
+
+    def add_case_repair_evidence(self, public_id: str, staff_pk: int, meta: dict, client_ip: str | None = None) -> dict:
+        """Attach a repair photo directly to a case without manufacturing a work order."""
+        def run(conn):
+            case = self._locked_case(conn, public_id)
+            actor = self._actor(conn, staff_pk)
+            lc.require_scope(case, actor)
+            now = utc_now()
+            gps_meta = meta.get("gps") or {}
+            evidence_pk = conn.insert(
+                "INSERT INTO evidence (evidence_id, complaint_pk, role, storage_key, media_type, content_type, byte_size, sha256, captured_at, "
+                "uploaded_at, storage_backend, uploaded_by_staff_pk, "
+                "gps_lat, gps_lng, gps_accuracy, gps_source, gps_source_type, gps_timestamp, gps_address) "
+                "VALUES (?, ?, 'repair', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (meta["evidenceId"], case["pk"], meta["storageKey"], meta["mediaType"], meta["contentType"], meta["byteSize"],
+                 meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"], meta.get("storageBackend", "local"), actor["pk"],
+                 gps_meta.get("lat"), gps_meta.get("lng"), gps_meta.get("accuracy"), gps_meta.get("source"),
+                 gps_meta.get("sourceType"), gps_meta.get("timestamp"), gps_meta.get("address")))
+            self._timeline(conn, case["pk"], case["status"], "After-repair evidence was attached for review.", "work_order", actor, now)
+            self._touch(conn, case["pk"], now)
+            self._audit(conn, case["pk"], actor, "repair_evidence_added",
+                        {"evidenceId": meta["evidenceId"], "sha256": meta["sha256"]}, client_ip, now)
+            return _evidence_dict(conn.execute("SELECT * FROM evidence WHERE pk = ?", (evidence_pk,)).fetchone())
+        return self._mutate("Repair evidence", run)
+
+    def case_evidence(self, public_id: str, evidence_id: str, staff_pk: int | None = None) -> dict | None:
+        """Staff: scoped access. Public: shared original, or repair after administrative resolution.
+        Public visibility is rechecked on every request, so reopening removes repair publication.
+        """
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    "SELECT e.*, c.share_evidence, c.status FROM evidence e JOIN complaints c ON c.pk = e.complaint_pk "
+                    "WHERE c.public_id = ? AND e.evidence_id = ?", (public_id, evidence_id)).fetchone()
+                if row is None:
+                    return None
+                if staff_pk is not None:
+                    lc.require_scope(self._case(conn, public_id), self._actor(conn, staff_pk))
+                elif not ((row["role"] == "original" and row["share_evidence"]) or
+                          (row["role"] == "repair" and row["status"] == "Marked Resolved")):
+                    return None
+                return _evidence_dict(row) | {"pk": row["pk"]}
+        except RuleViolation:
+            raise
+        except DB_ERRORS as exc:
+            raise StoreError("Evidence could not be read") from exc
+
+    def public_evidence(self, public_id: str) -> list[dict]:
+        """Public-safe descriptors only: no storage keys, checksums, staff identities or location."""
+        try:
+            with closing(self._connect()) as conn:
+                rows = conn.execute(
+                    "SELECT e.evidence_id, e.role, e.media_type, e.uploaded_at FROM evidence e "
+                    "JOIN complaints c ON c.pk = e.complaint_pk WHERE c.public_id = ? AND "
+                    "((e.role = 'original' AND c.share_evidence = 1) OR (e.role = 'repair' AND c.status = 'Marked Resolved')) "
+                    "ORDER BY e.uploaded_at, e.pk", (public_id,)).fetchall()
+                return [{"evidenceId": r["evidence_id"], "phase": "before" if r["role"] == "original" else "after",
+                         "mediaType": r["media_type"], "uploadedAt": r["uploaded_at"]} for r in rows]
+        except DB_ERRORS as exc:
+            raise StoreError("Evidence could not be read") from exc
 
     def work_order_evidence(self, work_order_id: str, evidence_id: str, staff_pk: int) -> dict | None:
         """Metadata (with pk and storage key, for streaming) of one file linked to a work order the staff member may see."""
@@ -2593,6 +3108,524 @@ class ComplaintStore:
             for case, other in ((a, other_id), (b, public_id)):
                 self._audit(conn, case["pk"], actor, "duplicate_dismissed", {"other": other, "reason": reason.strip()}, client_ip, now)
         self._mutate("Duplicate dismissal", run)
+
+
+    # ---------- Wards, zones and supervisor operations (named feature ward_zone_operations) ----------
+    # Ward assignment rules and geographic scope live in wards.py. Every supervisor read is limited to
+    # the actor's scope; every write locks the complaint, re-checks role and scope on current rows, and
+    # writes its history row and audit record in the same transaction.
+
+    _WARD_JOIN = ("SELECT w.pk, w.ward_number, w.name, w.active, w.testing, w.boundary_geojson IS NOT NULL AS has_boundary, "
+                  "z.pk AS zone_pk, z.zone_number, z.name AS zone_name FROM wards w JOIN zones z ON z.pk = w.zone_pk")
+
+    @staticmethod
+    def _ward_dict(r) -> dict:
+        return {"number": r["ward_number"], "name": r["name"], "active": bool(r["active"]), "testing": bool(r["testing"]),
+                "hasBoundary": bool(r["has_boundary"]), "zone": {"number": r["zone_number"], "name": r["zone_name"]}}
+
+    def _ward_ref(self, conn, ward_pk: int | None) -> dict | None:
+        if ward_pk is None:
+            return None
+        row = conn.execute(self._WARD_JOIN + " WHERE w.pk = ?", (ward_pk,)).fetchone()
+        return self._ward_dict(row) if row else None
+
+    def _wards_enabled(self, conn) -> bool:
+        """True once the ward_zone_operations tables exist. A store opened on an older schema (before
+        initialize()) keeps creating complaints without a ward decision. Checked on the caller's connection
+        (no second pooled connection); only True is cached, since the feature is never removed."""
+        if not self._has_wards:
+            sql = ("SELECT to_regclass('wards') IS NOT NULL" if self.db.backend == "postgres"
+                   else "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wards')")
+            self._has_wards = bool(conn.execute(sql).fetchone()[0])
+        return self._has_wards
+
+    def _initial_ward(self, conn, complaint_pk: int, lat, lng, now: str) -> None:
+        """GPS → ward for a new complaint, by boundary polygon only (wards.locate), recorded in the history."""
+        if not self._wards_enabled(conn):
+            return
+        boundaries = [(r["pk"], json.loads(r["boundary_geojson"])) for r in conn.execute(
+            "SELECT pk, boundary_geojson FROM wards WHERE active = 1 AND boundary_geojson IS NOT NULL")]
+        match = wd.locate(lat, lng, boundaries)
+        if match.ward_pk is not None:
+            conn.execute("UPDATE complaints SET ward_pk = ?, ward_assignment_status = ? WHERE pk = ?", (match.ward_pk, match.status, complaint_pk))
+        conn.execute(
+            "INSERT INTO ward_assignment_history (history_id, complaint_pk, from_ward_pk, to_ward_pk, method, reason, gps_lat, gps_lng, "
+            "actor_staff_pk, created_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?)",
+            ("wh_" + secrets.token_urlsafe(12), complaint_pk, match.ward_pk, match.status, match.reason, lat, lng, now))
+
+    # --- Master data and scope (CLI) ---
+
+    def seed_wards(self, rows: list[dict]) -> dict:
+        """Insert or update zones and wards from wards.load_seed rows. Idempotent: a second run changes
+        nothing. Testing entries are stored inactive; boundaries and the active flag of real wards are kept."""
+        now = utc_now()
+
+        def run(conn):
+            report = {"zonesInserted": 0, "zonesUpdated": 0, "wardsInserted": 0, "wardsUpdated": 0, "unchanged": 0}
+            zones: dict[int, int] = {}
+            for r in rows:
+                if r["zone_number"] in zones:
+                    continue
+                testing = int(all(x["testing"] for x in rows if x["zone_number"] == r["zone_number"]))
+                z = conn.execute("SELECT pk, name, testing FROM zones WHERE zone_number = ?", (r["zone_number"],)).fetchone()
+                if z is None:
+                    zones[r["zone_number"]] = conn.insert(
+                        "INSERT INTO zones (zone_number, name, active, testing, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (r["zone_number"], r["zone_name"], 1 - testing, testing, now, now))
+                    report["zonesInserted"] += 1
+                    continue
+                zones[r["zone_number"]] = z["pk"]
+                if (z["name"], z["testing"]) != (r["zone_name"], testing):
+                    conn.execute("UPDATE zones SET name = ?, testing = ?, active = CASE WHEN ? = 1 THEN 0 ELSE active END, updated_at = ? WHERE pk = ?",
+                                 (r["zone_name"], testing, testing, now, z["pk"]))
+                    report["zonesUpdated"] += 1
+            for r in rows:
+                testing = int(r["testing"])
+                w = conn.execute("SELECT pk, name, zone_pk, testing, active FROM wards WHERE ward_number = ?", (r["ward_number"],)).fetchone()
+                if w is None:
+                    conn.execute("INSERT INTO wards (ward_number, name, zone_pk, active, testing, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                 (r["ward_number"], r["ward_name"], zones[r["zone_number"]], 1 - testing, testing, now, now))
+                    report["wardsInserted"] += 1
+                elif (w["name"], w["zone_pk"], w["testing"]) != (r["ward_name"], zones[r["zone_number"]], testing) or (testing and w["active"]):
+                    conn.execute("UPDATE wards SET name = ?, zone_pk = ?, testing = ?, active = CASE WHEN ? = 1 THEN 0 ELSE active END, "
+                                 "updated_at = ? WHERE pk = ?", (r["ward_name"], zones[r["zone_number"]], testing, testing, now, w["pk"]))
+                    report["wardsUpdated"] += 1
+                else:
+                    report["unchanged"] += 1
+            if any(report[k] for k in ("zonesInserted", "zonesUpdated", "wardsInserted", "wardsUpdated")):
+                self._audit(conn, None, None, "wards_seeded", report, None, now)
+            return report
+        return self._mutate("Ward seed", run)
+
+    def ward_counts(self) -> dict:
+        try:
+            with closing(self._connect()) as conn:
+                r = conn.execute(
+                    "SELECT (SELECT COUNT(*) FROM zones) AS zones, (SELECT COUNT(*) FROM zones WHERE testing = 0) AS operational_zones, "
+                    "(SELECT COUNT(*) FROM wards) AS wards, (SELECT COUNT(*) FROM wards WHERE testing = 0) AS operational_wards, "
+                    "(SELECT COUNT(*) FROM wards WHERE active = 1) AS active_wards, "
+                    "(SELECT COUNT(*) FROM wards WHERE boundary_geojson IS NOT NULL) AS with_boundary").fetchone()
+        except DB_ERRORS as exc:
+            raise StoreError("Wards could not be counted") from exc
+        return {"zones": r["zones"], "operationalZones": r["operational_zones"], "wards": r["wards"], "operationalWards": r["operational_wards"],
+                "activeWards": r["active_wards"], "withBoundary": r["with_boundary"]}
+
+    def list_wards(self, include_inactive: bool = True) -> list[dict]:
+        try:
+            with closing(self._connect()) as conn:
+                rows = conn.execute(self._WARD_JOIN + ("" if include_inactive else " WHERE w.active = 1") +
+                                    " ORDER BY z.zone_number, w.ward_number").fetchall()
+        except DB_ERRORS as exc:
+            raise StoreError("Wards could not be read") from exc
+        return [self._ward_dict(r) for r in rows]
+
+    def import_boundaries(self, boundaries: dict[int, dict], source: str) -> dict:
+        """Store official boundary polygons by ward number (validated by wards.validate_boundary).
+        All or nothing: an unknown ward number stops the import before anything is written."""
+        now = utc_now()
+
+        def run(conn):
+            known = {r["ward_number"]: r["pk"] for r in conn.execute("SELECT pk, ward_number FROM wards")}
+            missing = sorted(set(boundaries) - set(known))
+            if missing:
+                raise RuleViolation(422, "unknown_ward", f"No ward with number(s) {', '.join(map(str, missing[:10]))}. Seed the wards first.")
+            for number, geometry in boundaries.items():
+                conn.execute("UPDATE wards SET boundary_geojson = ?, boundary_source = ?, boundary_updated_at = ?, updated_at = ? WHERE pk = ?",
+                             (json.dumps(wd.validate_boundary(geometry), separators=(",", ":")), source[:500], now, now, known[number]))
+            self._audit(conn, None, None, "ward_boundaries_imported", {"wards": len(boundaries), "source": source[:500]}, None, now)
+            return {"imported": len(boundaries)}
+        return self._mutate("Boundary import", run)
+
+    def set_staff_scope(self, username: str, scope_type: str, number: int | None, grant: bool) -> bool:
+        """Grant or revoke a supervisor's geographic scope: city-wide, a zone (by zone number) or a ward
+        (by ward number). False when the account or the zone/ward is unknown."""
+        if scope_type not in wd.SCOPE_TYPES:
+            raise RuleViolation(422, "invalid_scope", "Scope must be city, zone or ward.")
+        now = utc_now()
+
+        def run(conn):
+            staff = conn.execute("SELECT pk, role FROM staff_accounts WHERE username = ?", (username,)).fetchone()
+            if staff is None:
+                return False
+            zone_pk = ward_pk = None
+            if scope_type == "zone":
+                z = conn.execute("SELECT pk FROM zones WHERE zone_number = ?", (number,)).fetchone()
+                if z is None:
+                    return False
+                zone_pk = z["pk"]
+            elif scope_type == "ward":
+                w = conn.execute("SELECT pk FROM wards WHERE ward_number = ?", (number,)).fetchone()
+                if w is None:
+                    return False
+                ward_pk = w["pk"]
+            where = "staff_pk = ? AND scope_type = ? AND COALESCE(zone_pk, 0) = ? AND COALESCE(ward_pk, 0) = ?"
+            params = (staff["pk"], scope_type, zone_pk or 0, ward_pk or 0)
+            exists = conn.execute(f"SELECT 1 FROM staff_geographic_scope WHERE {where}", params).fetchone()
+            if grant and not exists:
+                conn.execute("INSERT INTO staff_geographic_scope (staff_pk, scope_type, zone_pk, ward_pk, created_at) VALUES (?, ?, ?, ?, ?)",
+                             (staff["pk"], scope_type, zone_pk, ward_pk, now))
+            elif not grant and exists:
+                conn.execute(f"DELETE FROM staff_geographic_scope WHERE {where}", params)
+            else:
+                return True
+            self._audit(conn, None, None, "staff_scope_granted" if grant else "staff_scope_revoked",
+                        {"username": username, "scope": scope_type, "number": number}, None, now)
+            return True
+        return self._mutate("Staff scope update", run)
+
+    def staff_scope(self, username: str) -> list[dict]:
+        try:
+            with closing(self._connect()) as conn:
+                rows = conn.execute(
+                    "SELECT s.scope_type, z.zone_number, z.name AS zone_name, w.ward_number, w.name AS ward_name FROM staff_geographic_scope s "
+                    "JOIN staff_accounts a ON a.pk = s.staff_pk LEFT JOIN zones z ON z.pk = s.zone_pk LEFT JOIN wards w ON w.pk = s.ward_pk "
+                    "WHERE a.username = ? ORDER BY s.scope_type, z.zone_number, w.ward_number", (username,)).fetchall()
+        except DB_ERRORS as exc:
+            raise StoreError("Staff scope could not be read") from exc
+        return [{"type": r["scope_type"], "number": r["zone_number"] if r["scope_type"] == "zone" else r["ward_number"],
+                 "name": r["zone_name"] if r["scope_type"] == "zone" else r["ward_name"]} for r in rows]
+
+    # --- Supervisor reads ---
+
+    def _scope(self, conn, actor: dict) -> set[int] | None:
+        """Ward pks the actor may act on (None = city-wide). Raises 403 for anyone below supervisor."""
+        wd.require_supervisor(actor)
+        rows = [dict(r) for r in conn.execute("SELECT scope_type, zone_pk, ward_pk FROM staff_geographic_scope WHERE staff_pk = ?", (actor["pk"],))]
+        wards = [dict(r) for r in conn.execute("SELECT pk, zone_pk FROM wards")]
+        return wd.scope_wards(actor, rows, wards)
+
+    def _supervisor_read(self, staff_pk: int, what: str, fn):
+        try:
+            with closing(self._connect()) as conn:
+                actor = self._actor(conn, staff_pk)
+                return fn(conn, actor, self._scope(conn, actor))
+        except RuleViolation:
+            raise
+        except DB_ERRORS as exc:
+            raise StoreError(f"{what} could not be read") from exc
+
+    def supervisor_scope(self, staff_pk: int) -> dict:
+        """The actor's scope and the active wards in it, grouped by zone, for the ward/zone selector."""
+        def run(conn, actor, allowed):
+            rows = conn.execute(self._WARD_JOIN + " WHERE w.active = 1 ORDER BY z.zone_number, w.ward_number").fetchall()
+            zones: dict[int, dict] = {}
+            for r in rows:
+                if allowed is not None and r["pk"] not in allowed:
+                    continue
+                zone = zones.setdefault(r["zone_number"], {"number": r["zone_number"], "name": r["zone_name"], "wards": []})
+                zone["wards"].append({"number": r["ward_number"], "name": r["name"], "hasBoundary": bool(r["has_boundary"])})
+            return {"role": actor["role"], "cityWide": allowed is None, "zones": list(zones.values()),
+                    "wardCount": sum(len(z["wards"]) for z in zones.values())}
+        return self._supervisor_read(staff_pk, "Scope", run)
+
+    @staticmethod
+    def _ward_numbers_to_pks(conn, numbers: list[int]) -> dict[int, int]:
+        if not numbers:
+            return {}
+        marks = ", ".join("?" * len(numbers))
+        return {r["ward_number"]: r["pk"] for r in conn.execute(f"SELECT pk, ward_number FROM wards WHERE ward_number IN ({marks})", tuple(numbers))}
+
+    def supervisor_complaints(self, staff_pk: int, ward_numbers: list[int], category: str | None = None, status: str | None = None,
+                              min_age_days: int | None = None, max_age_days: int | None = None, unverified_ward: bool = False,
+                              limit: int = 50, offset: int = 0) -> dict:
+        """Unresolved complaints (not marked resolved, not merged away) in the selected wards, oldest first.
+        With `unverified_ward`, the complaints that have no verified ward yet (any supervisor may triage
+        them, and may set only wards in their own scope). Age counts from when the server received the report."""
+        limit = max(1, min(int(limit), STAFF_LIST_MAX))
+
+        def run(conn, actor, allowed):
+            where = ["c.status <> 'Marked Resolved'", "c.merged_into_pk IS NULL"]
+            params: list = []
+            if unverified_ward:
+                where.append("c.ward_pk IS NULL")
+            else:
+                pks = self._ward_numbers_to_pks(conn, ward_numbers)
+                unknown = sorted(set(ward_numbers) - set(pks))
+                if unknown:
+                    raise RuleViolation(422, "unknown_ward", f"No ward with number(s) {', '.join(map(str, unknown[:10]))}.")
+                for pk in pks.values():
+                    wd.require_ward_in_scope(pk, allowed, "list complaints")
+                if not pks:
+                    raise RuleViolation(422, "wards_required", "Select at least one ward.")
+                where.append(f"c.ward_pk IN ({', '.join('?' * len(pks))})")
+                params += list(pks.values())
+            if category:
+                where.append("c.category = ?")
+                params.append(category)
+            if status:
+                where.append("c.status = ?")
+                params.append(status)
+            now = datetime.now(timezone.utc)
+            if min_age_days is not None:
+                where.append("c.uploaded_at <= ?")
+                params.append(iso(now - timedelta(days=min_age_days)))
+            if max_age_days is not None:
+                where.append("c.uploaded_at >= ?")
+                params.append(iso(now - timedelta(days=max_age_days)))
+            clause = " WHERE " + " AND ".join(where)
+            total = conn.execute("SELECT COUNT(*) FROM complaints c" + clause, tuple(params)).fetchone()[0]
+            today = _today_ist()
+            rows = conn.execute(
+                "SELECT c.public_id, c.title, c.category, c.area, c.status, c.verification, c.department, c.uploaded_at, c.priority, c.due_at, "
+                "c.ward_assignment_status, c.gps_lat, c.gps_lng, w.ward_number, w.name AS ward_name, z.zone_number, z.name AS zone_name, "
+                "s.username AS assignee, s.display_name AS assignee_name, "
+                "EXISTS (SELECT 1 FROM work_orders o WHERE o.complaint_pk = c.pk AND o.status IN ('Open', 'In Progress') AND o.due_at < ?) AS order_overdue "
+                "FROM complaints c LEFT JOIN wards w ON w.pk = c.ward_pk LEFT JOIN zones z ON z.pk = w.zone_pk "
+                "LEFT JOIN staff_accounts s ON s.pk = c.assigned_staff_pk" + clause + " ORDER BY c.uploaded_at, c.pk LIMIT ? OFFSET ?",
+                (today, *params, limit, max(0, int(offset)))).fetchall()
+            items = [{
+                "id": r["public_id"], "title": r["title"], "category": r["category"], "area": r["area"], "status": r["status"],
+                "verification": r["verification"], "department": r["department"], "received": r["uploaded_at"],
+                "ageDays": max(0, (now - datetime.fromisoformat(r["uploaded_at"].replace("Z", "+00:00"))).days),
+                "priority": r["priority"], "dueAt": r["due_at"],
+                "overdue": bool((r["due_at"] and r["due_at"] < today) or r["order_overdue"]),
+                "ward": {"number": r["ward_number"], "name": r["ward_name"], "zone": {"number": r["zone_number"], "name": r["zone_name"]}}
+                        if r["ward_number"] is not None else None,
+                "wardAssignmentStatus": r["ward_assignment_status"],
+                "assignee": {"username": r["assignee"], "displayName": r["assignee_name"]} if r["assignee"] else None,
+                "gps": {"lat": r["gps_lat"], "lng": r["gps_lng"]},
+            } for r in rows]
+            return {"items": items, "total": total, "limit": limit, "offset": offset}
+        return self._supervisor_read(staff_pk, "Complaints", run)
+
+    def supervisor_dashboard(self, staff_pk: int, zone_number: int | None = None, ward_number: int | None = None) -> dict:
+        """Counts from the complaints table for the actor's scope, narrowed to a zone or a ward. Merged
+        duplicates are left out (they are counted through their canonical complaint). Open = not marked
+        resolved; pending verification = marked resolved and awaiting the citizen; overdue = open with a
+        past allocation due date or a past-due open work order (IST dates)."""
+        def run(conn, actor, allowed):
+            wards = conn.execute(self._WARD_JOIN + " ORDER BY z.zone_number, w.ward_number").fetchall()
+            in_scope = [w for w in wards if allowed is None or w["pk"] in allowed]
+            level = "city"
+            if ward_number is not None:
+                in_scope = [w for w in in_scope if w["ward_number"] == ward_number]
+                if not in_scope:
+                    if any(w["ward_number"] == ward_number for w in wards):
+                        raise RuleViolation(403, "out_of_scope", "You can only view wards within your assigned wards and zones.")
+                    raise RuleViolation(404, "not_found", "No ward with that number.")
+                level = "ward"
+            elif zone_number is not None:
+                in_scope = [w for w in in_scope if w["zone_number"] == zone_number]
+                if not in_scope:
+                    if any(w["zone_number"] == zone_number for w in wards):
+                        raise RuleViolation(403, "out_of_scope", "You can only view zones within your assigned scope.")
+                    raise RuleViolation(404, "not_found", "No zone with that number.")
+                level = "zone"
+            include_unverified = allowed is None and level == "city"
+            pks = [w["pk"] for w in in_scope]
+            scope_sql = f"c.ward_pk IN ({', '.join('?' * len(pks)) or 'NULL'})"
+            if include_unverified:
+                scope_sql = f"({scope_sql} OR c.ward_pk IS NULL)"
+            today = _today_ist()
+            rows = conn.execute(
+                "SELECT c.ward_pk, c.category, c.status, c.verification, "
+                "CASE WHEN c.status <> 'Marked Resolved' AND ((c.due_at IS NOT NULL AND c.due_at < ?) OR EXISTS (SELECT 1 FROM work_orders o "
+                "WHERE o.complaint_pk = c.pk AND o.status IN ('Open', 'In Progress') AND o.due_at < ?)) THEN 1 ELSE 0 END AS overdue, "
+                "COUNT(*) AS n FROM complaints c WHERE c.merged_into_pk IS NULL AND " + scope_sql +
+                " GROUP BY c.ward_pk, c.category, c.status, c.verification, overdue", (today, today, *pks)).fetchall()
+
+            def blank():
+                return {"total": 0, "open": 0, "resolved": 0, "pendingVerification": 0, "overdue": 0}
+
+            def add(bucket, r):
+                n = r["n"]
+                bucket["total"] += n
+                resolved = r["status"] == "Marked Resolved"
+                bucket["resolved" if resolved else "open"] += n
+                if resolved and r["verification"] == "Pending Verification":
+                    bucket["pendingVerification"] += n
+                if r["overdue"]:
+                    bucket["overdue"] += n
+
+            totals, by_category, by_status = blank(), {}, {}
+            by_ward = {w["pk"]: {"number": w["ward_number"], "name": w["name"], "active": bool(w["active"]), "testing": bool(w["testing"]),
+                                 "zone": {"number": w["zone_number"], "name": w["zone_name"]}, **blank()} for w in in_scope}
+            by_zone: dict[int, dict] = {}
+            for w in in_scope:
+                by_zone.setdefault(w["zone_number"], {"number": w["zone_number"], "name": w["zone_name"], "wards": 0, **blank()})["wards"] += 1
+            unverified = blank()
+            for r in rows:
+                add(totals, r)
+                add(by_category.setdefault(r["category"], {"category": r["category"], **blank()}), r)
+                by_status[r["status"]] = by_status.get(r["status"], 0) + r["n"]
+                if r["ward_pk"] is None:
+                    add(unverified, r)
+                    continue
+                ward = by_ward[r["ward_pk"]]
+                add(ward, r)
+                add(by_zone[ward["zone"]["number"]], r)
+            # Inactive wards (the GBA testing ward) are listed only if complaints were ever placed in them.
+            wards_out = [w for w in by_ward.values() if w["active"] or w["total"]]
+            shown_zones = {w["zone"]["number"] for w in wards_out}
+            return {
+                "level": level, "cityWide": allowed is None, "zone": zone_number, "ward": ward_number, "today": today, "totals": totals,
+                "unverifiedWard": unverified if include_unverified else None,
+                "byStatus": [{"status": s, "count": by_status.get(s, 0)} for s in lc.STATUSES],
+                "byCategory": sorted(by_category.values(), key=lambda b: (-b["total"], b["category"])),
+                "byZone": [z for z in by_zone.values() if z["number"] in shown_zones],
+                "byWard": wards_out,
+            }
+        return self._supervisor_read(staff_pk, "Dashboard", run)
+
+    def assignable_staff(self, staff_pk: int) -> list[dict]:
+        """Active staff a supervisor can allocate to, with their departments. No credentials, no sessions."""
+        def run(conn, actor, allowed):
+            rows = conn.execute("SELECT pk, username, display_name, role FROM staff_accounts WHERE disabled_at IS NULL ORDER BY display_name").fetchall()
+            depts = {}
+            for r in conn.execute("SELECT sd.staff_pk, d.code FROM staff_departments sd JOIN departments d ON d.pk = sd.department_pk ORDER BY d.code"):
+                depts.setdefault(r["staff_pk"], []).append(r["code"])
+            return [{"username": r["username"], "displayName": r["display_name"], "role": r["role"], "departments": depts.get(r["pk"], [])} for r in rows]
+        return self._supervisor_read(staff_pk, "Staff", run)
+
+    # --- Supervisor writes ---
+
+    def set_complaint_ward(self, public_id: str, staff_pk: int, ward_number: int, reason: str, client_ip: str | None = None) -> None:
+        """Manual ward by a supervisor or admin. The target ward must be active and in the actor's scope;
+        a complaint that already has a ward can only be moved by someone whose scope covers that ward.
+        The original GPS is never changed; the history row records it with the decision."""
+        if not reason.strip():
+            raise RuleViolation(422, "reason_required", "Explain why this ward is correct (for example, what was checked on site or on the map).")
+
+        def run(conn):
+            now = utc_now()
+            case = self._locked_case(conn, public_id)
+            actor = self._actor(conn, staff_pk)
+            allowed = self._scope(conn, actor)
+            w = conn.execute("SELECT pk, active FROM wards WHERE ward_number = ?", (ward_number,)).fetchone()
+            if w is None:
+                raise RuleViolation(422, "unknown_ward", "No ward with that number.")
+            if not w["active"]:
+                raise RuleViolation(422, "inactive_ward", "That ward is not active (for example the GBA testing ward).")
+            wd.require_ward_in_scope(w["pk"], allowed, "assign complaints to wards")
+            if case["wardPk"] is not None:
+                wd.require_ward_in_scope(case["wardPk"], allowed, "move complaints out of a ward")
+            if case["wardPk"] == w["pk"] and case["wardStatus"] == "manual":
+                raise RuleViolation(409, "no_change", "The complaint is already set to that ward.")
+            conn.execute(
+                "INSERT INTO ward_assignment_history (history_id, complaint_pk, from_ward_pk, to_ward_pk, method, reason, gps_lat, gps_lng, "
+                "actor_staff_pk, created_at) VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?)",
+                ("wh_" + secrets.token_urlsafe(12), case["pk"], case["wardPk"], w["pk"], reason.strip()[:500], case["gpsLat"], case["gpsLng"],
+                 actor["pk"], now))
+            self._touch(conn, case["pk"], now, ward_pk=w["pk"], ward_assignment_status="manual")
+            before, after = self._ward_ref(conn, case["wardPk"]), self._ward_ref(conn, w["pk"])
+            self._audit(conn, case["pk"], actor, "ward_set",
+                        {"from": before and before["number"], "fromMethod": case["wardStatus"], "to": after["number"], "method": "manual",
+                         "reason": reason.strip()[:500]}, client_ip, now)
+        self._mutate("Ward assignment", run)
+
+    MAX_ALLOCATION = 100
+
+    def allocate(self, staff_pk: int, public_ids: list[str], department_code: str | None, assignee_username: str, priority: str,
+                 due_at: str | None, reason: str, note: str = "", client_ip: str | None = None) -> dict:
+        """Bulk allocation of complaints in the actor's wards to one staff member, with a priority, an
+        optional due date (IST) and an internal note. All or nothing: any refused complaint rolls back the
+        whole batch, and the error names it. Unchanged complaints are reported and not rewritten. Each
+        change writes a ward_allocations row (previous → new), the usual assignment history, audit and
+        public timeline (department only), and the note as an internal staff note."""
+        ids = sorted(set(public_ids))
+        if not ids or len(ids) > self.MAX_ALLOCATION:
+            raise RuleViolation(422, "invalid_selection", f"Select between 1 and {self.MAX_ALLOCATION} complaints.")
+        if priority not in wd.PRIORITIES:
+            raise RuleViolation(422, "invalid_priority", "Choose a valid priority.")
+        if not reason.strip():
+            raise RuleViolation(422, "reason_required", "Give a reason for this allocation.")
+
+        def run(conn):
+            now = utc_now()
+            actor = self._actor(conn, staff_pk)
+            allowed = self._scope(conn, actor)
+            assignee = self._staff_assignee(conn, assignee_username)
+            batch = "ab_" + secrets.token_urlsafe(12)
+            results = []
+            for public_id in ids:
+                case = self._locked_case(conn, public_id)
+                try:
+                    if case["wardPk"] is None:
+                        raise RuleViolation(409, "ward_required", "Set the complaint's ward before allocating it.")
+                    wd.require_ward_in_scope(case["wardPk"], allowed, "allocate complaints")
+                    code = department_code
+                    if code is None:
+                        if case["departmentPk"] is None:
+                            raise RuleViolation(422, "department_required", "Choose a department: this complaint has none yet.")
+                        code = conn.execute("SELECT code FROM departments WHERE pk = ?", (case["departmentPk"],)).fetchone()["code"]
+                    d = conn.execute("SELECT pk, code, name, active FROM departments WHERE code = ?", (code,)).fetchone()
+                    department = {"pk": d["pk"], "code": d["code"], "name": d["name"], "active": bool(d["active"])} if d else None
+                    lc.check_assignment(case, actor, department, assignee)
+                except RuleViolation as exc:
+                    raise RuleViolation(exc.status, exc.code, f"{public_id}: {exc.message}") from exc
+                before = {"departmentPk": case["departmentPk"], "assigneePk": case["assignedStaffPk"], "priority": case["priority"],
+                          "dueAt": case["dueAt"], "status": case["status"]}
+                reassign_needed = (case["departmentPk"], case["assignedStaffPk"]) != (department["pk"], assignee["pk"])
+                if not reassign_needed and (case["priority"], case["dueAt"]) == (priority, due_at) and not note.strip():
+                    results.append({"id": public_id, "outcome": "unchanged"})
+                    continue
+                kind = "reallocated" if before["departmentPk"] is not None or before["assigneePk"] is not None else "allocated"
+                if reassign_needed:
+                    self._apply_assignment(conn, case, actor, department, assignee, reason, now, client_ip)
+                self._touch(conn, case["pk"], now, priority=priority, due_at=due_at)
+                if note.strip():
+                    note_id = "sn_" + secrets.token_urlsafe(12)
+                    conn.execute("INSERT INTO staff_notes (note_id, complaint_pk, author_staff_pk, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                                 (note_id, case["pk"], actor["pk"], note.strip(), now))
+                ward = conn.execute("SELECT zone_pk FROM wards WHERE pk = ?", (case["wardPk"],)).fetchone() if case["wardPk"] else None
+                allocation_id = "al_" + secrets.token_urlsafe(12)
+                conn.execute(
+                    "INSERT INTO ward_allocations (allocation_id, batch_id, complaint_pk, ward_pk, zone_pk, kind, from_department_pk, to_department_pk, "
+                    "from_assignee_staff_pk, to_assignee_staff_pk, from_priority, to_priority, from_due_at, to_due_at, from_status, to_status, "
+                    "reason, note, actor_staff_pk, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (allocation_id, batch, case["pk"], case["wardPk"], ward["zone_pk"] if ward else None, kind, before["departmentPk"],
+                     department["pk"], before["assigneePk"], assignee["pk"], before["priority"], priority, before["dueAt"], due_at,
+                     before["status"], case["status"], reason.strip(), note.strip(), actor["pk"], now))
+                self._audit(conn, case["pk"], actor, kind,
+                            {"allocationId": allocation_id, "batch": batch, "assignee": assignee["username"], "department": department["code"],
+                             "priority": {"from": before["priority"], "to": priority}, "dueAt": {"from": before["dueAt"], "to": due_at},
+                             "status": {"from": before["status"], "to": case["status"]}, "reason": reason.strip(), "noteAdded": bool(note.strip())},
+                            client_ip, now)
+                results.append({"id": public_id, "outcome": kind, "allocationId": allocation_id, "status": case["status"]})
+            return {"batch": batch, "results": results,
+                    "changed": sum(1 for r in results if r["outcome"] != "unchanged"), "unchanged": sum(1 for r in results if r["outcome"] == "unchanged")}
+        return self._mutate("Allocation", run)
+
+    def allocation_history(self, staff_pk: int, public_id: str) -> list[dict] | None:
+        def run(conn, actor, allowed):
+            case = self._case(conn, public_id)
+            if case is None:
+                return None
+            if case["wardPk"] is not None:
+                wd.require_ward_in_scope(case["wardPk"], allowed, "view this complaint's allocations")
+            return self._allocations(conn, case["pk"])
+        return self._supervisor_read(staff_pk, "Allocations", run)
+
+    @staticmethod
+    def _allocations(conn, complaint_pk: int) -> list[dict]:
+        rows = conn.execute(
+            "SELECT a.allocation_id, a.batch_id, a.kind, w.ward_number, z.zone_number, fd.code AS from_department, td.code AS to_department, "
+            "fs.username AS from_assignee, ts.username AS to_assignee, a.from_priority, a.to_priority, a.from_due_at, a.to_due_at, "
+            "a.from_status, a.to_status, a.reason, a.note, s.username AS actor, a.created_at FROM ward_allocations a "
+            "LEFT JOIN wards w ON w.pk = a.ward_pk LEFT JOIN zones z ON z.pk = a.zone_pk LEFT JOIN departments fd ON fd.pk = a.from_department_pk "
+            "JOIN departments td ON td.pk = a.to_department_pk LEFT JOIN staff_accounts fs ON fs.pk = a.from_assignee_staff_pk "
+            "LEFT JOIN staff_accounts ts ON ts.pk = a.to_assignee_staff_pk JOIN staff_accounts s ON s.pk = a.actor_staff_pk "
+            "WHERE a.complaint_pk = ? ORDER BY a.pk", (complaint_pk,)).fetchall()
+        return [{"id": r["allocation_id"], "batch": r["batch_id"], "kind": r["kind"], "ward": r["ward_number"], "zone": r["zone_number"],
+                 "from": {"department": r["from_department"], "assignee": r["from_assignee"], "priority": r["from_priority"],
+                          "dueAt": r["from_due_at"], "status": r["from_status"]},
+                 "to": {"department": r["to_department"], "assignee": r["to_assignee"], "priority": r["to_priority"],
+                        "dueAt": r["to_due_at"], "status": r["to_status"]},
+                 "reason": r["reason"], "note": r["note"], "by": r["actor"], "at": r["created_at"]} for r in rows]
+
+    def _ward_management(self, conn, case: dict) -> dict:
+        history = conn.execute(
+            "SELECT h.history_id, fw.ward_number AS from_ward, tw.ward_number AS to_ward, h.method, h.reason, h.gps_lat, h.gps_lng, "
+            "a.username AS actor, h.created_at FROM ward_assignment_history h LEFT JOIN wards fw ON fw.pk = h.from_ward_pk "
+            "LEFT JOIN wards tw ON tw.pk = h.to_ward_pk LEFT JOIN staff_accounts a ON a.pk = h.actor_staff_pk "
+            "WHERE h.complaint_pk = ? ORDER BY h.pk", (case["pk"],)).fetchall()
+        return {
+            "ward": self._ward_ref(conn, case["wardPk"]), "wardAssignmentStatus": case["wardStatus"],
+            "priority": case["priority"], "dueAt": case["dueAt"],
+            "wardHistory": [{"id": h["history_id"], "from": h["from_ward"], "to": h["to_ward"], "method": h["method"], "reason": h["reason"],
+                             "gps": {"lat": h["gps_lat"], "lng": h["gps_lng"]}, "by": h["actor"], "at": h["created_at"]} for h in history],
+            "allocations": self._allocations(conn, case["pk"]),
+        }
 
 
 def _today_ist() -> str:

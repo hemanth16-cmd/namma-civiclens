@@ -4,13 +4,18 @@
 // The server decides what each person may do (allowedActions); this page only offers those actions and
 // re-reads the case after every change. Private evidence opens on request because every view is logged.
 import {esc, assessPriority} from '../services.js';
-import {icon, categoryIcon, resolutionState, workspaceShell, heading, btn, statusPill, verificationPill, priorityPill, notice, panel, panelHead, toast, fmtDate, fmtDateTime, openLightbox, empty, pill} from '../ui.js';
-import {setSession} from '../state.js';
+import {icon, categoryIcon, resolutionState, workspaceShell, heading, btn, statusPill, verificationPill, priorityPill, notice, panel, panelHead, toast, fmtDate, fmtDateTime, openLightbox, empty, pill, coords} from '../ui.js';
+import {inspectJpegFile} from '../exif.js';
+import {distanceM} from '../address-service.js';
+import {renderStampedPhoto, evidenceRef} from '../photo-stamp.js';
+import {setSession, addCleanup} from '../state.js';
 import {navigate, rerender} from '../router.js';
 import {ApiError} from '../api-client.js';
 import {staffSession} from '../staff-session.js';
 import {serverClient} from '../server-records.js';
+import {mountRepairCapture} from './repair-capture.js';
 import {figure, geoBlock, labelOf, objectURL} from './issue.js';
+import {aiSections, mountAiPanels, overlayDetections} from './staff-ai.js';
 
 const $ = id => document.getElementById(id);
 const can = (r, action) => r.allowedActions.some(a => a.action === action);
@@ -18,11 +23,26 @@ const field = (id, label, control, hint = '') => `<div class="field"><label for=
 
 /** Shown where the original page had a feature that needs data the server does not hold yet. */
 const pending = text => `<p class="micro">${icon('alert', 'mini-icon')} ${text}</p>`;
+const WARD_METHOD = {auto: 'from an imported ward boundary', manual: 'set by a supervisor', unverified: 'unverified'};
 
 function signedOut() {
   staffSession.clear();
   setSession(null);
   navigate('login/official');
+}
+
+function distanceComparison(origGps, repairGps) {
+  if (!origGps || !repairGps || !Number.isFinite(origGps.lat) || !Number.isFinite(origGps.lng) ||
+      !Number.isFinite(repairGps.lat) || !Number.isFinite(repairGps.lng)) {
+    return '';
+  }
+  const d = Math.round(distanceM(origGps, repairGps));
+  const origAcc = Number.isFinite(origGps.accuracy) ? `±${Math.round(origGps.accuracy)} m` : 'accuracy unknown';
+  const repAcc = Number.isFinite(repairGps.accuracy) ? `±${Math.round(repairGps.accuracy)} m` : 'accuracy unknown';
+  if (d > 200) {
+    return `<p class="pill pill-amber" style="margin-top:6px; display:inline-block;">⚠️ Repair photo is ~${d} m from reported location (reported: ${origAcc}, repair: ${repAcc}). Review recommended.</p>`;
+  }
+  return `<p class="micro text-muted" style="margin-top:4px;">Repair location is ~${d} m from reported location (reported: ${origAcc}, repair: ${repAcc}).</p>`;
 }
 
 export async function renderServerCase(root, id) {
@@ -42,7 +62,8 @@ export async function renderServerCase(root, id) {
 
   const solved = resolutionState(r);
   const title = `${r.category} reported by a citizen`;
-  const repairs = r.workOrders.flatMap(w => w.evidence.filter(e => e.phase === 'after').map(e => ({...e, order: w})))
+  const orderRepairs = r.workOrders.flatMap(w => w.evidence.filter(e => e.phase === 'after').map(e => ({...e, order: w})));
+  const repairs = (r.repairEvidence?.length ? r.repairEvidence.map(e => ({...e, order: orderRepairs.find(x => x.evidenceId === e.evidenceId)?.order})) : orderRepairs)
     .sort((a, b) => String(a.uploadedAt).localeCompare(String(b.uploadedAt)));
   const latest = repairs.at(-1);
   const activeOrder = r.workOrders.find(w => ['Open', 'In Progress'].includes(w.status));
@@ -51,11 +72,28 @@ export async function renderServerCase(root, id) {
   const department = r.assignment.department?.name || r.department;
 
   const repairHistory = repairs.length
-    ? `<ol class="history-list">${repairs.slice().reverse().map(e => `<li>
-        <div class="tl-head"><strong>After-repair evidence · ${esc(e.order.team)}</strong><span class="pill">Staff only</span></div>
-        <p class="micro">Work order ${esc(e.order.status.toLowerCase())} · uploaded ${fmtDateTime(e.uploadedAt)}</p>
-        <p>${btn(icon('eye') + '<span>View repair photo</span>', `data-repair="${esc(e.evidenceId)}" data-order="${esc(e.order.id)}"`, 'ghost', 'btn-sm')}</p>
-      </li>`).join('')}</ol>`
+    ? `<ol class="history-list">${repairs.slice().reverse().map(e => {
+        const hasGps = e.gps && Number.isFinite(e.gps.lat) && Number.isFinite(e.gps.lng);
+        const acc = hasGps && Number.isFinite(e.gps.accuracy) ? `±${Math.round(e.gps.accuracy)} m` : '';
+        const src = hasGps ? (e.gps.sourceType === 'exif' ? 'photo EXIF' : (e.gps.source || 'device GPS')) : '';
+        const fixTime = hasGps && e.gps.timestamp ? ` · fix ${fmtDateTime(e.gps.timestamp)}` : '';
+        const captured = e.capturedAt ? `Captured ${fmtDateTime(e.capturedAt)}` : 'Capture time not recorded in the file';
+        const uploaded = e.uploadedAt ? `Uploaded ${fmtDateTime(e.uploadedAt)}` : '';
+        const distWarning = hasGps ? distanceComparison(r.gps, e.gps) : '';
+        return `<li>
+          <div class="tl-head"><strong>After-repair evidence · ${esc(e.order?.team || 'Case repair')}</strong><span class="pill">${r.status === 'Marked Resolved' ? 'Public repair evidence' : 'Staff review'}</span></div>
+          <p class="micro">${e.order ? `Work order ${esc(e.order.status.toLowerCase())} · ` : ''}${uploaded}</p>
+          <div class="geo-caption micro">
+            ${hasGps ? `<strong>${coords(e.gps)}</strong><small>${acc ? `${acc} · ` : ''}${esc(src)}${fixTime}${e.gps.address ? ` · ${esc(e.gps.address)}` : ''}</small>` : '<strong>No GPS metadata</strong><small>Location is not verified from this file.</small>'}
+            <p class="micro" style="margin:2px 0;">${esc(captured)}</p>
+            ${distWarning}
+          </div>
+          <p class="row-actions">
+            ${btn(icon('eye') + '<span>View repair photo</span>', `data-repair="${esc(e.evidenceId)}" data-order="${esc(e.order?.id || '')}"`, 'ghost', 'btn-sm')}
+            ${btn(icon('download') + '<span>Stamped copy</span>', `data-stamp="${esc(e.evidenceId)}" data-order="${esc(e.order?.id || '')}"`, 'ghost', 'btn-sm')}
+          </p>
+        </li>`;
+      }).join('')}</ol>`
     : '<p class="micro">No repair evidence has been uploaded yet.</p>';
 
   const verificationHistory = r.verificationLog.length
@@ -70,15 +108,15 @@ export async function renderServerCase(root, id) {
   const what = r.mediaType === 'video' ? 'video' : 'photo';
   const beforeFigure = r.evidence
     ? `<figure class="evidence-figure" id="figure-before"><figcaption><span>Before · reported issue</span><span class="pill">${r.mediaType === 'video' ? 'Video' : 'Photo'}</span></figcaption>
-        <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Private evidence</strong></p><p class="micro">Opening it records your name and the time in the access log.</p>
+        <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>${r.shareEvidence ? 'Shared original evidence' : 'Private evidence'}</strong></p><p class="micro">Opening it records your name and the time in the access log.</p>
         ${btn(icon('eye') + `<span>View ${what}</span>`, 'data-load="before" id="staff-view-evidence"', 'primary', 'btn-sm')}</div>
         ${geoBlock(r.gps, 'No GPS metadata for this original')}</figure>`
     : figure({title: 'Before · reported issue', url: null, emptyGeo: 'No GPS metadata for this original', emptyText: 'No evidence has been uploaded for this complaint'});
   const afterFigure = latest
     ? `<figure class="evidence-figure" id="figure-after"><figcaption><span>After · repair evidence</span><span class="pill">Photo</span></figcaption>
-        <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Latest repair photo</strong></p><p class="micro">Uploaded ${fmtDateTime(latest.uploadedAt)} for ${esc(latest.order.team)}.</p>
+        <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Latest repair photo</strong></p><p class="micro">Uploaded ${fmtDateTime(latest.uploadedAt)} for ${esc(latest.order?.team || 'this case')}.</p>
         ${btn(icon('eye') + '<span>View photo</span>', 'data-load="after"', 'primary', 'btn-sm')}</div>
-        ${geoBlock(null, 'Location is not read from repair photos')}</figure>`
+        ${geoBlock(latest.gps, 'No GPS metadata supplied for the repair')}${distanceComparison(r.gps, latest.gps)}</figure>`
     : figure({title: 'After · repair evidence', url: null, emptyGeo: 'No GPS metadata supplied for the repair', emptyText: 'No repair evidence yet'});
 
   const transitions = r.allowedActions.filter(a => a.action === 'transition');
@@ -97,7 +135,15 @@ export async function renderServerCase(root, id) {
       <dl class="meta-list">
         <div><dt>Department</dt><dd>${r.assignment.department ? esc(r.assignment.department.name) : 'Not assigned (triage queue)'}</dd></div>
         <div><dt>Assigned to</dt><dd>${r.assignment.assignee ? `${esc(r.assignment.assignee.displayName)} (${esc(r.assignment.assignee.username)})` : 'Nobody yet'}</dd></div>
+        <div><dt>Ward</dt><dd>${r.ward ? `${esc(r.ward.number)} · ${esc(r.ward.name)} <small>${esc(r.ward.zone.name)} zone · ${esc(WARD_METHOD[r.wardAssignmentStatus])}</small>` : 'Unverified: no ward boundary data, so it is not set automatically'}</dd></div>
+        ${r.priority ? `<div><dt>Priority</dt><dd>${esc(r.priority)}${r.dueAt ? ` · due ${fmtDate(r.dueAt)}` : ''}</dd></div>` : ''}
       </dl>
+      ${can(r, 'set_ward') ? `<form id="ward-form" class="stack mt">
+        <h3>${r.ward ? 'Change ward' : 'Set ward'} <span class="optional">Audited · the reported GPS is kept</span></h3>
+        ${field('case-ward', 'Ward', '<select id="case-ward" required><option value="">Loading your wards…</option></select>')}
+        ${field('case-ward-reason', 'How the ward was confirmed', '<input id="case-ward-reason" required maxlength="500" placeholder="For example: GPS point checked against the ward map">')}
+        <div class="row-actions"><button type="submit" class="btn btn-secondary">${icon('pin')}<span>Save ward</span></button></div>
+      </form>` : ''}
       ${transitions.length ? `<form id="case-form" class="stack" novalidate>
         ${field('case-status', 'Lifecycle status', `<select id="case-status" name="to">${transitions.map(t => `<option value="${esc(t.to)}">${esc(t.label || t.to)} → ${esc(t.to)}</option>`).join('')}</select>`, `Now: ${esc(r.status)}. Only the changes the server allows you are listed.`)}
         ${field('case-explanation', 'Public explanation <span class="optional">Shown in public tracking · required for some changes</span>', '<textarea id="case-explanation" rows="2" maxlength="500" placeholder="What the public should know about this change"></textarea>')}
@@ -175,13 +221,24 @@ export async function renderServerCase(root, id) {
     <div class="detail-layout">
       <div class="stack">
         <section class="panel evidence-panel" aria-labelledby="evidence-title">
-          ${panelHead('Before and after', pill(r.verification, r.verification === 'Disputed' ? 'red' : 'neutral'), 'Private evidence')}
+          ${panelHead('Before and after', pill(r.verification, r.verification === 'Disputed' ? 'red' : 'neutral'), 'Case evidence')}
           <p class="micro">Original report and repair evidence stay linked to this case. Geo-tags show the source; a missing tag is stated, not filled in.</p>
-          <div class="evidence-pair" id="staff-evidence-view">${beforeFigure}${afterFigure}</div>
+          <div class="evidence-pair" id="staff-evidence-view">${beforeFigure}<div class="repair-column">${afterFigure}
+            <div class="repair-toolbar" aria-label="Add after-repair evidence">
+              <button type="button" class="btn btn-secondary" id="case-repair-upload-button">${icon('upload')}<span>Upload repair photo</span></button>
+              <input type="file" id="case-repair-upload" accept="image/jpeg" hidden>
+              ${btn(icon('camera') + '<span>Take repair photo</span>', 'id="case-repair-camera"', 'primary')}
+            </div>
+            <p class="micro">Repair photos become visible to everyone in public tracking when this case is marked resolved. Original private evidence remains private.</p>
+            <div id="repair-capture-slot"></div><div id="repair-message" role="status" aria-live="polite"></div>
+          </div></div>
           <h3 class="mt">Repair history</h3>
           ${repairHistory}
           <h3 class="mt">Verification history</h3>
           ${verificationHistory}
+        </section>
+        <section class="panel" id="case-ai" aria-label="AI analysis and repair verification">
+          ${aiSections()}
         </section>
         <section class="panel" aria-labelledby="reviews-title">
           ${panelHead('Community reviews', pill('Not on the server yet'), 'Neighbourhood perspective')}
@@ -195,6 +252,9 @@ export async function renderServerCase(root, id) {
         <section class="panel" aria-labelledby="history-title">
           ${panelHead('Assignment history and audit', '', 'Staff only')}
           ${r.assignmentHistory.length ? `<ol class="history-list">${r.assignmentHistory.slice().reverse().map(h => `<li><div class="tl-head"><strong>${esc(h.department)}${h.assignee ? ` · ${esc(h.assignee)}` : ''}</strong><time datetime="${esc(h.at)}">${fmtDateTime(h.at)}</time></div><p class="micro">${h.reason ? esc(h.reason) : 'No reason given'} · by ${esc(h.by)}</p></li>`).join('')}</ol>` : '<p class="micro">Not assigned yet.</p>'}
+          <h3 class="mt">Ward history</h3>
+          ${r.wardHistory.length ? `<ol class="history-list">${r.wardHistory.slice().reverse().map(h => `<li><div class="tl-head"><strong>${h.to ? `Ward ${esc(h.to)}` : 'No ward'} · ${esc(WARD_METHOD[h.method])}</strong><time datetime="${esc(h.at)}">${fmtDateTime(h.at)}</time></div><p class="micro">${h.from ? `From ward ${esc(h.from)} · ` : ''}${esc(h.reason)}${h.by ? ` · by ${esc(h.by)}` : ''}</p></li>`).join('')}</ol>` : '<p class="micro">No ward decision recorded.</p>'}
+          ${r.allocations.length ? `<h3 class="mt">Allocations</h3><ol class="history-list">${r.allocations.slice().reverse().map(a => `<li><div class="tl-head"><strong>${esc(a.kind === 'reallocated' ? 'Reallocated' : 'Allocated')} to ${esc(a.to.assignee || '—')} · ${esc(a.to.priority || '')}${a.to.dueAt ? ` · due ${fmtDate(a.to.dueAt)}` : ''}</strong><time datetime="${esc(a.at)}">${fmtDateTime(a.at)}</time></div><p class="micro">${a.from.assignee ? `Previously ${esc(a.from.assignee)} · ` : ''}${esc(a.reason)} · by ${esc(a.by)}</p></li>`).join('')}</ol>` : ''}
           <h3 class="mt">Evidence access log</h3>
           <div id="staff-access-log"><p class="micro">${r.evidence ? 'Loading…' : 'No evidence, so no access.'}</p></div>
           <h3 class="mt">Audit trail</h3>
@@ -244,18 +304,102 @@ function wire(root, http, r, latest) {
       fail(err, fig.querySelector('.evidence-empty'));
     }
   };
+  // AI analysis and repair verification (app/ai): suggestions for staff, loaded with the staff session.
+  // The before/after viewers use the same staff evidence endpoints, so each view is in the access log.
+  const showInto = async (target, load, evidenceId, alt) => {
+    target.innerHTML = '<p class="micro" role="status">Loading evidence…</p>';
+    try {
+      const blob = await load();
+      if (!target.isConnected) return;
+      const url = objectURL(blob);
+      target.innerHTML = blob.type.startsWith('video/')
+        ? `<video class="receipt-media" controls playsinline src="${url}" aria-label="${esc(alt)}"></video>`
+        : `<img class="receipt-media" src="${url}" alt="${esc(alt)}">`;
+      overlayDetections(target, evidenceId);
+      target.insertAdjacentHTML('beforeend', '<p class="micro">Viewing is recorded in the evidence access log.</p>');
+      loadAccessLog(http, r);
+    } catch (err) {
+      fail(err, target);
+    }
+  };
+  mountAiPanels(http, r, {
+    onError: (err, slot) => fail(err, slot),
+    viewOriginal: (target, evidenceId) => showInto(target, () => http.fetchStaffEvidence(token(), r.id), evidenceId, 'Original evidence'),
+    viewAfter: (target, workOrderId, evidenceId) => showInto(target, () => (workOrderId ? http.fetchWorkOrderEvidence(token(), workOrderId, evidenceId) : http.fetchCaseRepairEvidence(token(), r.id, evidenceId)), evidenceId, 'After-repair evidence')
+  });
+
   root.querySelector('[data-load="before"]')?.addEventListener('click', () => show('figure-before', () => http.fetchStaffEvidence(token(), r.id),
-    r.mediaType, r.gps, r.capturedAt, r.uploadedAt, 'Reported', 'Before · reported issue'));
-  root.querySelector('[data-load="after"]')?.addEventListener('click', () => show('figure-after', () => http.fetchWorkOrderEvidence(token(), latest.order.id, latest.evidenceId),
-    'photo', null, null, latest.uploadedAt, 'Repair', 'After · repair evidence'));
+    r.mediaType, r.gps, r.capturedAt, r.uploadedAt, 'Reported', 'Before — reported issue'));
+  root.querySelector('[data-load="after"]')?.addEventListener('click', () => show('figure-after', () => (latest.order ? http.fetchWorkOrderEvidence(token(), latest.order.id, latest.evidenceId) : http.fetchCaseRepairEvidence(token(), r.id, latest.evidenceId)),
+    'photo', latest.gps, latest.capturedAt, latest.uploadedAt, 'Repair', 'After — repair evidence'));
   root.querySelectorAll('[data-repair]').forEach(b => b.addEventListener('click', async () => {
     try {
-      const blob = await http.fetchWorkOrderEvidence(token(), b.dataset.order, b.dataset.repair);
+      const blob = await (b.dataset.order ? http.fetchWorkOrderEvidence(token(), b.dataset.order, b.dataset.repair) : http.fetchCaseRepairEvidence(token(), r.id, b.dataset.repair));
       openLightbox(objectURL(blob), 'Repair evidence');
       loadAccessLog(http, r);
     } catch (err) { fail(err); }
   }));
+  root.querySelectorAll('[data-stamp]').forEach(b => b.addEventListener('click', async () => {
+    b.setAttribute('disabled', '');
+    try {
+      const evId = b.dataset.stamp;
+      const orderId = b.dataset.order;
+      const blob = await (orderId ? http.fetchWorkOrderEvidence(token(), orderId, evId) : http.fetchCaseRepairEvidence(token(), r.id, evId));
+      const evItem = repairs.find(x => x.evidenceId === evId);
+      const ref = await evidenceRef(blob);
+      const stampedBlob = await renderStampedPhoto(blob, {
+        complaintId: r.id,
+        evidenceRef: ref,
+        includeLocation: true,
+        gps: evItem?.gps || null,
+        address: evItem?.gps?.address || null,
+        capturedAt: evItem?.capturedAt || evItem?.uploadedAt || null
+      });
+      openLightbox(objectURL(stampedBlob), 'Stamped repair evidence');
+      loadAccessLog(http, r);
+    } catch (err) { fail(err); } finally { b.removeAttribute('disabled'); }
+  }));
   if (r.evidence) loadAccessLog(http, r);
+
+  const uploadRepair = async (file, userMeta = null) => {
+    const slot = $('repair-message');
+    const controls = root.querySelectorAll('.repair-toolbar input, .repair-toolbar button');
+    controls.forEach(el => { el.disabled = true; });
+    if (slot) slot.textContent = 'Uploading repair evidence…';
+    try {
+      if (!file || file.type !== 'image/jpeg') throw new Error('Choose a JPEG photo. Use Take repair photo to capture a JPEG.');
+      if (file.size > 20 * 1024 * 1024) throw new Error('Choose a photo smaller than 20 MB.');
+      let meta = userMeta;
+      if (!meta) {
+        const info = await inspectJpegFile(file);
+        meta = {};
+        if (info.gps && Number.isFinite(info.gps.lat) && Number.isFinite(info.gps.lng)) {
+          meta.gps = {lat: info.gps.lat, lng: info.gps.lng, accuracy: null, source: 'EXIF', sourceType: 'gps'};
+        }
+        if (info.captureTime) {
+          meta.capturedAt = info.captureTime;
+        }
+      }
+      await http.uploadCaseRepairEvidence(token(), r.id, file, meta);
+      toast('Repair photo saved. It will be public once the case is marked resolved.', 'success');
+      rerender();
+    } catch (err) {
+      controls.forEach(el => { el.disabled = false; });
+      if (slot?.isConnected) slot.innerHTML = notice(esc(err.message || 'The repair photo could not be uploaded.'), 'error', 'alert');
+    }
+  };
+  $('case-repair-upload-button')?.addEventListener('click', () => $('case-repair-upload').click());
+  $('case-repair-upload')?.addEventListener('change', e => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) uploadRepair(file);
+  });
+  let closeCamera = null;
+  addCleanup(() => closeCamera?.());
+  $('case-repair-camera')?.addEventListener('click', () => {
+    closeCamera?.();
+    closeCamera = mountRepairCapture($('repair-capture-slot'), uploadRepair);
+  });
 
   $('case-form')?.addEventListener('submit', e => {
     e.preventDefault();
@@ -269,6 +413,18 @@ function wire(root, http, r, latest) {
       departments.innerHTML = '<option value="">Choose a department</option>' + list.map(d => `<option value="${esc(d.code)}" ${r.assignment.department?.code === d.code ? 'selected' : ''}>${esc(d.name)}</option>`).join('');
     }).catch(err => fail(err));
   }
+  if ($('ward-form')) {
+    http.supervisorScope(token()).then(scope => {
+      const select = $('case-ward');
+      if (!select?.isConnected) return;
+      select.innerHTML = '<option value="">Choose a ward</option>' + scope.zones.map(z => `<optgroup label="${esc(z.name)} zone">${z.wards.map(w =>
+        `<option value="${w.number}" ${r.ward?.number === w.number ? 'selected' : ''}>${w.number} · ${esc(w.name)}</option>`).join('')}</optgroup>`).join('');
+    }).catch(err => fail(err));
+  }
+  $('ward-form')?.addEventListener('submit', e => {
+    e.preventDefault();
+    run(e.submitter, () => http.setComplaintWard(token(), r.id, {ward: Number(value('case-ward')), reason: value('case-ward-reason')}), 'Ward saved.');
+  });
   $('assign-form')?.addEventListener('submit', e => {
     e.preventDefault();
     run(e.submitter, () => http.assignComplaint(token(), r.id, {department: value('case-department'), assignee: value('case-assignee').toLowerCase() || null,
@@ -299,9 +455,20 @@ function wire(root, http, r, latest) {
     if (to && order) run(e.target.closest('button'), () => http.changeWorkOrder(token(), order.id, {to, expectedStatus: order.status, note: value('wo-note')}),
       `Work order ${to === 'In Progress' ? 'started' : to.toLowerCase()}.`);
   });
-  $('work-orders')?.addEventListener('change', e => {
+  $('work-orders')?.addEventListener('change', async e => {
     const file = e.target.closest('[data-wo-upload]')?.files?.[0];
-    if (file) run(null, () => http.uploadRepairEvidence(token(), e.target.closest('[data-work-order]').dataset.workOrder, file), 'After-repair photo uploaded.');
+    const orderId = e.target.closest('[data-work-order]')?.dataset.workOrder;
+    if (file && orderId) {
+      const info = await inspectJpegFile(file);
+      const meta = {};
+      if (info.gps && Number.isFinite(info.gps.lat) && Number.isFinite(info.gps.lng)) {
+        meta.gps = {lat: info.gps.lat, lng: info.gps.lng, accuracy: null, source: 'EXIF', sourceType: 'gps'};
+      }
+      if (info.captureTime) {
+        meta.capturedAt = info.captureTime;
+      }
+      run(null, () => http.uploadRepairEvidence(token(), orderId, file, meta), 'After-repair photo uploaded.');
+    }
   });
   $('case-load-audit')?.addEventListener('click', async () => {
     const slot = $('case-audit');

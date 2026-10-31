@@ -5,6 +5,8 @@ Two ways to prove ownership, both separate from staff authorisation:
 - POST /complaints/{id}/evidence/view {"claim"}: the private claim code from the receipt, sent in the
   JSON body (never in the URL). Works for a passerby without an account.
 - GET /residents/me/complaints/{id}/evidence: a resident session whose account owns the complaint.
+- GET /residents/me/complaints/{id}/evidence/{evidenceId}: one file (the original report or an after-repair
+  photo) of a complaint the resident owns; My Complaints uses it (views/my-complaints.js).
 
 The browser fetches the bytes and shows them from a blob: URL, so no credential or storage URL is ever
 put in a link. Both routes are rate-limited before the claim-code or ownership check, and every view is
@@ -16,6 +18,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from .auth import _DUMMY_HASH
+from .cases_api import EVIDENCE_ID
 from .claims import verify_claim_code
 from .complaints import PUBLIC_ID_PATTERN
 from .errors import ApiProblem
@@ -63,3 +66,20 @@ def view_own_evidence(public_id: str, request: Request, resident: dict = Depends
     if ref is None or store.owner_of(public_id) != resident["pk"]:
         raise ApiProblem(404, "not_found", "None of your complaints has that ID.")
     return _stream(request, public_id, ref["pk"], "resident", resident["residentId"])
+
+
+@router.get("/residents/me/complaints/{public_id}/evidence/{evidence_id}")
+def view_own_evidence_file(public_id: str, evidence_id: str, request: Request, resident: dict = Depends(current_resident)) -> StreamingResponse:
+    """One evidence file (original or after-repair) of a complaint the signed-in resident owns. Any other
+    complaint or file is 404, whether or not it exists. Rate-limited and audited like the other owner routes."""
+    enforce(request, "owner_evidence_per_ip", "ip")
+    store = request.app.state.store
+    evidence = None
+    if PUBLIC_ID_PATTERN.fullmatch(public_id) and EVIDENCE_ID.fullmatch(evidence_id):
+        evidence = store.resident_evidence(resident["pk"], public_id, evidence_id)
+    if evidence is None:
+        raise ApiProblem(404, "evidence_not_found", "None of your complaints has that evidence file.")
+    ip = client_ip(request, request.app.state.rate_limit_settings.trusted_proxies)
+    return open_and_stream(request, evidence, f"{public_id}-{evidence['role']}",
+                           lambda: store.log_owner_evidence_view(evidence["complaintPk"], evidence["evidenceId"], "resident",
+                                                                resident["residentId"], ip))

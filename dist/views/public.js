@@ -3,7 +3,7 @@ import {api, esc, DEMO_PASSWORD} from '../services.js';
 import {icon, btn, statusPill, verificationPill, heading, notice, publicTopbar, fmtDate, fmtDateTime, toast, panel, logo, categoryIcon, openLightbox} from '../ui.js';
 import {figure, objectURL} from './issue.js';
 import {setSession, viewer} from '../state.js';
-import {navigate} from '../router.js';
+import {navigate, takeResidentDestination} from '../router.js';
 import {reportMode, trackPublic, respondToResolution} from '../report-gateway.js';
 import {staffSession} from '../staff-session.js';
 import {residentSession} from '../resident-session.js';
@@ -30,12 +30,12 @@ export async function renderEntry(root) {
   const adminCard = server
     ? `<a class="entry-card entry-link" href="#/login/official" data-entry="staff">
           <span class="entry-icon">${icon('shield')}</span>
-          <div><p class="eyebrow">Civic operations · staff account</p><h2>Login as admin</h2><p>Dashboard, incident management and city map of the complaints on the CivicLens server, with their private evidence.</p></div>
+          <div><p class="eyebrow">Municipal operations · staff account</p><h2>Staff, supervisor & admin</h2><p>Incident triage, work orders, city map, and supervisor ward operations for authorized municipal staff.</p></div>
           <span class="entry-go">${icon('forward')}</span>
         </a>`
     : `<a class="entry-card entry-link" href="#/login/official">
           <span class="entry-icon">${icon('shield')}</span>
-          <div><p class="eyebrow">Civic operations</p><h2>Login as admin</h2><p>Incident management, assignments, work orders, video review and decision support.</p></div>
+          <div><p class="eyebrow">Civic operations</p><h2>Login as admin / staff</h2><p>Incident management, assignments, work orders, video review and decision support.</p></div>
           <span class="entry-go">${icon('forward')}</span>
         </a>`;
   root.innerHTML = `<div class="page page-entry">
@@ -131,9 +131,11 @@ async function renderServerTrack(root, id) {
       + trackResult(record, false)
       + (record.status === 'Marked Resolved' && !record.mergedInto ? verifyForm(record) : '')
       + `<p class="mt"><a class="btn btn-secondary" href="#/notifications/follow/${esc(record.id)}" id="track-notify">${icon('bell')}<span>Get notified about this report</span></a> <span class="micro">Needs the private claim code from the receipt.</span></p>`
-      + ownerEvidence(record);  // the reporter's own evidence; a merged duplicate keeps its own record and evidence
+      + publicEvidencePanel(record)
+      + ownerEvidence(record);
     wireVerifyForm(root, record);
     wireOwnerEvidence(root, record);
+    wirePublicEvidence(root, record);
   }
 }
 
@@ -145,7 +147,7 @@ function ownerEvidence(r) {
   const signedIn = !!residentSession.get();
   return `<section class="panel mt" id="owner-evidence" aria-labelledby="owner-evidence-title">
       <h2 id="owner-evidence-title">Your photo or video</h2>
-      <p class="micro">Only the person who reported this complaint, and CivicLens staff, can see its evidence. It is never shown publicly.</p>
+      <p class="micro">Private originals stay available to the reporter and staff.</p>
       <div class="evidence-pair"><figure class="evidence-figure" id="owner-figure"><figcaption><span>Reported issue</span><span class="pill">Private</span></figcaption>
         <div class="evidence-empty">${categoryIcon(r.category)}<p><strong>Private evidence</strong></p>
           ${signedIn ? btn(icon('eye') + '<span>View from my account</span>', 'id="owner-evidence-account"', 'primary', 'btn-sm') : ''}
@@ -318,21 +320,24 @@ export async function renderLogin(root, role = 'resident', register = false) {
 // The session token stays in this tab's memory only (staff-session.js); the dashboard, incident list
 // and city map then show the complaints stored on the server.
 function renderServerAdminLogin(root) {
-  if (staffSession.get()) return navigate('official');
+  if (staffSession.get()) {
+    const staffRole = staffSession.get()?.staff?.role;
+    return navigate(staffRole === 'supervisor' ? 'official/supervisor' : 'official');
+  }
   root.innerHTML = `<div class="page">
     ${publicTopbar({fallback: 'home'})}
     <main id="main" class="narrow" tabindex="-1">
       <section class="panel auth-panel" aria-labelledby="login-title">
         <p class="pill pill-coral">${icon('shield', 'pill-icon')}<span>Civic operations · server account</span></p>
         <h1 id="login-title" tabindex="-1">Civic operations sign-in</h1>
-        <p class="lead">Sign in with the staff account created for you on the CivicLens server. Your dashboard, incident list and city map then show the complaints stored on the server.</p>
+        <p class="lead">Sign in with your municipal staff account. Official staff, supervisors, and administrators access incident management, city map, and supervisor ward operations based on server-side permissions.</p>
         <form id="login-form" class="stack" data-server-login autocomplete="on">
-          <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required maxlength="64" spellcheck="false"></div>
-          <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256"></div>
+          <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required maxlength="64" spellcheck="false" placeholder="Your username"></div>
+          <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="Your password"></div>
           <div id="login-error" role="alert"></div>
           <button class="btn btn-primary btn-block btn-lg" type="submit">Sign in ${icon('forward')}</button>
         </form>
-        ${notice('Your session is kept only in this tab’s memory: reloading or closing the page signs you out. Staff accounts are created by an administrator with <code>python -m app.staff create</code>.', 'info', 'lock', 'mt')}
+        ${notice('Staff accounts are assigned one of three roles: <strong>Official staff</strong> (department incident management), <strong>Supervisor</strong> (zone/ward dashboard and bulk allocation), or <strong>Admin</strong> (city-wide operations). Sessions live in-memory only.', 'info', 'shield', 'mt')}
         <div class="auth-foot"><a class="inline-link" href="#/login/resident">Resident? Use resident sign-in</a> <a class="inline-link" href="#/my-reports">Reported without an account? Open Reports on This Device</a></div>
       </section>
     </main>
@@ -348,7 +353,11 @@ function renderServerAdminLogin(root) {
       residentSession.clear();  // one identity per tab: a staff sign-in ends any resident session held here
       setSession({role: 'official', name: session.staff.displayName, email: session.staff.username, server: true});
       toast(`Signed in as ${session.staff.displayName}.`, 'success');
-      navigate('official');
+      if (session.staff?.role === 'supervisor') {
+        navigate('official/supervisor');
+      } else {
+        navigate('official');
+      }
     } catch (err) {
       submit.disabled = false;
       e.target.querySelector('#login-password').value = '';
@@ -400,7 +409,7 @@ function renderServerResidentLogin(root, register = false) {
       staffSession.clear();  // one identity per tab: a resident sign-in ends any staff session held here
       setSession({role: 'resident', name: session.resident.displayName, email: session.resident.email, server: true});
       toast(`Signed in as ${session.resident.displayName}.`, 'success');
-      navigate('resident');
+      navigate(takeResidentDestination());  // back to the page that asked for sign-in
     } catch (err) {
       submit.disabled = false;
       e.target.querySelector('#login-password').value = '';
@@ -410,3 +419,46 @@ function renderServerResidentLogin(root, register = false) {
 }
 
 export {logo, panel, btn};
+
+
+function publicEvidencePanel(r) {
+  const evidence = r.publicEvidence || [];
+  const makeFigure = phase => {
+    const e = evidence.filter(e => e.phase === phase).at(-1);
+    const title = phase === 'before' ? 'Before · reported issue' : 'After · repair evidence';
+    return `<figure class="evidence-figure" data-public-phase="${phase}"><figcaption>${title}</figcaption>
+      <div class="evidence-empty">${icon(phase === 'before' ? 'camera' : 'check')}
+        ${e ? `<p>${phase === 'after' ? 'Latest repair photo' : 'Evidence shared by the reporter'}</p>${btn(icon('eye') + '<span>View evidence</span>', `data-public-evidence="${esc(e.evidenceId)}"`, 'secondary', 'btn-sm')}`
+          : `<p>${phase === 'before' ? 'Original evidence was not shared publicly.' : r.status === 'Marked Resolved' ? 'No repair photo has been uploaded yet.' : 'Repair evidence is published when the case is marked resolved.'}</p>`}
+      </div></figure>`;
+  };
+  return `<section class="panel mt" id="public-evidence"><h2>Before and after</h2><p class="micro">Compare the reported issue with the completed repair. Original evidence is public only when the reporter chose to share it.</p>
+    <div class="evidence-pair">${makeFigure('before')}${makeFigure('after')}</div>
+    ${evidence.filter(e => e.phase === 'after').length > 1 ? `<details class="mt"><summary>Earlier repair photos</summary><div class="row-actions">${evidence.filter(e => e.phase === 'after').slice(0, -1).reverse().map(e => btn('Repair · ' + fmtDateTime(e.uploadedAt), `data-public-evidence="${esc(e.evidenceId)}"`, 'ghost', 'btn-sm')).join('')}</div></details>` : ''}
+    <div data-public-evidence-error role="status" aria-live="polite"></div></section>`;
+}
+
+function wirePublicEvidence(root, r) {
+  const section = root.querySelector('#public-evidence');
+  if (!section) return;
+  section.querySelectorAll('[data-public-evidence]').forEach(button => button.onclick = async () => {
+    const e = r.publicEvidence.find(e => e.evidenceId === button.dataset.publicEvidence);
+    button.disabled = true;
+    const errors = section.querySelector('[data-public-evidence-error]');
+    errors.textContent = '';
+    try {
+      const blob = await (await serverClient()).fetchPublicEvidence(r.id, e.evidenceId);
+      if (!section.isConnected) return;
+      const url = objectURL(blob);
+      const fig = button.closest('figure');
+      if (!fig) { openLightbox(url, 'Earlier repair evidence'); return; }
+      const title = e.phase === 'before' ? 'Before · reported issue' : 'After · repair evidence';
+      fig.outerHTML = figure({title, url, mediaType: e.mediaType, uploaded: e.uploadedAt, captured: e.capturedAt, label: 'Shared evidence', altText: title});
+      section.querySelectorAll('.geo-caption').forEach(el => el.remove());
+      section.querySelectorAll('[data-enlarge]').forEach(b => b.onclick = () => openLightbox(b.dataset.enlarge, b.dataset.alt));
+    } catch (err) {
+      if (section.isConnected) errors.innerHTML = notice(esc(err.message || 'Evidence could not be loaded.'), 'error', 'alert');
+    } finally { button.disabled = false; }
+  });
+  section.querySelectorAll('figure [data-public-evidence]').forEach(button => button.click());
+}

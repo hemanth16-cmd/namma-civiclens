@@ -111,6 +111,14 @@ Roles: `official` (complaints in their departments, their own assignments, and t
 
 `GET /api/v1/complaints/{id}` (public) keeps its shape: the timeline now includes public updates and lifecycle explanations, and `verificationLog` is filled, always with generic actors ("Citizen", "Civic team"). It never contains internal notes, staff names, work-order details, completion notes, evidence IDs or coordinates (tested). Not built yet: repairs as a separate resource (after-repair photos belong to work orders), reviews, owner accounts and claiming.
 
+### 2.4 Implemented: a resident's own complaints and evidence (My Complaints)
+
+`GET /api/v1/residents/me/complaints` and `GET /api/v1/residents/me/complaints/{id}` (resident session; ownership is decided by the server from the session, never from the request) now include `evidence`: one entry per file of that complaint (`evidenceId, role` = `original` | `repair`, `mediaType, contentType, byteSize, capturedAt, uploadedAt`), the original report first, then after-repair photos the civic team attached. No storage key, storage backend, path or URL.
+
+`GET /api/v1/residents/me/complaints/{id}/evidence/{evidenceId}` streams that file to its owner (`no-store`, `nosniff`, sandboxed), from the storage backend that holds it (Supabase Storage or local). The bucket stays private and no signed or public link is issued. Another resident's complaint or file, an unknown file, or a malformed ID is `404`; a file this server cannot reach is `404 evidence_unavailable`; storage outages are `503`. Staff views of evidence are still written to the evidence access log; an owner viewing their own file is not.
+
+The resident app's My Complaints page (`#/resident/complaints`) and its detail view (`#/resident/complaints/{id}`) use only these endpoints. Community issues use `GET /complaints`, and public tracking (`#/track/{id}`) uses `GET /complaints/{id}`.
+
 ### 2.3 Implemented: community list across Bengaluru
 
 `GET /api/v1/complaints?category=&area=&status=&limit=&offset=` (anonymous, rate-limited like tracking) lists every complaint inside the Bengaluru service area (12.75–13.3° N, 77.35–77.9° E, the same box as `dist/exif.js`), newest first, `limit` ≤ 100. It returns the public-tracking allowlist without the timeline: `id, title, category, area, status, verification, department, created, updated`, plus `mapPoint`: an **approximate** position (`{lat, lng, precision: "approx-110m"}`, rounded to 3 decimal places, about 110 m), or `null` when the stored coordinates are unusable. Never the exact GPS fix, description, evidence, reporter or claim data. The resident Community page and the resident neighbourhood map (full page and overview) both read this list, so they show the same Bengaluru-wide dataset; My Complaints stays on `GET /residents/me/complaints` (owner-scoped from the session). Reports merged into another as duplicates are left out. `facets.categories` and `facets.areas` count every listed complaint by issue type and neighbourhood, ignoring the filters, and feed the filter menus on the resident Community issues page (server mode). Complaints outside the service area (for example test data) are not listed.
@@ -192,11 +200,58 @@ Lifecycle and verification are independent fields with separate append-only logs
 | --- | --- | --- |
 | `GET /api/v1/priority/{complaintId}` | Normalised priority score with visible contributions (severity, exposure, unresolved time, recurrence) and separate evidence confidence | Implemented in the prototype; inputs illustrative |
 | `GET /api/v1/hotspots/outlook` | 30-day ward/category activity versus historical baseline | Proposed; not connected or trained |
-| `POST /api/v1/vision/road-damage` | Road-damage detection on images (YOLO11n proposed) | Proposed; not connected or trained |
+| `POST /api/v1/vision/road-damage` | Road-damage detection on images | Superseded by §8.1 (detection runs on stored evidence, not on an open endpoint) |
 | `POST /api/v1/incidents/link-suggestions` | Suggested duplicates for human review; never auto-merges | Proposed; not connected |
 | `POST /api/v1/scenarios/run` | Seeded Monte Carlo over labelled assumptions | Illustrative demo; exploratory |
 
 Techniques are not causal claims. Every response must carry its method, inputs, version and an uncertainty note, and no response may state a detection or confidence without a model behind it.
+
+### 8.1 Implemented (branch `feature/roboflow-ai-integration`): AI analysis and repair verification
+
+Staff routes need a staff bearer session; officials see only complaints in their scope (403 otherwise). Responses are `Cache-Control: no-store` and never contain storage keys, API keys, provider responses or the photos' EXIF data. Nothing here changes a complaint's status, verification or work orders. Errors use the usual envelope `{"error": {"code", "message"}}`.
+
+| Method and path | Who | Result |
+| --- | --- | --- |
+| `GET /api/v1/ai` | Public | `{enabled, disclosure}`: whether uploaded photos may be analysed by an external AI service, and the notice to show before upload |
+| `GET /api/v1/staff/complaints/{id}/ai` | Staff in scope | `{complaintId, category, ai, routing, inferences[]}` |
+| `POST /api/v1/staff/complaints/{id}/ai/retry` | Staff in scope | 202, same shape plus `reset` (failed jobs re-queued; missing ones created). 503 `ai_unavailable` when AI is off; 409 `no_evidence` |
+| `POST /api/v1/staff/complaints/{id}/verify-repair` | Staff in scope | Body `{}` or `{"repairEvidenceId": "ev_…"}` (default: latest repair photo). 202 `{complaintId, ai, assessments[]}`. The same pair is assessed once. 409 `no_original_evidence` / `no_repair_evidence`, 404 unknown repair photo, 422 `unsupported_media` (video original), 503 `ai_unavailable` |
+| `GET /api/v1/staff/complaints/{id}/repair-assessment` | Staff in scope | `{complaintId, ai, assessments[]}`, newest first |
+| `POST /api/v1/staff/complaints/{id}/repair-assessment/{assessmentId}/review` | Supervisor or admin, not the repair photo's uploader | Body `{"decision": "approved"|"rejected", "note"}` (note required to reject). Returns the assessment. 409 `assessment_not_ready` / `already_reviewed` |
+
+Repair photos are uploaded with the existing `POST /api/v1/staff/work-orders/{id}/evidence`; that upload now also schedules the analysis and an assessment automatically.
+
+Inference (`inferences[]`):
+
+```json
+{"id": "ai_…", "evidenceId": "ev_…", "evidenceRole": "original", "detector": "pavement", "provider": "roboflow",
+ "mechanism": "model", "modelId": "pavement-gvib5/1", "modelVersion": "1", "classPrompt": null,
+ "state": "completed", "originalClass": "pothole", "detectedCategory": "Potholes", "topConfidence": 0.91,
+ "detectionCount": 1, "imageWidth": 1000, "imageHeight": 750, "errorCode": null, "attempts": 1,
+ "detections": [{"className": "pothole", "category": "Potholes", "confidence": 0.91,
+                 "bbox": {"x": 425.0, "y": 367.5, "width": 150.0, "height": 90.0}, "polygon": [[x, y], …]}],
+ "confidence": {"max": 0.91, "mean": 0.91, "returned": 1, "mapped": 1, "present": 1, "presentThreshold": 0.5, "lowThreshold": 0.25},
+ "createdAt": "…", "startedAt": "…", "completedAt": "…"}
+```
+
+`state`: `pending`, `running`, `completed`, `failed` (with `errorCode`), `skipped` (e.g. `unsupported_media` for videos). `bbox` is the top-left corner and size in pixels of the upright original photo; `polygon` appears for segmentation results. For workflows, `modelId` is `<workspace>/<workflow_id>` and `modelVersion` is null.
+
+Assessment (`assessments[]`):
+
+```json
+{"id": "ra_…", "workOrderId": "wo_…", "originalEvidenceId": "ev_…", "repairEvidenceId": "ev_…",
+ "state": "completed", "suggestedOutcome": "likely_repaired", "verificationConfidence": 0.74,
+ "locationCheck": "match", "gpsDistanceM": 4.1, "errorCode": null, "attempts": 1, "requestedBy": null,
+ "details": {"reasons": ["…"], "gps": {"status": "match", "distanceM": 4.1, "reference": "complaint", "repairHasGps": true},
+             "visualMatch": "strong", "alignment": {"inliers": 952, "inlierRatio": 0.945, …},
+             "quality": {"original": {…}, "repair": {"brightness": 140.2, "sharpness": 210.0, "problems": [], "acceptable": true}},
+             "comparison": [{"detector": "pavement", "originalPresent": 1, "repairPresent": 0, …}],
+             "overlapsOriginalDamage": null, "thresholds": {…}},
+ "review": {"status": "pending_review", "reviewer": null, "reviewerName": null, "note": "", "reviewedAt": null},
+ "verifiedResolution": "unverified", "createdAt": "…", "completedAt": "…", "updatedAt": "…"}
+```
+
+`suggestedOutcome`: `likely_repaired`, `damage_visible`, `inconclusive` (null until completed). `state` `failed` with `errorCode` `inference_failed` means an analysis it needed failed; `POST …/ai/retry` re-runs both. `requestedBy` is null when the assessment was created automatically by a repair upload. `verificationConfidence` is about the comparison, not the model, and is null for `inconclusive`. `verifiedResolution` is `verified_repaired` only after a supervisor approves a `likely_repaired` suggestion; it never changes `status`.
 
 ## 9. Notifications
 

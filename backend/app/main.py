@@ -12,6 +12,10 @@ from pathlib import Path
 from fastapi import APIRouter, FastAPI
 
 from . import API_VERSION, APP_VERSION, SERVICE_NAME
+from .ai.model_registry import AiSettings
+from .ai.service import AiService
+from .ai_api import public_router as ai_public_router
+from .ai_api import router as ai_router
 from .cases_api import router as cases_router
 from .complaints import router as complaints_router
 from .cors import install_cors, resolve_cors_origins
@@ -28,6 +32,8 @@ from .notifications_api import router as notifications_router
 from .push import DEFAULT_ENDPOINT_HOSTS, PushSender, PushSettings, WebPushSender
 from .supabase_storage import SupabaseEvidenceStorage, SupabaseSettings, selected_backend
 from .staff_api import router as staff_router
+from .supervisor_api import router as supervisor_router
+from .intelligence.api import router as intelligence_router
 from .quota import EvidenceQuota, quota_from_env
 from .ratelimit import InMemoryRateLimiter, RateLimiter, RateLimitSettings
 from .store import DEFAULT_REPLAY_WINDOW, DEFAULT_UPLOAD_TOKEN_TTL, ComplaintStore
@@ -63,6 +69,9 @@ def create_app(
     resident_session_ttl: timedelta | None = None,
     push_settings: PushSettings | None = None,
     push_sender: PushSender | None = None,
+    ai_settings: AiSettings | None = None,
+    ai_provider=None,
+    ai_executor=None,
 ) -> FastAPI:
     """Build the app. The database is chosen by DATABASE_BACKEND: sqlite (default; the file is `db_path`,
     else CIVICLENS_DB_PATH, else backend/data/civiclens.sqlite3) or postgres (DATABASE_URL; `db_path`
@@ -116,6 +125,10 @@ def create_app(
     if push_sender is None and push_settings is not None:
         push_sender = WebPushSender(push_settings)
     notifier = Notifier(store, push_sender if push_settings is not None else None)
+    # AI analysis (app/ai): off unless CIVICLENS_AI_PROVIDER=roboflow and ROBOFLOW_API_KEY are set.
+    # Tests pass ai_settings, a fake ai_provider and an inline ai_executor.
+    ai = AiService(store, evidence_storages, ai_settings if ai_settings is not None else AiSettings.from_env(),
+                   provider=ai_provider, executor=ai_executor)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -126,7 +139,9 @@ def create_app(
         # across all configured backends.
         evidence_quota.load(store.total_evidence_bytes(), sum(s.stored_bytes() for s in evidence_storages.values()))
         store.prune_push_subscriptions(MAX_FAILURES)  # expired or repeatedly failing devices
+        ai.start()  # resume AI jobs left pending by a previous run
         yield
+        ai.shutdown()
         if owns_store:
             store.close()  # returns pooled PostgreSQL connections; no-op for SQLite
 
@@ -151,6 +166,7 @@ def create_app(
     app.state.push_settings = push_settings
     app.state.push_endpoint_hosts = push_settings.endpoint_hosts if push_settings else DEFAULT_ENDPOINT_HOSTS
     app.state.notifier = notifier
+    app.state.ai = ai
     install_error_handlers(app)
     install_cors(app, origins)
 
@@ -162,7 +178,11 @@ def create_app(
     router.include_router(residents_router)
     router.include_router(owner_evidence_router)
     router.include_router(cases_router)
+    router.include_router(supervisor_router)
+    router.include_router(ai_router)
+    router.include_router(ai_public_router)
     router.include_router(notifications_router)
+    router.include_router(intelligence_router)
     app.include_router(router)
     return app
 

@@ -1,0 +1,1599 @@
+{
+ "source": "e-Aasthi, 'Ward list of all zones' (bbmpeaasthi.karnataka.gov.in/frmWardListbyZone.aspx), printed 2026-10-30; e-Aasthi.pdf supplied by the project team",
+ "extracted": "2026-10-31",
+ "note": "Ward list only: no boundary geometry. Values are as printed; nothing corrected. Zone 20 / ward 298 is the GBA testing entry, not an operational ward.",
+ "wards": [
+  {
+   "serial": 1,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 5,
+   "ward_name": "Jakkur",
+   "testing": false
+  },
+  {
+   "serial": 2,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 6,
+   "ward_name": "Thanisandra",
+   "testing": false
+  },
+  {
+   "serial": 3,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 7,
+   "ward_name": "Byatarayanapura",
+   "testing": false
+  },
+  {
+   "serial": 4,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 8,
+   "ward_name": "Kodigehalli",
+   "testing": false
+  },
+  {
+   "serial": 5,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 9,
+   "ward_name": "Vidyaranyapura",
+   "testing": false
+  },
+  {
+   "serial": 6,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 10,
+   "ward_name": "Doddabommasandra",
+   "testing": false
+  },
+  {
+   "serial": 7,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 11,
+   "ward_name": "Kuvempunagar",
+   "testing": false
+  },
+  {
+   "serial": 8,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 23,
+   "ward_name": "Nagavara",
+   "testing": false
+  },
+  {
+   "serial": 9,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 24,
+   "ward_name": "HBR Layout",
+   "testing": false
+  },
+  {
+   "serial": 10,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 27,
+   "ward_name": "Banasawadi",
+   "testing": false
+  },
+  {
+   "serial": 11,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 28,
+   "ward_name": "Kammanahalli",
+   "testing": false
+  },
+  {
+   "serial": 12,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 29,
+   "ward_name": "Kacharakanahalli",
+   "testing": false
+  },
+  {
+   "serial": 13,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 30,
+   "ward_name": "Kadugondanahalli",
+   "testing": false
+  },
+  {
+   "serial": 14,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 31,
+   "ward_name": "Kushalnagar",
+   "testing": false
+  },
+  {
+   "serial": 15,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 32,
+   "ward_name": "Kavalbyrasandra",
+   "testing": false
+  },
+  {
+   "serial": 16,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 47,
+   "ward_name": "Devarajeevanahalli",
+   "testing": false
+  },
+  {
+   "serial": 17,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 48,
+   "ward_name": "Muneshwaranagar",
+   "testing": false
+  },
+  {
+   "serial": 18,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 49,
+   "ward_name": "Lingarajapura",
+   "testing": false
+  },
+  {
+   "serial": 19,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 59,
+   "ward_name": "Maruthiseva Nagar",
+   "testing": false
+  },
+  {
+   "serial": 20,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 60,
+   "ward_name": "Sagayapuram",
+   "testing": false
+  },
+  {
+   "serial": 21,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 61,
+   "ward_name": "S.K. Garden",
+   "testing": false
+  },
+  {
+   "serial": 22,
+   "zone_number": 1,
+   "zone_name": "Byatarayanapura",
+   "ward_number": 78,
+   "ward_name": "Pulikeshinagar",
+   "testing": false
+  },
+  {
+   "serial": 23,
+   "zone_number": 2,
+   "zone_name": "Mahadevapura",
+   "ward_number": 54,
+   "ward_name": "Hoodi",
+   "testing": false
+  },
+  {
+   "serial": 24,
+   "zone_number": 2,
+   "zone_name": "Mahadevapura",
+   "ward_number": 82,
+   "ward_name": "Garudacharpalya",
+   "testing": false
+  },
+  {
+   "serial": 25,
+   "zone_number": 2,
+   "zone_name": "Mahadevapura",
+   "ward_number": 83,
+   "ward_name": "Kadugodi",
+   "testing": false
+  },
+  {
+   "serial": 26,
+   "zone_number": 2,
+   "zone_name": "Mahadevapura",
+   "ward_number": 84,
+   "ward_name": "Hagadooru",
+   "testing": false
+  },
+  {
+   "serial": 27,
+   "zone_number": 2,
+   "zone_name": "Mahadevapura",
+   "ward_number": 85,
+   "ward_name": "Doddanekkundi",
+   "testing": false
+  },
+  {
+   "serial": 28,
+   "zone_number": 2,
+   "zone_name": "Mahadevapura",
+   "ward_number": 86,
+   "ward_name": "Marathalli",
+   "testing": false
+  },
+  {
+   "serial": 29,
+   "zone_number": 2,
+   "zone_name": "Mahadevapura",
+   "ward_number": 149,
+   "ward_name": "Varthur",
+   "testing": false
+  },
+  {
+   "serial": 30,
+   "zone_number": 2,
+   "zone_name": "Mahadevapura",
+   "ward_number": 150,
+   "ward_name": "Bellandur",
+   "testing": false
+  },
+  {
+   "serial": 31,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 1,
+   "ward_name": "Kempegowda Ward",
+   "testing": false
+  },
+  {
+   "serial": 32,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 2,
+   "ward_name": "Chowdeshwari Ward",
+   "testing": false
+  },
+  {
+   "serial": 33,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 3,
+   "ward_name": "Attur",
+   "testing": false
+  },
+  {
+   "serial": 34,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 4,
+   "ward_name": "Yelahanka Satellite town",
+   "testing": false
+  },
+  {
+   "serial": 35,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 12,
+   "ward_name": "SHETTY HALLI",
+   "testing": false
+  },
+  {
+   "serial": 36,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 13,
+   "ward_name": "Mallasandra",
+   "testing": false
+  },
+  {
+   "serial": 37,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 14,
+   "ward_name": "Bagalagunte",
+   "testing": false
+  },
+  {
+   "serial": 38,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 15,
+   "ward_name": "T. Dasarahalli",
+   "testing": false
+  },
+  {
+   "serial": 39,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 16,
+   "ward_name": "Jalahalli",
+   "testing": false
+  },
+  {
+   "serial": 40,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 17,
+   "ward_name": "J.P.Park",
+   "testing": false
+  },
+  {
+   "serial": 41,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 18,
+   "ward_name": "Radhakrishna Temple Ward",
+   "testing": false
+  },
+  {
+   "serial": 42,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 19,
+   "ward_name": "Sanjaynagar",
+   "testing": false
+  },
+  {
+   "serial": 43,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 20,
+   "ward_name": "Ganganagar",
+   "testing": false
+  },
+  {
+   "serial": 44,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 21,
+   "ward_name": "Hebbal",
+   "testing": false
+  },
+  {
+   "serial": 45,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 22,
+   "ward_name": "Vishwanatha Nagenahalli",
+   "testing": false
+  },
+  {
+   "serial": 46,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 33,
+   "ward_name": "Manorayanapalya",
+   "testing": false
+  },
+  {
+   "serial": 47,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 34,
+   "ward_name": "Gangenahalli",
+   "testing": false
+  },
+  {
+   "serial": 48,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 37,
+   "ward_name": "Yeshwanthpur",
+   "testing": false
+  },
+  {
+   "serial": 49,
+   "zone_number": 3,
+   "zone_name": "Yelahanka",
+   "ward_number": 46,
+   "ward_name": "Jayachamarajendra Nagar",
+   "testing": false
+  },
+  {
+   "serial": 50,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 38,
+   "ward_name": "H.M.T",
+   "testing": false
+  },
+  {
+   "serial": 51,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 39,
+   "ward_name": "Chokkasandra",
+   "testing": false
+  },
+  {
+   "serial": 52,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 40,
+   "ward_name": "Doddabidarakallu",
+   "testing": false
+  },
+  {
+   "serial": 53,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 41,
+   "ward_name": "Peenya Industrial Area",
+   "testing": false
+  },
+  {
+   "serial": 54,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 42,
+   "ward_name": "Lakshmidevinagar",
+   "testing": false
+  },
+  {
+   "serial": 55,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 43,
+   "ward_name": "Nandini Layout",
+   "testing": false
+  },
+  {
+   "serial": 56,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 44,
+   "ward_name": "Marappana Palya",
+   "testing": false
+  },
+  {
+   "serial": 57,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 67,
+   "ward_name": "Nagapura",
+   "testing": false
+  },
+  {
+   "serial": 58,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 68,
+   "ward_name": "Mahalakshmipuram",
+   "testing": false
+  },
+  {
+   "serial": 59,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 69,
+   "ward_name": "Laggere",
+   "testing": false
+  },
+  {
+   "serial": 60,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 70,
+   "ward_name": "Rajagopalanagar",
+   "testing": false
+  },
+  {
+   "serial": 61,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 71,
+   "ward_name": "Hegganahalli",
+   "testing": false
+  },
+  {
+   "serial": 62,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 72,
+   "ward_name": "Herohalli",
+   "testing": false
+  },
+  {
+   "serial": 63,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 73,
+   "ward_name": "Kottigepalya",
+   "testing": false
+  },
+  {
+   "serial": 64,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 74,
+   "ward_name": "Shakthiganapathi nagar",
+   "testing": false
+  },
+  {
+   "serial": 65,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 75,
+   "ward_name": "Shankaramata",
+   "testing": false
+  },
+  {
+   "serial": 66,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 102,
+   "ward_name": "Vrushabhavathinagar",
+   "testing": false
+  },
+  {
+   "serial": 67,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 129,
+   "ward_name": "Jnanabharathi ward",
+   "testing": false
+  },
+  {
+   "serial": 68,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 130,
+   "ward_name": "Ullalu",
+   "testing": false
+  },
+  {
+   "serial": 69,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 159,
+   "ward_name": "Kengeri",
+   "testing": false
+  },
+  {
+   "serial": 70,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 160,
+   "ward_name": "Rajarajeshwarinagar",
+   "testing": false
+  },
+  {
+   "serial": 71,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 161,
+   "ward_name": "Hosakerehalli",
+   "testing": false
+  },
+  {
+   "serial": 72,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 183,
+   "ward_name": "Chikkallasandra",
+   "testing": false
+  },
+  {
+   "serial": 73,
+   "zone_number": 4,
+   "zone_name": "Rajarajeshwari Nagar",
+   "ward_number": 198,
+   "ward_name": "Hemmigepura",
+   "testing": false
+  },
+  {
+   "serial": 74,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 146,
+   "ward_name": "Lakkasandra",
+   "testing": false
+  },
+  {
+   "serial": 75,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 147,
+   "ward_name": "Adugodi",
+   "testing": false
+  },
+  {
+   "serial": 76,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 148,
+   "ward_name": "Ejipura",
+   "testing": false
+  },
+  {
+   "serial": 77,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 151,
+   "ward_name": "Koramangala",
+   "testing": false
+  },
+  {
+   "serial": 78,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 152,
+   "ward_name": "Sudduguntepalya",
+   "testing": false
+  },
+  {
+   "serial": 79,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 172,
+   "ward_name": "Madiwala",
+   "testing": false
+  },
+  {
+   "serial": 80,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 173,
+   "ward_name": "Jakkasandra",
+   "testing": false
+  },
+  {
+   "serial": 81,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 174,
+   "ward_name": "HSR Layout",
+   "testing": false
+  },
+  {
+   "serial": 82,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 175,
+   "ward_name": "Bommanahalli",
+   "testing": false
+  },
+  {
+   "serial": 83,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 176,
+   "ward_name": "BTM Layout",
+   "testing": false
+  },
+  {
+   "serial": 84,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 186,
+   "ward_name": "Jaraganahalli",
+   "testing": false
+  },
+  {
+   "serial": 85,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 187,
+   "ward_name": "Puttenahalli",
+   "testing": false
+  },
+  {
+   "serial": 86,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 188,
+   "ward_name": "Bilekahalli",
+   "testing": false
+  },
+  {
+   "serial": 87,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 189,
+   "ward_name": "Hongasandra",
+   "testing": false
+  },
+  {
+   "serial": 88,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 190,
+   "ward_name": "Mangammanapalya",
+   "testing": false
+  },
+  {
+   "serial": 89,
+   "zone_number": 5,
+   "zone_name": "Bommanahalli",
+   "ward_number": 193,
+   "ward_name": "Arakere",
+   "testing": false
+  },
+  {
+   "serial": 90,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 168,
+   "ward_name": "Pattabhiramnagar",
+   "testing": false
+  },
+  {
+   "serial": 91,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 169,
+   "ward_name": "Byrasandra",
+   "testing": false
+  },
+  {
+   "serial": 92,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 170,
+   "ward_name": "Jayanagar East",
+   "testing": false
+  },
+  {
+   "serial": 93,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 171,
+   "ward_name": "Gurappanapalya",
+   "testing": false
+  },
+  {
+   "serial": 94,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 177,
+   "ward_name": "J.P.Nagar",
+   "testing": false
+  },
+  {
+   "serial": 95,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 178,
+   "ward_name": "Sarakki",
+   "testing": false
+  },
+  {
+   "serial": 96,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 179,
+   "ward_name": "Shakambarinagar",
+   "testing": false
+  },
+  {
+   "serial": 97,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 180,
+   "ward_name": "Banashankari Temple Ward",
+   "testing": false
+  },
+  {
+   "serial": 98,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 181,
+   "ward_name": "Kumaraswamylayout",
+   "testing": false
+  },
+  {
+   "serial": 99,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 182,
+   "ward_name": "Padmanabhanagar",
+   "testing": false
+  },
+  {
+   "serial": 100,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 184,
+   "ward_name": "Uttarahalli",
+   "testing": false
+  },
+  {
+   "serial": 101,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 185,
+   "ward_name": "Yelachenahalli",
+   "testing": false
+  },
+  {
+   "serial": 102,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 191,
+   "ward_name": "Singasandra",
+   "testing": false
+  },
+  {
+   "serial": 103,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 192,
+   "ward_name": "Begur",
+   "testing": false
+  },
+  {
+   "serial": 104,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 194,
+   "ward_name": "Gottigere",
+   "testing": false
+  },
+  {
+   "serial": 105,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 195,
+   "ward_name": "Konanakunte",
+   "testing": false
+  },
+  {
+   "serial": 106,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 196,
+   "ward_name": "Anjanapura",
+   "testing": false
+  },
+  {
+   "serial": 107,
+   "zone_number": 6,
+   "zone_name": "Jayanagar",
+   "ward_number": 197,
+   "ward_name": "Vasanthapura",
+   "testing": false
+  },
+  {
+   "serial": 108,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 35,
+   "ward_name": "Aramane Nagar",
+   "testing": false
+  },
+  {
+   "serial": 109,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 36,
+   "ward_name": "Mathikere",
+   "testing": false
+  },
+  {
+   "serial": 110,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 45,
+   "ward_name": "Malleshwaram",
+   "testing": false
+  },
+  {
+   "serial": 111,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 64,
+   "ward_name": "Rajmahal",
+   "testing": false
+  },
+  {
+   "serial": 112,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 65,
+   "ward_name": "Kadumalleshwara",
+   "testing": false
+  },
+  {
+   "serial": 113,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 66,
+   "ward_name": "Subramanyanagar",
+   "testing": false
+  },
+  {
+   "serial": 114,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 76,
+   "ward_name": "Gayathrinagar",
+   "testing": false
+  },
+  {
+   "serial": 115,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 97,
+   "ward_name": "Dayanandanagar",
+   "testing": false
+  },
+  {
+   "serial": 116,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 98,
+   "ward_name": "Prakashnagar",
+   "testing": false
+  },
+  {
+   "serial": 117,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 99,
+   "ward_name": "Rajajinagar",
+   "testing": false
+  },
+  {
+   "serial": 118,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 100,
+   "ward_name": "Basaveshwaranagar",
+   "testing": false
+  },
+  {
+   "serial": 119,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 101,
+   "ward_name": "Kamakshipalya",
+   "testing": false
+  },
+  {
+   "serial": 120,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 103,
+   "ward_name": "Kaveripura",
+   "testing": false
+  },
+  {
+   "serial": 121,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 104,
+   "ward_name": "Govindrajnagara",
+   "testing": false
+  },
+  {
+   "serial": 122,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 105,
+   "ward_name": "Agrahara Dasarahalli",
+   "testing": false
+  },
+  {
+   "serial": 123,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 106,
+   "ward_name": "Dr. Rajkumar Ward",
+   "testing": false
+  },
+  {
+   "serial": 124,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 107,
+   "ward_name": "Shivanagar",
+   "testing": false
+  },
+  {
+   "serial": 125,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 108,
+   "ward_name": "Srirammandira ward",
+   "testing": false
+  },
+  {
+   "serial": 126,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 122,
+   "ward_name": "Kempapura Agrahara",
+   "testing": false
+  },
+  {
+   "serial": 127,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 123,
+   "ward_name": "Vijaynagar",
+   "testing": false
+  },
+  {
+   "serial": 128,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 124,
+   "ward_name": "Hosahalli",
+   "testing": false
+  },
+  {
+   "serial": 129,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 125,
+   "ward_name": "Marenahalli",
+   "testing": false
+  },
+  {
+   "serial": 130,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 126,
+   "ward_name": "Maruthi Mandira Ward",
+   "testing": false
+  },
+  {
+   "serial": 131,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 127,
+   "ward_name": "Moodalapalya",
+   "testing": false
+  },
+  {
+   "serial": 132,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 128,
+   "ward_name": "Nagarabhavi",
+   "testing": false
+  },
+  {
+   "serial": 133,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 131,
+   "ward_name": "Nayandanahalli",
+   "testing": false
+  },
+  {
+   "serial": 134,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 132,
+   "ward_name": "Attiguppe",
+   "testing": false
+  },
+  {
+   "serial": 135,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 133,
+   "ward_name": "Hampinagar",
+   "testing": false
+  },
+  {
+   "serial": 136,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 134,
+   "ward_name": "Bapujinagar",
+   "testing": false
+  },
+  {
+   "serial": 137,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 154,
+   "ward_name": "Basavanagudi",
+   "testing": false
+  },
+  {
+   "serial": 138,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 155,
+   "ward_name": "Hanumanthanagar",
+   "testing": false
+  },
+  {
+   "serial": 139,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 156,
+   "ward_name": "Srinagar",
+   "testing": false
+  },
+  {
+   "serial": 140,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 157,
+   "ward_name": "Gali Anjaneya swamy Temple Ward",
+   "testing": false
+  },
+  {
+   "serial": 141,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 158,
+   "ward_name": "Deepanjali Nagar",
+   "testing": false
+  },
+  {
+   "serial": 142,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 162,
+   "ward_name": "Girinagar",
+   "testing": false
+  },
+  {
+   "serial": 143,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 163,
+   "ward_name": "Katriguppe",
+   "testing": false
+  },
+  {
+   "serial": 144,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 164,
+   "ward_name": "Vidyapeetha Ward",
+   "testing": false
+  },
+  {
+   "serial": 145,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 165,
+   "ward_name": "Ganeshmandira Ward",
+   "testing": false
+  },
+  {
+   "serial": 146,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 166,
+   "ward_name": "Karisandra",
+   "testing": false
+  },
+  {
+   "serial": 147,
+   "zone_number": 7,
+   "zone_name": "Malleshwaram",
+   "ward_number": 167,
+   "ward_name": "Yadiyuru",
+   "testing": false
+  },
+  {
+   "serial": 148,
+   "zone_number": 8,
+   "zone_name": "K R Pura",
+   "ward_number": 25,
+   "ward_name": "Horamavu",
+   "testing": false
+  },
+  {
+   "serial": 149,
+   "zone_number": 8,
+   "zone_name": "K R Pura",
+   "ward_number": 26,
+   "ward_name": "Ramamurthynagar",
+   "testing": false
+  },
+  {
+   "serial": 150,
+   "zone_number": 8,
+   "zone_name": "K R Pura",
+   "ward_number": 51,
+   "ward_name": "Vijinapura",
+   "testing": false
+  },
+  {
+   "serial": 151,
+   "zone_number": 8,
+   "zone_name": "K R Pura",
+   "ward_number": 52,
+   "ward_name": "K.R.Puram",
+   "testing": false
+  },
+  {
+   "serial": 152,
+   "zone_number": 8,
+   "zone_name": "K R Pura",
+   "ward_number": 53,
+   "ward_name": "Basavanapura",
+   "testing": false
+  },
+  {
+   "serial": 153,
+   "zone_number": 8,
+   "zone_name": "K R Pura",
+   "ward_number": 55,
+   "ward_name": "Devasandra",
+   "testing": false
+  },
+  {
+   "serial": 154,
+   "zone_number": 8,
+   "zone_name": "K R Pura",
+   "ward_number": 56,
+   "ward_name": "A. Narayanapura",
+   "testing": false
+  },
+  {
+   "serial": 155,
+   "zone_number": 8,
+   "zone_name": "K R Pura",
+   "ward_number": 81,
+   "ward_name": "Vignananagar",
+   "testing": false
+  },
+  {
+   "serial": 156,
+   "zone_number": 8,
+   "zone_name": "K R Pura",
+   "ward_number": 87,
+   "ward_name": "HAL Airport",
+   "testing": false
+  },
+  {
+   "serial": 157,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 50,
+   "ward_name": "Benniganahalli",
+   "testing": false
+  },
+  {
+   "serial": 158,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 57,
+   "ward_name": "C.V. Ramannagar",
+   "testing": false
+  },
+  {
+   "serial": 159,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 58,
+   "ward_name": "Hosathippasandra",
+   "testing": false
+  },
+  {
+   "serial": 160,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 79,
+   "ward_name": "Sarvagnanagar",
+   "testing": false
+  },
+  {
+   "serial": 161,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 80,
+   "ward_name": "Hoysalanagar",
+   "testing": false
+  },
+  {
+   "serial": 162,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 88,
+   "ward_name": "Jeevanbhimanagar",
+   "testing": false
+  },
+  {
+   "serial": 163,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 89,
+   "ward_name": "Jogupalya",
+   "testing": false
+  },
+  {
+   "serial": 164,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 111,
+   "ward_name": "Shanthala Nagar",
+   "testing": false
+  },
+  {
+   "serial": 165,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 112,
+   "ward_name": "Domlur",
+   "testing": false
+  },
+  {
+   "serial": 166,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 113,
+   "ward_name": "Konena Agrahara",
+   "testing": false
+  },
+  {
+   "serial": 167,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 114,
+   "ward_name": "Agaram",
+   "testing": false
+  },
+  {
+   "serial": 168,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 115,
+   "ward_name": "Vannarpet",
+   "testing": false
+  },
+  {
+   "serial": 169,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 116,
+   "ward_name": "Neelasandra",
+   "testing": false
+  },
+  {
+   "serial": 170,
+   "zone_number": 9,
+   "zone_name": "C V Raman Nagar",
+   "ward_number": 117,
+   "ward_name": "Shanthinagar",
+   "testing": false
+  },
+  {
+   "serial": 171,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 62,
+   "ward_name": "Ramaswamy palya",
+   "testing": false
+  },
+  {
+   "serial": 172,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 63,
+   "ward_name": "Jayamahal",
+   "testing": false
+  },
+  {
+   "serial": 173,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 77,
+   "ward_name": "Dattathreya Temple",
+   "testing": false
+  },
+  {
+   "serial": 174,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 90,
+   "ward_name": "Ulsoor",
+   "testing": false
+  },
+  {
+   "serial": 175,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 91,
+   "ward_name": "Bharathinagar",
+   "testing": false
+  },
+  {
+   "serial": 176,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 92,
+   "ward_name": "Shivajinagar",
+   "testing": false
+  },
+  {
+   "serial": 177,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 93,
+   "ward_name": "Vasanthnagar",
+   "testing": false
+  },
+  {
+   "serial": 178,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 94,
+   "ward_name": "Gandhinagar",
+   "testing": false
+  },
+  {
+   "serial": 179,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 95,
+   "ward_name": "Subhashnagar",
+   "testing": false
+  },
+  {
+   "serial": 180,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 96,
+   "ward_name": "Okalipuram",
+   "testing": false
+  },
+  {
+   "serial": 181,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 109,
+   "ward_name": "Chikpet",
+   "testing": false
+  },
+  {
+   "serial": 182,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 110,
+   "ward_name": "Sampangiramnagar",
+   "testing": false
+  },
+  {
+   "serial": 183,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 118,
+   "ward_name": "Sudham Nagara",
+   "testing": false
+  },
+  {
+   "serial": 184,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 119,
+   "ward_name": "Dharmaraya Swamy Temple Ward",
+   "testing": false
+  },
+  {
+   "serial": 185,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 120,
+   "ward_name": "Cottonpet",
+   "testing": false
+  },
+  {
+   "serial": 186,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 121,
+   "ward_name": "Binnypet",
+   "testing": false
+  },
+  {
+   "serial": 187,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 135,
+   "ward_name": "Padarayanapura",
+   "testing": false
+  },
+  {
+   "serial": 188,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 136,
+   "ward_name": "Jagareevanram Nagar",
+   "testing": false
+  },
+  {
+   "serial": 189,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 137,
+   "ward_name": "Rayapuram",
+   "testing": false
+  },
+  {
+   "serial": 190,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 138,
+   "ward_name": "Chalavadipalya",
+   "testing": false
+  },
+  {
+   "serial": 191,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 139,
+   "ward_name": "K.R. Market",
+   "testing": false
+  },
+  {
+   "serial": 192,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 140,
+   "ward_name": "Chamrajpet",
+   "testing": false
+  },
+  {
+   "serial": 193,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 141,
+   "ward_name": "Azadnagar",
+   "testing": false
+  },
+  {
+   "serial": 194,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 142,
+   "ward_name": "Sunkenahalli",
+   "testing": false
+  },
+  {
+   "serial": 195,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 143,
+   "ward_name": "Vishveshwarapuram",
+   "testing": false
+  },
+  {
+   "serial": 196,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 144,
+   "ward_name": "Siddapura",
+   "testing": false
+  },
+  {
+   "serial": 197,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 145,
+   "ward_name": "Hombegowdanagar",
+   "testing": false
+  },
+  {
+   "serial": 198,
+   "zone_number": 10,
+   "zone_name": "Gandhinagar",
+   "ward_number": 153,
+   "ward_name": "Jayanagar",
+   "testing": false
+  },
+  {
+   "serial": 199,
+   "zone_number": 20,
+   "zone_name": "GBA Testing Zone",
+   "ward_number": 298,
+   "ward_name": "GBA Testing Ward",
+   "testing": true
+  }
+ ]
+}

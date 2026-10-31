@@ -18,6 +18,8 @@ from .models import (ClaimRequest, ClaimResult, ResidentComplaint, ResidentCompl
 from .ratelimit import client_ip, enforce
 from .resident_auth import (current_resident, email_problem, hash_password, new_session, normalise_email, password_problem,
                             resident_identity, sign_in)
+from .cases_api import EVIDENCE_ID
+from .staff_api import stream_evidence
 from .store import ResidentExists
 
 router = APIRouter(prefix="/residents", tags=["residents"])
@@ -94,6 +96,7 @@ def my_complaint(public_id: str, request: Request, response: Response, resident:
         raise ApiProblem(404, "not_found", "None of your complaints has that ID.")
     _no_store(response)
     return record
+
 
 
 @router.post("/me/claims", response_model=ClaimResult)

@@ -3,6 +3,7 @@ import {api, categories, statuses, verificationStates, esc, assessPriority} from
 import {icon, categoryIcon, resolutionState, workspaceShell, heading, btn, link, statusPill, verificationPill, priorityPill, notice, empty, panel, panelHead, toast, fmtDate, fmtDateTime, confirmDialog} from '../ui.js';
 import {state, viewer, setSession, readPrefs, writePrefs, readLastRead, writeLastRead, addCleanup} from '../state.js';
 import {navigate} from '../router.js';
+import {geographyFilters, syncWardOptions, wardForRecord} from '../ward-catalog.js';
 import {filterRecords, sortRecords, readFilters} from '../filters.js';
 import {mountCityMap} from './map.js';
 import {workspaceRecords, usesServerRecords, dailyActivity, serverClient, isServerResident, loadPublicCommunityComplaints} from '../server-records.js';
@@ -11,6 +12,7 @@ import {residentSession} from '../resident-session.js';
 import {endStaffSession} from './staff.js';
 import {ApiError} from '../api-client.js';
 import {mountInbox} from './notifications.js';
+import {renderMyComplaints} from './my-complaints.js';
 
 const isAdmin = () => viewer().role === 'official';
 
@@ -56,13 +58,13 @@ export async function endResidentSession() {
 }
 
 // ---------- Shared pieces ----------
-export function issueRow(r) {
+export function issueRow(r, href = `#/issue/${r.id}`) {
   const state_ = resolutionState(r);
   const meta = [r.area, r.id].map(esc).join(' · ');
   return `<li class="issue-row">
     <span class="issue-symbol ${state_.className}" title="${esc(state_.label)}" aria-label="${esc(r.category)}, ${esc(state_.label)}">${categoryIcon(r.category)}</span>
     <div class="issue-row-body">
-      <h3 class="issue-title"><a href="#/issue/${esc(r.id)}">${esc(r.title)}</a></h3>
+      <h3 class="issue-title"><a href="${esc(href)}">${esc(r.title)}</a></h3>
       <p class="issue-meta">${meta}</p>
       <p class="issue-tags">${statusPill(r.status)} ${verificationPill(r.verification)}${r.priority ? priorityPill(r.priority.band) : ''}</p>
     </div>
@@ -92,6 +94,23 @@ export async function renderOverview(root) {
   const records = await loadRecords();
   const server = admin && await usesServerRecords();
   if (admin) {
+    const staffRole = staffSession.get()?.staff?.role;
+    const isSupervisorOrAdmin = ['supervisor', 'admin'].includes(staffRole);
+    const supervisorBanner = isSupervisorOrAdmin ? `
+      <div class="panel" style="margin-bottom: 20px;">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow" style="margin: 0 0 4px;">${staffRole === 'supervisor' ? 'Supervisor operations' : 'City-wide supervisor operations'}</p>
+            <h2 style="margin: 0;">Supervisor Wards & Allocations</h2>
+            <p class="lead" style="margin: 6px 0 0;">Inspect complaint density across your authorised zones and wards, review overdue items, and bulk-allocate complaints to field staff.</p>
+          </div>
+          <div class="panel-head-right">
+            <a class="btn btn-primary" href="#/official/supervisor">${icon('layers')}<span>Supervisor wards</span></a>
+            <a class="btn btn-secondary" href="#/official/supervisor/allocate">Multi-ward allocation</a>
+            <a class="btn btn-ghost" href="#/official/supervisor/unverified">Unverified</a>
+          </div>
+        </div>
+      </div>` : '';
     const open = records.filter(r => r.status !== 'Marked Resolved');
     const needsReview = records.filter(r => ['Submitted', 'Under Review'].includes(r.status));
     const disputed = records.filter(r => ['Disputed', 'Reinspection Required'].includes(r.verification));
@@ -102,6 +121,7 @@ export async function renderOverview(root) {
       ${server
         ? notice(`Showing <strong>${records.length}</strong> ${records.length === 1 ? 'complaint' : 'complaints'} stored on the CivicLens server. Open a case to view its evidence, change its status, assign it and manage work orders.`, 'info', 'alert')
         : notice('Sample incidents and the activity series are illustrative. Browser-local reports appear alongside them. No municipal system is connected.', 'info', 'alert')}
+      ${supervisorBanner}
       <div class="stats" role="list">
         ${stat('Total cases', records.length, 'Across the workspace')}
         ${stat('Awaiting first review', needsReview.length, 'Submitted or under review', 'stat-navy')}
@@ -134,7 +154,7 @@ export async function renderOverview(root) {
       </div>
       <div class="split">
         ${panel(`${panelHead('My recent reports', link('All my complaints', '#/resident/complaints', 'ghost'))}
-          ${mine.length ? `<ul class="issue-list">${mine.slice(0, 5).map(issueRow).join('')}</ul>` : empty('No reports linked to your profile yet', 'Report an issue from the camera, or claim an anonymous report with its public ID and private claim code.', `<div class="row-actions">${link('Claim a complaint', '#/resident/claim', 'secondary')}${link('Report an issue', '#/camera', 'primary')}</div>`)}`, 'panel-main')}
+          ${mine.length ? `<ul class="issue-list">${mine.slice(0, 5).map(r => issueRow(r, account ? `#/resident/complaints/${r.id}` : undefined)).join('')}</ul>` : empty('No reports linked to your profile yet', 'Report an issue from the camera, or claim an anonymous report with its public ID and private claim code.', `<div class="row-actions">${link('Claim a complaint', '#/resident/claim', 'secondary')}${link('Report an issue', '#/camera', 'primary')}</div>`)}`, 'panel-main')}
         <div class="stack">
           ${panel(`${panelHead('Neighbourhood map', link('Open map', '#/resident/map', 'ghost'))}<div class="map-compact" id="overview-map"></div>`)}
           ${panel(`<h2>Close the loop</h2><p>When a repair is marked resolved, you can confirm it, report that it is still present, or say you cannot confirm. Those answers are kept beside the official status.</p><a class="inline-link" href="#/resident/community">Browse community issues ${icon('forward')}</a>`)}
@@ -179,6 +199,7 @@ function sampleChart() {
 // ---------- Complaint lists ----------
 export async function renderComplaints(root, mode) {
   if (mode === 'community' && await isServerResident(viewer())) return renderServerCommunity(root);
+  if (mode === 'mine' && await isServerResident(viewer())) return renderMyComplaints(root);  // the account's own complaints and evidence
   const records = await loadRecords();
   const admin = isAdmin();
   const base = admin ? records : mode === 'community' ? records : records.filter(r => r.mine);
@@ -192,7 +213,8 @@ export async function renderComplaints(root, mode) {
   mount(root, title, `
     ${heading({eyebrow: admin ? 'Operations' : 'Your workspace', title, lead, actions})}
     <section class="panel panel-flush">
-      ${filterBar('complaint-filter', {withVerification: admin, withCategory: true, extra: mode === 'community' ? '<div class="field"><label for="complaint-scope">Show</label><select id="complaint-scope" name="scope"><option value="">All community issues</option><option value="following">Issues I follow</option></select></div>' : ''})}
+      ${filterBar('complaint-filter', {withVerification: admin, withCategory: true, extra: geographyFilters('complaint-filter') + (mode === 'community' ? '<div class="field"><label for="complaint-scope">Show</label><select id="complaint-scope" name="scope"><option value="">All community issues</option><option value="following">Issues I follow</option></select></div>' : '')})}
+      <p class="micro filter-note">Ward and zone names follow the supplied e-Aasthi directory. Unmatched neighbourhoods remain unassigned; this directory contains no geographic boundaries.</p>
       <p class="result-count" id="result-count" role="status" aria-live="polite"></p>
       <div id="complaint-results"></div>
     </section>`);
@@ -200,6 +222,7 @@ export async function renderComplaints(root, mode) {
   const count = root.querySelector('#result-count');
   const form = root.querySelector('#complaint-filter');
   const paint = () => {
+    syncWardOptions(form);
     const f = readFilters(form);
     const scoped = f.scope === 'following' ? base.filter(r => r.following) : base;
     const list = sortRecords(filterRecords(scoped, f), f.sort);
@@ -214,7 +237,7 @@ export async function renderComplaints(root, mode) {
         <thead><tr><th scope="col">Complaint</th><th scope="col">Area and category</th>${admin ? '<th scope="col">Priority</th>' : ''}<th scope="col">Lifecycle</th><th scope="col">Verification</th></tr></thead>
         <tbody>${list.map(r => `<tr>
           <td><span class="cell-title"><span class="issue-symbol-sm ${resolutionState(r).className}" aria-hidden="true">${categoryIcon(r.category)}</span><span><a href="#/issue/${esc(r.id)}">${esc(r.title)}</a><small class="code-inline">${esc(r.id)}</small></span></span></td>
-          <td>${esc(r.area)}<small>${esc(r.category)}</small></td>
+          <td>${esc(r.area)}<small>${esc(r.category)}</small><small>${wardForRecord(r) ? esc(wardForRecord(r).wardName + ' · ' + wardForRecord(r).zoneName) : 'Ward / zone unassigned'}</small></td>
           ${admin ? `<td>${r.priority ? priorityPill(r.priority.band) : ''}<small>Score ${r.priority?.score ?? '—'}</small></td>` : ''}
           <td>${statusPill(r.status)}</td>
           <td>${verificationPill(r.verification)}</td>

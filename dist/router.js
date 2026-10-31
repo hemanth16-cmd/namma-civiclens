@@ -16,6 +16,7 @@ function saveHistory() {
 }
 
 export function currentPath() {
+  if (typeof location === 'undefined') return 'camera';
   return location.hash.replace(/^#\/?/, '') || 'camera';
 }
 
@@ -24,6 +25,22 @@ export function navigate(path) {
   if (location.hash === target) return false;
   location.hash = target;
   return true;
+}
+
+// Where a resident was going when sign-in was required (the session lives in memory, so a refresh asks
+// again). Only a resident route path is kept, in sessionStorage; never a token or anything private.
+const NEXT_KEY = 'ncl-resident-next';
+const RESIDENT_ROUTE = /^resident(\/[A-Za-z0-9-]+){0,2}$/;
+
+export function rememberResidentDestination(path) {
+  try { if (RESIDENT_ROUTE.test(path)) sessionStorage.setItem(NEXT_KEY, path); } catch { /* storage blocked: sign-in lands on the overview */ }
+}
+
+/** The remembered resident route (cleared once read), or 'resident'. */
+export function takeResidentDestination() {
+  let path = null;
+  try { path = sessionStorage.getItem(NEXT_KEY); sessionStorage.removeItem(NEXT_KEY); } catch { /* storage blocked */ }
+  return path && RESIDENT_ROUTE.test(path) ? path : 'resident';
 }
 
 /** Record a rendered route. Stepping back to the previous entry pops it instead of pushing. */

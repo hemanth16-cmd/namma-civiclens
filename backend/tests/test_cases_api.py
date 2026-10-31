@@ -185,8 +185,8 @@ def test_after_repair_evidence_is_streamed_to_staff_and_logged(api, staff, evide
 
 def test_invalid_transitions_explanations_and_stale_state(api, staff):
     cid = report(api)["id"]
-    move(api, staff["ravi"], cid, "Marked Resolved", "Submitted", "skip", expect=409)
-    move(api, staff["ravi"], cid, "In Progress", "Submitted", expect=409)
+    move(api, staff["ravi"], cid, "Marked Resolved", "Submitted", "skip", expect=403)
+    move(api, staff["ravi"], cid, "In Progress", "Submitted", expect=403)
     move(api, staff["ravi"], cid, "Under Review", "Under Review", expect=409)  # stale expectedStatus
     r = api.post(f"{API}/staff/complaints/{cid}/transitions", json={"to": "Closed", "expectedStatus": "Submitted"}, headers=staff["ravi"])
     assert r.status_code == 422
@@ -308,7 +308,7 @@ def test_internal_notes_and_staff_identities_never_reach_the_public(api, staff):
                    receipt["claim"], str(payload()["gps"]["lat"])):
         assert secret not in raw, secret
     pub = public(api, cid)
-    assert set(pub) == {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog", "mergedInto"}
+    assert set(pub) == {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog", "publicEvidence", "mergedInto"}
     assert "Inspection scheduled for Monday." in [t["text"] for t in pub["timeline"]]
     assert {e["actor"] for e in pub["verificationLog"]} <= {"Citizen", "Civic team"}
     staff_view = api.get(f"{API}/staff/complaints/{cid}", headers=staff["ravi"]).json()
@@ -440,3 +440,219 @@ def test_existing_submission_tracking_and_public_shape_are_unchanged(api):
     pub = public(api, receipt["id"])
     assert pub["status"] == "Submitted" and pub["verification"] == "Pending Verification" and pub["department"] == "Awaiting civic review"
     assert pub["timeline"] == [{"status": "Submitted", "text": "Report received by the Namma CivicLens API.", "date": pub["timeline"][0]["date"]}]
+
+
+def test_direct_repair_upload_publication_and_reopening(api, staff):
+    receipt = report(api, shareEvidence=True)
+    cid = receipt['id']
+    url = f'{API}/staff/complaints/{cid}/repair-evidence'
+    assert api.post(url, files={'file': ('repair.jpg', JPEG, 'image/jpeg')}).status_code == 401
+    upload = api.post(url, files={'file': ('repair.jpg', JPEG, 'image/jpeg')}, headers=staff['asha'])
+    assert upload.status_code == 201, upload.text
+    eid = upload.json()['evidenceId']
+    case = api.get(f'{API}/staff/complaints/{cid}', headers=staff['asha']).json()
+    assert case['workOrders'] == [], 'direct evidence must not manufacture a work order'
+    assert case['repairEvidence'][0]['evidenceId'] == eid
+    before = public(api, cid)['publicEvidence']
+    assert [e['phase'] for e in before] == ['before']
+    assert api.get(f'{API}/complaints/{cid}/public-evidence/{before[0]["evidenceId"]}').content == JPEG
+    public_url = f'{API}/complaints/{cid}/public-evidence/{eid}'
+    assert api.get(public_url).status_code == 404, 'unfinished repair is not public'
+    private_url = f'{API}/staff/complaints/{cid}/repair-evidence/{eid}'
+    assert api.get(private_url, headers=staff['asha']).content == JPEG
+    # Admin can correct any operational stage, but must explain and use the latest version.
+    move(api, staff['meera'], cid, 'Marked Resolved', 'Submitted', 'Repair inspected and completed.')
+    media = public(api, cid)['publicEvidence']
+    assert [e['phase'] for e in media] == ['before', 'after']
+    assert set(media[1]) == {'evidenceId', 'phase', 'mediaType', 'uploadedAt'}
+    got = api.get(public_url)
+    assert got.status_code == 200 and got.content == JPEG
+    assert got.headers['cache-control'] == 'no-store, private'
+    move(api, staff['meera'], cid, 'Under Construction', 'Marked Resolved', 'Repair failed inspection; reopening.')
+    assert api.get(public_url).status_code == 404, 'publication must be rechecked after reopening'
+    assert [e['phase'] for e in public(api, cid)['publicEvidence']] == ['before']
+
+
+def test_private_original_and_other_case_evidence_cannot_be_published(api, staff):
+    cid = report(api, shareEvidence=False)['id']
+    assign(api, staff['ravi'], cid)
+    url = f'{API}/staff/complaints/{cid}/repair-evidence'
+    assert api.post(url, files={'file': ('repair.jpg', JPEG, 'image/jpeg')}, headers=staff['bilal']).status_code == 403
+    upload = api.post(url, files={'file': ('repair.jpg', JPEG, 'image/jpeg')}, headers=staff['asha'])
+    assert upload.status_code == 201
+    case = api.get(f'{API}/staff/complaints/{cid}', headers=staff['asha']).json()
+    original = case['evidence']['evidenceId']
+    move(api, staff['meera'], cid, 'Marked Resolved', 'Assigned', 'Inspected by administrator.')
+    assert [e['phase'] for e in public(api, cid)['publicEvidence']] == ['after']
+    assert api.get(f'{API}/complaints/{cid}/public-evidence/{original}').status_code == 404
+    other = report(api)['id']
+    eid = upload.json()['evidenceId']
+    assert api.get(f'{API}/complaints/{other}/public-evidence/{eid}').status_code == 404
+    assert api.post(url, files={'file': ('video.webm', WEBM, 'video/webm')}, headers=staff['asha']).status_code == 422
+
+
+def test_extended_stages_persist_and_keep_citizen_verification_independent(api, staff):
+    cid = report(api)['id']
+    assign(api, staff['ravi'], cid)
+    current = 'Assigned'
+    for stage in ['Under Construction', 'On Hold', 'In Progress', 'Work Completed', 'Verification In Progress', 'Marked Resolved']:
+        moved = move(api, staff['asha'], cid, stage, current, 'Progress checked on site.')
+        assert moved['status'] == stage
+        assert public(api, cid)['status'] == stage
+        assert moved['verification'] == 'Pending Verification'
+        current = stage
+    move(api, staff['asha'], cid, 'Under Construction', current, 'Reopen', expect=403)
+
+
+def test_repair_evidence_geotagging_direct_and_work_order(api, staff):
+    rep = report(api)
+    cid = rep["id"]
+    assign(api, staff["ravi"], cid, assignee="asha")
+
+    # 1. Direct case repair upload with full GPS metadata
+    gps_data = {
+        "lat": "12.9716",
+        "lng": "77.5946",
+        "accuracy": "15.5",
+        "source": "Browser GPS",
+        "sourceType": "gps",
+        "timestamp": "2026-10-30T10:00:00.000Z",
+        "address": "MG Road, Bengaluru",
+        "capturedAt": "2026-10-30T09:59:55.000Z"
+    }
+    res = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data=gps_data,
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert res.status_code == 201, res.text
+    direct_eid = res.json()["evidenceId"]
+
+    # 2. Check staff complaint retrieval returns GPS metadata on repairEvidence
+    case_res = api.get(f"{API}/staff/complaints/{cid}", headers=staff["asha"])
+    assert case_res.status_code == 200
+    case = case_res.json()
+    assert len(case["repairEvidence"]) == 1
+    ev = case["repairEvidence"][0]
+    assert ev["evidenceId"] == direct_eid
+    assert ev["capturedAt"] == "2026-10-30T09:59:55.000Z"
+    assert ev["gps"] is not None
+    assert ev["gps"]["lat"] == 12.9716
+    assert ev["gps"]["lng"] == 77.5946
+    assert ev["gps"]["accuracy"] == 15.5
+    assert ev["gps"]["source"] == "Browser GPS"
+    assert ev["gps"]["sourceType"] == "gps"
+    assert ev["gps"]["address"] == "MG Road, Bengaluru"
+
+    # 3. Create a work order and upload repair evidence with GPS
+    case = act(api, staff["asha"], f"/complaints/{cid}/work-orders", {"team": "Ward 4 crew", "dueAt": "2099-01-31"}, 201)
+    wo_id = case["workOrders"][0]["id"]
+    act(api, staff["asha"], f"/work-orders/{wo_id}/transitions", {"to": "In Progress", "expectedStatus": "Open"})
+
+    wo_gps_data = {
+        "lat": "12.9720",
+        "lng": "77.5950",
+        "accuracy": "10.0",
+        "source": "EXIF",
+        "sourceType": "gps",
+        "timestamp": "2026-10-30T10:15:00.000Z",
+        "capturedAt": "2026-10-30T10:14:50.000Z"
+    }
+    wo_up = api.post(
+        f"{API}/staff/work-orders/{wo_id}/evidence",
+        data=wo_gps_data,
+        files={"file": ("wo_repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert wo_up.status_code == 201, wo_up.text
+    wo_eid = wo_up.json()["evidenceId"]
+
+    # 4. Check work order evidence list has gps
+    case_res2 = api.get(f"{API}/staff/complaints/{cid}", headers=staff["asha"])
+    order = case_res2.json()["workOrders"][0]
+    after_evs = [e for e in order["evidence"] if e["phase"] == "after"]
+    assert len(after_evs) == 1
+    assert after_evs[0]["evidenceId"] == wo_eid
+    assert after_evs[0]["capturedAt"] == "2026-10-30T10:14:50.000Z"
+    assert after_evs[0]["gps"]["lat"] == 12.9720
+    assert after_evs[0]["gps"]["lng"] == 77.5950
+    assert after_evs[0]["gps"]["accuracy"] == 10.0
+
+    # 5. Public evidence after resolution does NOT leak coordinates or addresses
+    act(api, staff["asha"], f"/work-orders/{wo_id}/transitions", {"to": "Completed", "expectedStatus": "In Progress", "note": "All done"})
+    act(api, staff["meera"], f"/complaints/{cid}/transitions", {"to": "Marked Resolved", "expectedStatus": "In Progress", "explanation": "Inspected"})
+
+    pub = public(api, cid)
+    pub_ev = pub["publicEvidence"]
+    assert len(pub_ev) >= 2
+    for p in pub_ev:
+        assert "lat" not in p
+        assert "lng" not in p
+        assert "gps" not in p
+        assert "address" not in p
+        assert "storageKey" not in p
+
+
+def test_repair_evidence_gps_validation(api, staff):
+    rep = report(api)
+    cid = rep["id"]
+    assign(api, staff["ravi"], cid, assignee="asha")
+
+    # Invalid lat > 90
+    bad_lat = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data={"lat": "95.0", "lng": "77.0"},
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert bad_lat.status_code == 422
+    assert "out of range" in bad_lat.text
+
+    # Invalid lng < -180
+    bad_lng = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data={"lat": "13.0", "lng": "-185.0"},
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert bad_lng.status_code == 422
+    assert "out of range" in bad_lng.text
+
+    # Negative accuracy
+    bad_acc = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data={"lat": "13.0", "lng": "77.0", "accuracy": "-5"},
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert bad_acc.status_code == 422
+
+    # Invalid sourceType
+    bad_src = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data={"lat": "13.0", "lng": "77.0", "sourceType": "telepathy"},
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert bad_src.status_code == 422
+
+
+def test_gallery_upload_without_gps_is_accepted_as_unverified(api, staff):
+    rep = report(api)
+    cid = rep["id"]
+    assign(api, staff["ravi"], cid, assignee="asha")
+
+    # Upload with no GPS data (gallery upload without EXIF)
+    res = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert res.status_code == 201
+    eid = res.json()["evidenceId"]
+
+    case = api.get(f"{API}/staff/complaints/{cid}", headers=staff["asha"]).json()
+    ev = next(e for e in case["repairEvidence"] if e["evidenceId"] == eid)
+    assert ev["gps"] is None
+    assert ev["capturedAt"] is None

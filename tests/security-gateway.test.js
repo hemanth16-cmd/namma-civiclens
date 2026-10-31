@@ -41,4 +41,3 @@ test('api client strips dangerous headers and validates URL', async () => {
   await client.health();
   assert.equal(requestedUrl, 'http://localhost:8000/api/v1/health');
 });
-
