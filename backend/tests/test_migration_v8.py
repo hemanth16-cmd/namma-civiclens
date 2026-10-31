@@ -104,7 +104,7 @@ def test_a_database_that_ran_mains_version_8_adopts_ai_analysis_and_keeps_its_ro
     store.initialize()
     db = SQLiteDatabase(path)
     assert db.schema_version() == 8, "a legacy version is never lowered"
-    assert db.features() == {"duplicate_detection": "applied", "resident_accounts": "applied", "ward_zone_operations": "applied", "ai_analysis": "adopted"}
+    assert db.features() == {"duplicate_detection": "applied", "resident_accounts": "applied", "ward_zone_operations": "applied", "ai_analysis": "adopted", "repair_evidence_geotagging": "applied"}
     with closing(sqlite3.connect(path)) as conn:
         assert conn.execute("SELECT predictions FROM ai_inferences WHERE inference_id = 'ai_legacy'").fetchone()[0] == '[{"className":"pothole"}]'
     # The restored AI code writes to the adopted tables next to the legacy row.

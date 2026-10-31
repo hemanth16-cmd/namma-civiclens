@@ -288,9 +288,19 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return toStaffComplaint(await request('POST', `/staff/work-orders/${encodeURIComponent(workOrderId)}/transitions`, {to, expectedStatus, note}, {headers: staffAuth(token)}));
     },
 
-    async uploadCaseRepairEvidence(token, id, blob) {
+    async uploadCaseRepairEvidence(token, id, blob, meta = {}) {
       const form = new FormData();
       form.append('file', blob, 'repair.jpg');
+      if (meta?.capturedAt) form.append('capturedAt', meta.capturedAt);
+      if (meta?.gps) {
+        if (meta.gps.lat != null) form.append('lat', String(meta.gps.lat));
+        if (meta.gps.lng != null) form.append('lng', String(meta.gps.lng));
+        if (meta.gps.accuracy != null) form.append('accuracy', String(meta.gps.accuracy));
+        if (meta.gps.source) form.append('source', String(meta.gps.source));
+        if (meta.gps.sourceType) form.append('sourceType', String(meta.gps.sourceType));
+        if (meta.gps.timestamp) form.append('timestamp', String(meta.gps.timestamp));
+        if (meta.gps.address) form.append('address', String(meta.gps.address));
+      }
       const d = await request('POST', `/staff/complaints/${encodeURIComponent(id)}/repair-evidence`, form, {headers: staffAuth(token), timeout: uploadTimeoutMs});
       if (typeof d.evidenceId !== 'string') throw new ApiError('Repair evidence could not be confirmed.', {code: 'malformed_response'});
       return d;
@@ -305,12 +315,22 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
     },
 
     /** After-repair JPEG for a work order (multipart). Resolves to the evidence receipt. */
-    async uploadRepairEvidence(token, workOrderId, blob) {
+    async uploadRepairEvidence(token, workOrderId, blob, meta = {}) {
       const form = new FormData();
       form.append('file', blob, 'repair.jpg');
+      if (meta?.capturedAt) form.append('capturedAt', meta.capturedAt);
+      if (meta?.gps) {
+        if (meta.gps.lat != null) form.append('lat', String(meta.gps.lat));
+        if (meta.gps.lng != null) form.append('lng', String(meta.gps.lng));
+        if (meta.gps.accuracy != null) form.append('accuracy', String(meta.gps.accuracy));
+        if (meta.gps.source) form.append('source', String(meta.gps.source));
+        if (meta.gps.sourceType) form.append('sourceType', String(meta.gps.sourceType));
+        if (meta.gps.timestamp) form.append('timestamp', String(meta.gps.timestamp));
+        if (meta.gps.address) form.append('address', String(meta.gps.address));
+      }
       const d = await request('POST', `/staff/work-orders/${encodeURIComponent(workOrderId)}/evidence`, form, {headers: staffAuth(token), timeout: uploadTimeoutMs});
       if (typeof d.evidenceId !== 'string') throw new ApiError('The CivicLens server sent an upload result this app could not read.', {code: 'malformed_response'});
-      return {evidenceId: d.evidenceId, byteSize: Number(d.byteSize) || 0, sha256: String(d.sha256 ?? ''), uploadedAt: d.uploadedAt ?? null};
+      return {evidenceId: d.evidenceId, byteSize: Number(d.byteSize) || 0, sha256: String(d.sha256 ?? ''), uploadedAt: d.uploadedAt ?? null, capturedAt: d.capturedAt ?? null, gps: d.gps ?? null};
     },
 
     /** GET a before/after file of a work order as a Blob. Each view is logged by the server. */
@@ -669,7 +689,7 @@ export function toResidentComplaint(d) {
     timeline: Array.isArray(d.timeline) ? d.timeline.map(t => ({status: String(t.status), text: String(t.text), date: t.date})) : [],
     verificationLog: toVerificationLog(d.verificationLog),
     publicEvidence: (Array.isArray(d.publicEvidence) ? d.publicEvidence : []).filter(e => /^ev_[A-Za-z0-9_-]{22}$/.test(e?.evidenceId) && ['before', 'after'].includes(e.phase)).map(e => ({
-      evidenceId: e.evidenceId, phase: e.phase, mediaType: e.mediaType === 'video' ? 'video' : 'photo', uploadedAt: e.uploadedAt ?? null
+      evidenceId: e.evidenceId, phase: e.phase, mediaType: e.mediaType === 'video' ? 'video' : 'photo', uploadedAt: e.uploadedAt ?? null, capturedAt: e.capturedAt ?? null
     })),
     evidence: toOwnerEvidence(d.evidence)
   };
@@ -745,9 +765,25 @@ export function toWorkOrder(w) {
     description: String(w.description ?? ''), dueAt: w.dueAt ?? null, status: String(w.status ?? ''), startedAt: w.startedAt ?? null,
     completedAt: w.completedAt ?? null, completionNote: String(w.completionNote ?? ''), createdBy: String(w.createdBy ?? ''),
     createdAt: w.createdAt ?? null, overdue: w.overdue === true,
-    evidence: (Array.isArray(w.evidence) ? w.evidence : []).filter(e => typeof e?.evidenceId === 'string').map(e => ({
-      phase: e.phase === 'after' ? 'after' : 'before', evidenceId: e.evidenceId, contentType: String(e.contentType ?? ''),
-      byteSize: Number(e.byteSize) || 0, uploadedAt: e.uploadedAt ?? null})),
+    evidence: (Array.isArray(w.evidence) ? w.evidence : []).filter(e => typeof e?.evidenceId === 'string').map(e => {
+      const item = {
+        phase: e.phase === 'after' ? 'after' : 'before', evidenceId: e.evidenceId, contentType: String(e.contentType ?? ''),
+        byteSize: Number(e.byteSize) || 0, uploadedAt: e.uploadedAt ?? null
+      };
+      if (e.capturedAt) item.capturedAt = e.capturedAt;
+      if (e.gps) {
+        item.gps = {
+          lat: Number(e.gps.lat),
+          lng: Number(e.gps.lng),
+          accuracy: e.gps.accuracy != null ? Number(e.gps.accuracy) : null,
+          source: e.gps.source ?? null,
+          sourceType: String(e.gps.sourceType ?? 'gps'),
+          timestamp: e.gps.timestamp ?? null,
+          address: e.gps.address ?? null
+        };
+      }
+      return item;
+    }),
     history: (Array.isArray(w.history) ? w.history : []).map(h => ({action: String(h?.action ?? ''), to: h?.to ?? null, note: String(h?.note ?? ''),
       by: String(h?.by ?? ''), at: h?.at ?? null}))
   };
@@ -803,7 +839,16 @@ export function toStaffComplaint(d) {
     evidence: e && typeof e === 'object' ? {evidenceId: String(e.evidenceId ?? ''), mediaType: e.mediaType === 'video' ? 'video' : 'photo',
       contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, sha256: String(e.sha256 ?? ''), capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null} : null,
     repairEvidence: (Array.isArray(d.repairEvidence) ? d.repairEvidence : []).map(e => ({
-      evidenceId: String(e.evidenceId ?? ''), mediaType: 'photo', uploadedAt: e.uploadedAt ?? null, capturedAt: e.capturedAt ?? null
+      evidenceId: String(e.evidenceId ?? ''), mediaType: 'photo', uploadedAt: e.uploadedAt ?? null, capturedAt: e.capturedAt ?? null,
+      gps: e.gps ? {
+        lat: Number(e.gps.lat),
+        lng: Number(e.gps.lng),
+        accuracy: e.gps.accuracy != null ? Number(e.gps.accuracy) : null,
+        source: e.gps.source ?? null,
+        sourceType: String(e.gps.sourceType ?? 'gps'),
+        timestamp: e.gps.timestamp ?? null,
+        address: e.gps.address ?? null
+      } : null
     })),
     ...toManagement(d)
   };
@@ -923,7 +968,7 @@ export function toPublicRecord(d) {
     mergedInto: publicIdOrNull(d.mergedInto),
     verificationLog: toVerificationLog(d.verificationLog),
     publicEvidence: (Array.isArray(d.publicEvidence) ? d.publicEvidence : []).filter(e => /^ev_[A-Za-z0-9_-]{22}$/.test(e?.evidenceId) && ['before', 'after'].includes(e.phase)).map(e => ({
-      evidenceId: e.evidenceId, phase: e.phase, mediaType: e.mediaType === 'video' ? 'video' : 'photo', uploadedAt: e.uploadedAt ?? null
+      evidenceId: e.evidenceId, phase: e.phase, mediaType: e.mediaType === 'video' ? 'video' : 'photo', uploadedAt: e.uploadedAt ?? null, capturedAt: e.capturedAt ?? null
     }))
   };
 }

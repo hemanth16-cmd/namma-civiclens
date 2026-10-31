@@ -1231,11 +1231,35 @@ CREATE TABLE repair_assessment_inferences (
 );
 """
 
+
+REPAIR_EVIDENCE_GEOTAGGING_SQLITE = """
+-- Repair evidence geotagging: store capture coordinates and fix metadata for each repair photo.
+ALTER TABLE evidence ADD COLUMN gps_lat REAL;
+ALTER TABLE evidence ADD COLUMN gps_lng REAL;
+ALTER TABLE evidence ADD COLUMN gps_accuracy REAL;
+ALTER TABLE evidence ADD COLUMN gps_source TEXT;
+ALTER TABLE evidence ADD COLUMN gps_source_type TEXT CHECK (gps_source_type IS NULL OR gps_source_type IN ('gps', 'network', 'manual', 'unverified'));
+ALTER TABLE evidence ADD COLUMN gps_timestamp TEXT;
+ALTER TABLE evidence ADD COLUMN gps_address TEXT;
+"""
+
+REPAIR_EVIDENCE_GEOTAGGING_POSTGRES = """
+-- Repair evidence geotagging: store capture coordinates and fix metadata for each repair photo.
+ALTER TABLE evidence ADD COLUMN gps_lat DOUBLE PRECISION;
+ALTER TABLE evidence ADD COLUMN gps_lng DOUBLE PRECISION;
+ALTER TABLE evidence ADD COLUMN gps_accuracy DOUBLE PRECISION;
+ALTER TABLE evidence ADD COLUMN gps_source TEXT;
+ALTER TABLE evidence ADD COLUMN gps_source_type TEXT CHECK (gps_source_type IS NULL OR gps_source_type IN ('gps', 'network', 'manual', 'unverified'));
+ALTER TABLE evidence ADD COLUMN gps_timestamp TEXT;
+ALTER TABLE evidence ADD COLUMN gps_address TEXT;
+"""
+
 FEATURES: tuple[Feature, ...] = (
     Feature("duplicate_detection", DUPLICATE_DETECTION_SQLITE, DUPLICATE_DETECTION_POSTGRES, adopt_if="complaint_merges"),
     Feature("resident_accounts", RESIDENT_ACCOUNTS_SQLITE, RESIDENT_ACCOUNTS_POSTGRES),
     Feature("ward_zone_operations", WARD_ZONE_OPERATIONS_SQLITE, WARD_ZONE_OPERATIONS_POSTGRES),
     Feature("ai_analysis", AI_ANALYSIS_SQLITE, AI_ANALYSIS_POSTGRES, adopt_if="ai_inferences"),
+    Feature("repair_evidence_geotagging", REPAIR_EVIDENCE_GEOTAGGING_SQLITE, REPAIR_EVIDENCE_GEOTAGGING_POSTGRES),
 )
 
 TABLES = ("staff_accounts", "departments", "staff_departments", "resident_accounts", "zones", "wards", "staff_geographic_scope",
@@ -1297,12 +1321,31 @@ def _notification_dict(row) -> dict:
 
 
 def _evidence_dict(row) -> dict:
-    return {
+    d = {
         "evidenceId": row["evidence_id"], "complaintPk": row["complaint_pk"], "role": row["role"],
         "storageKey": row["storage_key"], "mediaType": row["media_type"], "contentType": row["content_type"],
         "byteSize": row["byte_size"], "sha256": row["sha256"], "capturedAt": row["captured_at"],
         "uploadedAt": row["uploaded_at"], "storageBackend": row["storage_backend"],
     }
+    has_gps = False
+    try:
+        if row["gps_lat"] is not None and row["gps_lng"] is not None:
+            has_gps = True
+    except (IndexError, KeyError):
+        pass
+    if has_gps:
+        d["gps"] = {
+            "lat": float(row["gps_lat"]),
+            "lng": float(row["gps_lng"]),
+            "accuracy": float(row["gps_accuracy"]) if row["gps_accuracy"] is not None else None,
+            "source": row["gps_source"],
+            "sourceType": row["gps_source_type"] or "gps",
+            "timestamp": row["gps_timestamp"],
+            "address": row["gps_address"],
+        }
+    else:
+        d["gps"] = None
+    return d
 
 
 class StoreError(Exception):
@@ -2505,7 +2548,8 @@ class ComplaintStore:
         result = []
         for r in rows:
             links = conn.execute(
-                "SELECT l.phase, e.evidence_id, e.role, e.content_type, e.byte_size, e.sha256, e.uploaded_at FROM work_order_evidence l "
+                "SELECT l.phase, e.evidence_id, e.role, e.content_type, e.byte_size, e.sha256, e.captured_at, e.uploaded_at, "
+                "e.gps_lat, e.gps_lng, e.gps_accuracy, e.gps_source, e.gps_source_type, e.gps_timestamp, e.gps_address FROM work_order_evidence l "
                 "JOIN evidence e ON e.pk = l.evidence_pk WHERE l.work_order_pk = ? ORDER BY l.pk", (r["pk"],)).fetchall()
             events = conn.execute(
                 "SELECT e.action, e.from_status, e.to_status, e.note, a.username, e.created_at FROM work_order_events e "
@@ -2516,8 +2560,16 @@ class ComplaintStore:
                 "startedAt": r["started_at"], "completedAt": r["completed_at"], "completionNote": r["completion_note"],
                 "createdBy": r["created_by"], "createdAt": r["created_at"], "updatedAt": r["updated_at"],
                 "overdue": bool(r["due_at"]) and r["status"] in lc.ACTIVE_WORK_ORDER and r["due_at"] < today,
-                "evidence": [{"phase": e["phase"], "evidenceId": e["evidence_id"], "role": e["role"], "contentType": e["content_type"],
-                              "byteSize": e["byte_size"], "sha256": e["sha256"], "uploadedAt": e["uploaded_at"]} for e in links],
+                "evidence": [{
+                    "phase": e["phase"], "evidenceId": e["evidence_id"], "role": e["role"], "contentType": e["content_type"],
+                    "byteSize": e["byte_size"], "sha256": e["sha256"], "capturedAt": e["captured_at"], "uploadedAt": e["uploaded_at"],
+                    "gps": {
+                        "lat": float(e["gps_lat"]), "lng": float(e["gps_lng"]),
+                        "accuracy": float(e["gps_accuracy"]) if e["gps_accuracy"] is not None else None,
+                        "source": e["gps_source"], "sourceType": e["gps_source_type"] or "gps",
+                        "timestamp": e["gps_timestamp"], "address": e["gps_address"],
+                    } if (e["gps_lat"] is not None and e["gps_lng"] is not None) else None,
+                } for e in links],
                 "history": [{"action": e["action"], "from": e["from_status"], "to": e["to_status"], "note": e["note"],
                              "by": e["username"], "at": e["created_at"]} for e in events],
             })
@@ -2761,11 +2813,16 @@ class ComplaintStore:
             lc.require_scope(case, actor)
             if order["status"] == "Cancelled":
                 raise RuleViolation(409, "invalid_transition", "Evidence cannot be added to a cancelled work order.")
+            gps_meta = meta.get("gps") or {}
             evidence_pk = conn.insert(
                 "INSERT INTO evidence (evidence_id, complaint_pk, role, storage_key, media_type, content_type, byte_size, sha256, captured_at, "
-                "uploaded_at, storage_backend, uploaded_by_staff_pk) VALUES (?, ?, 'repair', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "uploaded_at, storage_backend, uploaded_by_staff_pk, "
+                "gps_lat, gps_lng, gps_accuracy, gps_source, gps_source_type, gps_timestamp, gps_address) "
+                "VALUES (?, ?, 'repair', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (meta["evidenceId"], case["pk"], meta["storageKey"], meta["mediaType"], meta["contentType"], meta["byteSize"],
-                 meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"], meta.get("storageBackend", "local"), actor["pk"]))
+                 meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"], meta.get("storageBackend", "local"), actor["pk"],
+                 gps_meta.get("lat"), gps_meta.get("lng"), gps_meta.get("accuracy"), gps_meta.get("source"),
+                 gps_meta.get("sourceType"), gps_meta.get("timestamp"), gps_meta.get("address")))
             conn.execute("INSERT INTO work_order_evidence (work_order_pk, evidence_pk, phase, linked_by_staff_pk, linked_at) "
                          "VALUES (?, ?, 'after', ?, ?)", (order["pk"], evidence_pk, actor["pk"], now))
             self._timeline(conn, case["pk"], case["status"], "After-repair evidence was attached for review.", "work_order", actor, now)
@@ -2782,11 +2839,16 @@ class ComplaintStore:
             actor = self._actor(conn, staff_pk)
             lc.require_scope(case, actor)
             now = utc_now()
+            gps_meta = meta.get("gps") or {}
             evidence_pk = conn.insert(
                 "INSERT INTO evidence (evidence_id, complaint_pk, role, storage_key, media_type, content_type, byte_size, sha256, captured_at, "
-                "uploaded_at, storage_backend, uploaded_by_staff_pk) VALUES (?, ?, 'repair', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "uploaded_at, storage_backend, uploaded_by_staff_pk, "
+                "gps_lat, gps_lng, gps_accuracy, gps_source, gps_source_type, gps_timestamp, gps_address) "
+                "VALUES (?, ?, 'repair', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (meta["evidenceId"], case["pk"], meta["storageKey"], meta["mediaType"], meta["contentType"], meta["byteSize"],
-                 meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"], meta.get("storageBackend", "local"), actor["pk"]))
+                 meta["sha256"], meta.get("capturedAt"), meta["uploadedAt"], meta.get("storageBackend", "local"), actor["pk"],
+                 gps_meta.get("lat"), gps_meta.get("lng"), gps_meta.get("accuracy"), gps_meta.get("source"),
+                 gps_meta.get("sourceType"), gps_meta.get("timestamp"), gps_meta.get("address")))
             self._timeline(conn, case["pk"], case["status"], "After-repair evidence was attached for review.", "work_order", actor, now)
             self._touch(conn, case["pk"], now)
             self._audit(conn, case["pk"], actor, "repair_evidence_added",

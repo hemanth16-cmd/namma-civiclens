@@ -103,14 +103,17 @@ def _parse_captured_at(raw: str) -> str | None:
 class _UploadReader:
     """Callbacks for python-multipart's streaming parser. Raises ApiProblem on the first violation."""
 
-    def __init__(self, storage: EvidenceStorage, settings: UploadSettings):
+    def __init__(self, storage: EvidenceStorage, settings: UploadSettings, allowed_fields: tuple[str, ...] | None = None):
         self.storage = storage
         self.settings = settings
+        self.allowed_fields = set(allowed_fields if allowed_fields is not None else ("file", "capturedAt"))
         self.pending: PendingObject | None = None
         self.kind: FileKind | None = None
         self.filename: str | None = None
         self.declared_type: str | None = None
         self.captured_raw = bytearray()
+        self.text_fields: dict[str, str] = {}
+        self._current_field_raw = bytearray()
         self.file_seen = False
         self.finished = False
         self._head = bytearray()
@@ -150,18 +153,18 @@ class _UploadReader:
             self.filename = filename.decode("utf-8", "replace") if filename else None
             ctype, _ = parse_options_header(self._headers.get(b"content-type", b""))
             self.declared_type = ctype.decode("latin-1").lower() or None
-        elif name == "capturedAt":
-            pass
+        elif name in self.allowed_fields:
+            self._current_field_raw = bytearray()
         else:
             raise ApiProblem(422, "validation_error", "Unexpected form field. Send only 'file' and optional 'capturedAt'.")
         self._part = name
 
     def _part_data(self, data: bytes, start: int, end: int):
         chunk = data[start:end]
-        if self._part == "capturedAt":
-            self.captured_raw.extend(chunk)
-            if len(self.captured_raw) > TEXT_FIELD_LIMIT:
-                raise ApiProblem(422, "validation_error", "capturedAt is too long.")
+        if self._part and self._part != "file":
+            self._current_field_raw.extend(chunk)
+            if len(self._current_field_raw) > TEXT_FIELD_LIMIT:
+                raise ApiProblem(422, "validation_error", f"{self._part} is too long.")
             return
         if self.kind is None:
             self._head.extend(chunk)
@@ -200,6 +203,11 @@ class _UploadReader:
             if not self._head:
                 raise ApiProblem(422, "empty_file", "The file is empty.")
             self._start_file(bytes(self._head))  # a file shorter than HEAD_BYTES
+        elif self._part and self._part != "file":
+            val = bytes(self._current_field_raw).decode("utf-8", "replace").strip()
+            self.text_fields[self._part] = val
+            if self._part == "capturedAt":
+                self.captured_raw = bytearray(self._current_field_raw)
         self._part = None
 
     def _end(self):
@@ -213,7 +221,8 @@ async def _next_chunk(stream, timeout: float) -> bytes | None:
         return None
 
 
-async def receive_upload(request: Request, storage: EvidenceStorage, settings: UploadSettings) -> tuple[_UploadReader, str | None]:
+async def receive_upload(request: Request, storage: EvidenceStorage, settings: UploadSettings,
+                         allowed_fields: tuple[str, ...] | None = None) -> tuple[_UploadReader, str | None]:
     """Stream the multipart body into storage. On any failure the partial file is deleted."""
     ctype, params = parse_options_header(request.headers.get("content-type", ""))
     boundary = params.get(b"boundary")
@@ -223,7 +232,7 @@ async def receive_upload(request: Request, storage: EvidenceStorage, settings: U
     if declared_length and declared_length.isdigit() and int(declared_length) > settings.max_request_bytes:
         raise ApiProblem(413, "payload_too_large", "The upload is larger than the allowed size.")
 
-    reader = _UploadReader(storage, settings)
+    reader = _UploadReader(storage, settings, allowed_fields=allowed_fields)
     parser = MultipartParser(boundary, reader.callbacks())
     received = 0
     stream = request.stream()

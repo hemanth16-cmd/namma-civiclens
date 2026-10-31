@@ -121,12 +121,13 @@ class AiStore:
     def evidence_context(self, evidence_pk: int) -> dict | None:
         """The evidence row (store format, with pk) plus its complaint's category, GPS and public ID."""
         def run(conn):
-            row = conn.execute("SELECT e.*, c.public_id, c.category, c.gps_lat, c.gps_lng FROM evidence e "
+            row = conn.execute("SELECT e.*, c.public_id, c.category, c.gps_lat AS complaint_lat, c.gps_lng AS complaint_lng FROM evidence e "
                                "JOIN complaints c ON c.pk = e.complaint_pk WHERE e.pk = ?", (evidence_pk,)).fetchone()
             if row is None:
                 return None
+            cgps = (row["complaint_lat"], row["complaint_lng"]) if row["complaint_lat"] is not None and row["complaint_lng"] is not None else None
             return _evidence_dict(row) | {"pk": row["pk"], "complaintId": row["public_id"], "category": row["category"],
-                                          "complaintGps": (row["gps_lat"], row["gps_lng"])}
+                                          "complaintGps": cgps}
         return self._read("Evidence lookup", run)
 
     def evidence_pk(self, evidence_id: str) -> int | None:
