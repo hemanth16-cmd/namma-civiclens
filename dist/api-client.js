@@ -288,6 +288,22 @@ export function createApiClient({baseUrl, fetchImpl = globalThis.fetch, timeoutM
       return toStaffComplaint(await request('POST', `/staff/work-orders/${encodeURIComponent(workOrderId)}/transitions`, {to, expectedStatus, note}, {headers: staffAuth(token)}));
     },
 
+    async uploadCaseRepairEvidence(token, id, blob) {
+      const form = new FormData();
+      form.append('file', blob, 'repair.jpg');
+      const d = await request('POST', `/staff/complaints/${encodeURIComponent(id)}/repair-evidence`, form, {headers: staffAuth(token), timeout: uploadTimeoutMs});
+      if (typeof d.evidenceId !== 'string') throw new ApiError('Repair evidence could not be confirmed.', {code: 'malformed_response'});
+      return d;
+    },
+
+    async fetchCaseRepairEvidence(token, id, evidenceId) {
+      return evidenceBlob(await request('GET', `/staff/complaints/${encodeURIComponent(id)}/repair-evidence/${encodeURIComponent(evidenceId)}`, undefined, {headers: staffAuth(token), timeout: uploadTimeoutMs, raw: true}));
+    },
+
+    async fetchPublicEvidence(id, evidenceId) {
+      return evidenceBlob(await request('GET', `/complaints/${encodeURIComponent(id)}/public-evidence/${encodeURIComponent(evidenceId)}`, undefined, {timeout: uploadTimeoutMs, raw: true}));
+    },
+
     /** After-repair JPEG for a work order (multipart). Resolves to the evidence receipt. */
     async uploadRepairEvidence(token, workOrderId, blob) {
       const form = new FormData();
@@ -601,6 +617,9 @@ export function toResidentComplaint(d) {
     ownedAt: d.ownedAt ?? null,
     timeline: Array.isArray(d.timeline) ? d.timeline.map(t => ({status: String(t.status), text: String(t.text), date: t.date})) : [],
     verificationLog: toVerificationLog(d.verificationLog),
+    publicEvidence: (Array.isArray(d.publicEvidence) ? d.publicEvidence : []).filter(e => /^ev_[A-Za-z0-9_-]{22}$/.test(e?.evidenceId) && ['before', 'after'].includes(e.phase)).map(e => ({
+      evidenceId: e.evidenceId, phase: e.phase, mediaType: e.mediaType === 'video' ? 'video' : 'photo', uploadedAt: e.uploadedAt ?? null
+    })),
     evidence: toOwnerEvidence(d.evidence)
   };
 }
@@ -732,6 +751,9 @@ export function toStaffComplaint(d) {
     verificationLog: toVerificationLog(d.verificationLog),
     evidence: e && typeof e === 'object' ? {evidenceId: String(e.evidenceId ?? ''), mediaType: e.mediaType === 'video' ? 'video' : 'photo',
       contentType: String(e.contentType ?? ''), byteSize: Number(e.byteSize) || 0, sha256: String(e.sha256 ?? ''), capturedAt: e.capturedAt ?? null, uploadedAt: e.uploadedAt ?? null} : null,
+    repairEvidence: (Array.isArray(d.repairEvidence) ? d.repairEvidence : []).map(e => ({
+      evidenceId: String(e.evidenceId ?? ''), mediaType: 'photo', uploadedAt: e.uploadedAt ?? null, capturedAt: e.capturedAt ?? null
+    })),
     ...toManagement(d)
   };
 }
@@ -847,7 +869,11 @@ export function toPublicRecord(d) {
     verification: String(d.verification ?? ''), department: String(d.department ?? ''), updated: d.updated ?? null,
     mergedInto: publicIdOrNull(d.mergedInto),
     timeline: d.timeline.map(t => ({status: String(t?.status ?? ''), text: String(t?.text ?? ''), date: t?.date ?? null})),
-    verificationLog: toVerificationLog(d.verificationLog)
+    mergedInto: publicIdOrNull(d.mergedInto),
+    verificationLog: toVerificationLog(d.verificationLog),
+    publicEvidence: (Array.isArray(d.publicEvidence) ? d.publicEvidence : []).filter(e => /^ev_[A-Za-z0-9_-]{22}$/.test(e?.evidenceId) && ['before', 'after'].includes(e.phase)).map(e => ({
+      evidenceId: e.evidenceId, phase: e.phase, mediaType: e.mediaType === 'video' ? 'video' : 'photo', uploadedAt: e.uploadedAt ?? null
+    }))
   };
 }
 

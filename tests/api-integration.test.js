@@ -95,11 +95,11 @@ test('missing configuration means local mode', async () => {
   resetApiConfig();
 });
 
-test('the shipped api-config.json has a valid configuration', () => {
+test('the shipped api-config.json explicitly selects a valid server configuration', () => {
   const shipped = JSON.parse(readFileSync(new URL('../dist/api-config.json', import.meta.url), 'utf8'));
-  const parsed = parseApiConfig(shipped);
-  assert.ok(['local', 'backend'].includes(parsed.mode));
-  assert.equal(parsed.problem, null);
+  assert.equal(parseApiConfig(shipped).mode, 'backend');
+  assert.equal(parseApiConfig(shipped).problem, null);
+  assert.match(shipped.baseUrl, /^https:\/\//);
 });
 
 test('backend mode is used only when explicitly configured with a valid URL', async () => {
@@ -157,7 +157,7 @@ test('complaint creation posts JSON without credentials and returns the receipt'
 test('public tracking returns only allowlisted fields, even if the server sends more', async () => {
   const leaky = publicBody('NCL-2026-K7Q2MX', {claim: CLAIM, claimHash: 'scrypt$x', gps: {lat: 13}, owner: 'x@example.com', internal: 'note'});
   const record = await createApiClient({baseUrl: BASE, fetchImpl: mockFetch(json(200, leaky))}).getPublicComplaint('NCL-2026-K7Q2MX');
-  assert.deepEqual(Object.keys(record).sort(), ['area', 'category', 'department', 'id', 'mergedInto', 'status', 'timeline', 'updated', 'verification', 'verificationLog']);
+  assert.deepEqual(Object.keys(record).sort(), ['area', 'category', 'department', 'id', 'mergedInto', 'publicEvidence', 'status', 'timeline', 'updated', 'verification', 'verificationLog']);
   assert.equal(record.mergedInto, null);
   for (const secret of [CLAIM, 'scrypt', 'owner', 'internal', '"lat"']) assert.ok(!JSON.stringify(record).includes(secret), secret);
 });

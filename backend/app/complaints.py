@@ -105,13 +105,14 @@ def list_community_complaints(request: Request, response: Response,
 
 
 @router.get("/{public_id}", response_model=PublicComplaint, dependencies=[Depends(_limit_track)])
-def get_public_complaint(public_id: str, request: Request) -> dict:
+def get_public_complaint(public_id: str, request: Request, response: Response) -> dict:
     if not PUBLIC_ID_PATTERN.fullmatch(public_id):
         raise HTTPException(status_code=404, detail=NOT_FOUND)
     record = _store(request).get(public_id)
     if record is None:
         raise HTTPException(status_code=404, detail=NOT_FOUND)
-    return record
+    response.headers["Cache-Control"] = "no-store"
+    return {**record, "publicEvidence": _store(request).public_evidence(public_id)}
 
 
 @router.post("/{public_id}/upload-token", response_model=UploadTokenResponse)
@@ -153,3 +154,15 @@ def citizen_response(public_id: str, payload: CitizenResponseIn, request: Reques
         raise ApiProblem(401, "unauthorized", "The complaint ID and claim code do not match.")
     response.headers["Cache-Control"] = "no-store"
     return store.citizen_response(public_id, payload.response, client_ip(request, request.app.state.rate_limit_settings.trusted_proxies))
+
+
+@router.get("/{public_id}/public-evidence/{evidence_id}", dependencies=[Depends(_limit_track)])
+def public_evidence(public_id: str, evidence_id: str, request: Request):
+    """Only approved public evidence, streamed from private storage without disclosing its URL."""
+    from .evidence_access import open_and_stream
+    if not PUBLIC_ID_PATTERN.fullmatch(public_id) or not re.fullmatch(r"ev_[A-Za-z0-9_-]{22}", evidence_id):
+        raise ApiProblem(404, "evidence_not_found", "No public evidence was found.")
+    evidence = _store(request).case_evidence(public_id, evidence_id)
+    if evidence is None:
+        raise ApiProblem(404, "evidence_not_found", "No public evidence was found.")
+    return open_and_stream(request, evidence, f"{public_id}-{evidence['role']}", lambda: None)

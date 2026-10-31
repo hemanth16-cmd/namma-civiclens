@@ -17,8 +17,8 @@ runs on local throwaway infrastructure. No production data was created, changed 
 Browser (Vercel, static dist/)                     Render (FastAPI, backend/app)                 Supabase
 ───────────────────────────────                    ──────────────────────────────               ─────────
 api-config.json  mode=backend → Render URL
-                                                                                                 
-SERVER MODE (real data)                                                                          
+
+SERVER MODE (real data)
   capture.js / report-gateway.js ──► api-client.js ──► POST /complaints ............ complaints.py ─► store.py ─► PostgreSQL
                                                     ──► POST /complaints/{id}/evidence  evidence.py ─► EvidenceStorage ─► private bucket
   public.js renderServerTrack ─────► api-client.js ──► GET /complaints/{id} ......... complaints.py ─► store.py

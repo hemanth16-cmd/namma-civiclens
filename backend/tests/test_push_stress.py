@@ -156,4 +156,3 @@ def test_unread_count_and_mark_all_read(push_api):
 
     # Unread count is now 0
     assert push_api.get("/api/v1/notifications/unread-count", headers=headers).json()["unreadCount"] == 0
-

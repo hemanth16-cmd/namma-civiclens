@@ -185,8 +185,8 @@ def test_after_repair_evidence_is_streamed_to_staff_and_logged(api, staff, evide
 
 def test_invalid_transitions_explanations_and_stale_state(api, staff):
     cid = report(api)["id"]
-    move(api, staff["ravi"], cid, "Marked Resolved", "Submitted", "skip", expect=409)
-    move(api, staff["ravi"], cid, "In Progress", "Submitted", expect=409)
+    move(api, staff["ravi"], cid, "Marked Resolved", "Submitted", "skip", expect=403)
+    move(api, staff["ravi"], cid, "In Progress", "Submitted", expect=403)
     move(api, staff["ravi"], cid, "Under Review", "Under Review", expect=409)  # stale expectedStatus
     r = api.post(f"{API}/staff/complaints/{cid}/transitions", json={"to": "Closed", "expectedStatus": "Submitted"}, headers=staff["ravi"])
     assert r.status_code == 422
@@ -308,7 +308,7 @@ def test_internal_notes_and_staff_identities_never_reach_the_public(api, staff):
                    receipt["claim"], str(payload()["gps"]["lat"])):
         assert secret not in raw, secret
     pub = public(api, cid)
-    assert set(pub) == {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog", "mergedInto"}
+    assert set(pub) == {"id", "category", "area", "status", "verification", "department", "updated", "timeline", "verificationLog", "publicEvidence", "mergedInto"}
     assert "Inspection scheduled for Monday." in [t["text"] for t in pub["timeline"]]
     assert {e["actor"] for e in pub["verificationLog"]} <= {"Citizen", "Civic team"}
     staff_view = api.get(f"{API}/staff/complaints/{cid}", headers=staff["ravi"]).json()
@@ -440,3 +440,65 @@ def test_existing_submission_tracking_and_public_shape_are_unchanged(api):
     pub = public(api, receipt["id"])
     assert pub["status"] == "Submitted" and pub["verification"] == "Pending Verification" and pub["department"] == "Awaiting civic review"
     assert pub["timeline"] == [{"status": "Submitted", "text": "Report received by the Namma CivicLens API.", "date": pub["timeline"][0]["date"]}]
+
+
+def test_direct_repair_upload_publication_and_reopening(api, staff):
+    receipt = report(api, shareEvidence=True)
+    cid = receipt['id']
+    url = f'{API}/staff/complaints/{cid}/repair-evidence'
+    assert api.post(url, files={'file': ('repair.jpg', JPEG, 'image/jpeg')}).status_code == 401
+    upload = api.post(url, files={'file': ('repair.jpg', JPEG, 'image/jpeg')}, headers=staff['asha'])
+    assert upload.status_code == 201, upload.text
+    eid = upload.json()['evidenceId']
+    case = api.get(f'{API}/staff/complaints/{cid}', headers=staff['asha']).json()
+    assert case['workOrders'] == [], 'direct evidence must not manufacture a work order'
+    assert case['repairEvidence'][0]['evidenceId'] == eid
+    before = public(api, cid)['publicEvidence']
+    assert [e['phase'] for e in before] == ['before']
+    assert api.get(f'{API}/complaints/{cid}/public-evidence/{before[0]["evidenceId"]}').content == JPEG
+    public_url = f'{API}/complaints/{cid}/public-evidence/{eid}'
+    assert api.get(public_url).status_code == 404, 'unfinished repair is not public'
+    private_url = f'{API}/staff/complaints/{cid}/repair-evidence/{eid}'
+    assert api.get(private_url, headers=staff['asha']).content == JPEG
+    # Admin can correct any operational stage, but must explain and use the latest version.
+    move(api, staff['meera'], cid, 'Marked Resolved', 'Submitted', 'Repair inspected and completed.')
+    media = public(api, cid)['publicEvidence']
+    assert [e['phase'] for e in media] == ['before', 'after']
+    assert set(media[1]) == {'evidenceId', 'phase', 'mediaType', 'uploadedAt'}
+    got = api.get(public_url)
+    assert got.status_code == 200 and got.content == JPEG
+    assert got.headers['cache-control'] == 'no-store, private'
+    move(api, staff['meera'], cid, 'Under Construction', 'Marked Resolved', 'Repair failed inspection; reopening.')
+    assert api.get(public_url).status_code == 404, 'publication must be rechecked after reopening'
+    assert [e['phase'] for e in public(api, cid)['publicEvidence']] == ['before']
+
+
+def test_private_original_and_other_case_evidence_cannot_be_published(api, staff):
+    cid = report(api, shareEvidence=False)['id']
+    assign(api, staff['ravi'], cid)
+    url = f'{API}/staff/complaints/{cid}/repair-evidence'
+    assert api.post(url, files={'file': ('repair.jpg', JPEG, 'image/jpeg')}, headers=staff['bilal']).status_code == 403
+    upload = api.post(url, files={'file': ('repair.jpg', JPEG, 'image/jpeg')}, headers=staff['asha'])
+    assert upload.status_code == 201
+    case = api.get(f'{API}/staff/complaints/{cid}', headers=staff['asha']).json()
+    original = case['evidence']['evidenceId']
+    move(api, staff['meera'], cid, 'Marked Resolved', 'Assigned', 'Inspected by administrator.')
+    assert [e['phase'] for e in public(api, cid)['publicEvidence']] == ['after']
+    assert api.get(f'{API}/complaints/{cid}/public-evidence/{original}').status_code == 404
+    other = report(api)['id']
+    eid = upload.json()['evidenceId']
+    assert api.get(f'{API}/complaints/{other}/public-evidence/{eid}').status_code == 404
+    assert api.post(url, files={'file': ('video.webm', WEBM, 'video/webm')}, headers=staff['asha']).status_code == 422
+
+
+def test_extended_stages_persist_and_keep_citizen_verification_independent(api, staff):
+    cid = report(api)['id']
+    assign(api, staff['ravi'], cid)
+    current = 'Assigned'
+    for stage in ['Under Construction', 'On Hold', 'In Progress', 'Work Completed', 'Verification In Progress', 'Marked Resolved']:
+        moved = move(api, staff['asha'], cid, stage, current, 'Progress checked on site.')
+        assert moved['status'] == stage
+        assert public(api, cid)['status'] == stage
+        assert moved['verification'] == 'Pending Verification'
+        current = stage
+    move(api, staff['asha'], cid, 'Under Construction', current, 'Reopen', expect=403)

@@ -3,6 +3,7 @@ import {api, categories, statuses, verificationStates, esc, assessPriority} from
 import {icon, categoryIcon, resolutionState, workspaceShell, heading, btn, link, statusPill, verificationPill, priorityPill, notice, empty, panel, panelHead, toast, fmtDate, fmtDateTime, confirmDialog} from '../ui.js';
 import {state, viewer, setSession, readPrefs, writePrefs, readLastRead, writeLastRead, addCleanup} from '../state.js';
 import {navigate} from '../router.js';
+import {geographyFilters, syncWardOptions, wardForRecord} from '../ward-catalog.js';
 import {filterRecords, sortRecords, readFilters} from '../filters.js';
 import {mountCityMap} from './map.js';
 import {workspaceRecords, usesServerRecords, dailyActivity, serverClient, isServerResident, loadPublicCommunityComplaints} from '../server-records.js';
@@ -212,7 +213,8 @@ export async function renderComplaints(root, mode) {
   mount(root, title, `
     ${heading({eyebrow: admin ? 'Operations' : 'Your workspace', title, lead, actions})}
     <section class="panel panel-flush">
-      ${filterBar('complaint-filter', {withVerification: admin, withCategory: true, extra: mode === 'community' ? '<div class="field"><label for="complaint-scope">Show</label><select id="complaint-scope" name="scope"><option value="">All community issues</option><option value="following">Issues I follow</option></select></div>' : ''})}
+      ${filterBar('complaint-filter', {withVerification: admin, withCategory: true, extra: geographyFilters('complaint-filter') + (mode === 'community' ? '<div class="field"><label for="complaint-scope">Show</label><select id="complaint-scope" name="scope"><option value="">All community issues</option><option value="following">Issues I follow</option></select></div>' : '')})}
+      <p class="micro filter-note">Ward and zone names follow the supplied e-Aasthi directory. Unmatched neighbourhoods remain unassigned; this directory contains no geographic boundaries.</p>
       <p class="result-count" id="result-count" role="status" aria-live="polite"></p>
       <div id="complaint-results"></div>
     </section>`);
@@ -220,6 +222,7 @@ export async function renderComplaints(root, mode) {
   const count = root.querySelector('#result-count');
   const form = root.querySelector('#complaint-filter');
   const paint = () => {
+    syncWardOptions(form);
     const f = readFilters(form);
     const scoped = f.scope === 'following' ? base.filter(r => r.following) : base;
     const list = sortRecords(filterRecords(scoped, f), f.sort);
@@ -234,7 +237,7 @@ export async function renderComplaints(root, mode) {
         <thead><tr><th scope="col">Complaint</th><th scope="col">Area and category</th>${admin ? '<th scope="col">Priority</th>' : ''}<th scope="col">Lifecycle</th><th scope="col">Verification</th></tr></thead>
         <tbody>${list.map(r => `<tr>
           <td><span class="cell-title"><span class="issue-symbol-sm ${resolutionState(r).className}" aria-hidden="true">${categoryIcon(r.category)}</span><span><a href="#/issue/${esc(r.id)}">${esc(r.title)}</a><small class="code-inline">${esc(r.id)}</small></span></span></td>
-          <td>${esc(r.area)}<small>${esc(r.category)}</small></td>
+          <td>${esc(r.area)}<small>${esc(r.category)}</small><small>${wardForRecord(r) ? esc(wardForRecord(r).wardName + ' · ' + wardForRecord(r).zoneName) : 'Ward / zone unassigned'}</small></td>
           ${admin ? `<td>${r.priority ? priorityPill(r.priority.band) : ''}<small>Score ${r.priority?.score ?? '—'}</small></td>` : ''}
           <td>${statusPill(r.status)}</td>
           <td>${verificationPill(r.verification)}</td>

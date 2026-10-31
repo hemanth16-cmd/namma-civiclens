@@ -231,7 +231,7 @@ def test_public_tracking_never_reveals_the_owner(api):
     for secret in ("asha", "example.org", "res_", "owner", "ownedvia", owned["claim"], "13.100712", "deep pothole"):
         assert secret not in text, secret
     assert set(public.json()) == {"id", "category", "area", "status", "verification", "department", "updated", "timeline",
-                                  "verificationLog", "mergedInto"}
+                                  "verificationLog", "publicEvidence", "mergedInto"}
     # The community list (all of Bengaluru) shows the same complaint without any owner details either.
     listed = api.get(f"{API}/complaints", params={"limit": 100})
     assert owned["id"] in listed.text

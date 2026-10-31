@@ -7,6 +7,7 @@ import {locationSourceLabel} from '../presentation.js';
 import {navigate, rerender} from '../router.js';
 import {readFilters} from '../filters.js';
 import {verificationStates, statuses, citizenResponses} from '../services.js';
+import {reportMode} from '../report-gateway.js';
 import {usesServerRecords} from '../server-records.js';
 import {renderServerCase} from './server-case.js';
 
@@ -50,6 +51,7 @@ function figure({title, url, mediaType, gps, emptyGeo, captured, uploaded, label
 export async function renderIssue(root, id) {
   // Server mode, signed-in staff: the same case page, built from the CivicLens server (views/server-case.js).
   if (await usesServerRecords()) return renderServerCase(root, id);
+  if (await reportMode() === 'backend') return navigate('track/' + encodeURIComponent(id));
   const v = viewer();
   const d = await api.detail(id, v);
   if (!d) {

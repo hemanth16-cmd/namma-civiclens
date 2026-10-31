@@ -108,4 +108,4 @@ def test_public_endpoints_never_expose_evidence(api):
     receipt, upload = report(api, asha)
     for url in (f"{API}/complaints/{receipt['id']}", f"{API}/complaints"):
         body = api.get(url).text
-        assert upload["evidenceId"] not in body and "evidence" not in body.lower().replace("evidencecount", ""), url
+        assert upload["evidenceId"] not in body and "evidence" not in body.lower().replace("publicevidence", "").replace("evidencecount", ""), url
