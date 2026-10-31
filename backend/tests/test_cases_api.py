@@ -502,3 +502,157 @@ def test_extended_stages_persist_and_keep_citizen_verification_independent(api, 
         assert moved['verification'] == 'Pending Verification'
         current = stage
     move(api, staff['asha'], cid, 'Under Construction', current, 'Reopen', expect=403)
+
+
+def test_repair_evidence_geotagging_direct_and_work_order(api, staff):
+    rep = report(api)
+    cid = rep["id"]
+    assign(api, staff["ravi"], cid, assignee="asha")
+
+    # 1. Direct case repair upload with full GPS metadata
+    gps_data = {
+        "lat": "12.9716",
+        "lng": "77.5946",
+        "accuracy": "15.5",
+        "source": "Browser GPS",
+        "sourceType": "gps",
+        "timestamp": "2026-10-30T10:00:00.000Z",
+        "address": "MG Road, Bengaluru",
+        "capturedAt": "2026-10-30T09:59:55.000Z"
+    }
+    res = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data=gps_data,
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert res.status_code == 201, res.text
+    direct_eid = res.json()["evidenceId"]
+
+    # 2. Check staff complaint retrieval returns GPS metadata on repairEvidence
+    case_res = api.get(f"{API}/staff/complaints/{cid}", headers=staff["asha"])
+    assert case_res.status_code == 200
+    case = case_res.json()
+    assert len(case["repairEvidence"]) == 1
+    ev = case["repairEvidence"][0]
+    assert ev["evidenceId"] == direct_eid
+    assert ev["capturedAt"] == "2026-10-30T09:59:55.000Z"
+    assert ev["gps"] is not None
+    assert ev["gps"]["lat"] == 12.9716
+    assert ev["gps"]["lng"] == 77.5946
+    assert ev["gps"]["accuracy"] == 15.5
+    assert ev["gps"]["source"] == "Browser GPS"
+    assert ev["gps"]["sourceType"] == "gps"
+    assert ev["gps"]["address"] == "MG Road, Bengaluru"
+
+    # 3. Create a work order and upload repair evidence with GPS
+    case = act(api, staff["asha"], f"/complaints/{cid}/work-orders", {"team": "Ward 4 crew", "dueAt": "2099-01-31"}, 201)
+    wo_id = case["workOrders"][0]["id"]
+    act(api, staff["asha"], f"/work-orders/{wo_id}/transitions", {"to": "In Progress", "expectedStatus": "Open"})
+
+    wo_gps_data = {
+        "lat": "12.9720",
+        "lng": "77.5950",
+        "accuracy": "10.0",
+        "source": "EXIF",
+        "sourceType": "gps",
+        "timestamp": "2026-10-30T10:15:00.000Z",
+        "capturedAt": "2026-10-30T10:14:50.000Z"
+    }
+    wo_up = api.post(
+        f"{API}/staff/work-orders/{wo_id}/evidence",
+        data=wo_gps_data,
+        files={"file": ("wo_repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert wo_up.status_code == 201, wo_up.text
+    wo_eid = wo_up.json()["evidenceId"]
+
+    # 4. Check work order evidence list has gps
+    case_res2 = api.get(f"{API}/staff/complaints/{cid}", headers=staff["asha"])
+    order = case_res2.json()["workOrders"][0]
+    after_evs = [e for e in order["evidence"] if e["phase"] == "after"]
+    assert len(after_evs) == 1
+    assert after_evs[0]["evidenceId"] == wo_eid
+    assert after_evs[0]["capturedAt"] == "2026-10-30T10:14:50.000Z"
+    assert after_evs[0]["gps"]["lat"] == 12.9720
+    assert after_evs[0]["gps"]["lng"] == 77.5950
+    assert after_evs[0]["gps"]["accuracy"] == 10.0
+
+    # 5. Public evidence after resolution does NOT leak coordinates or addresses
+    act(api, staff["asha"], f"/work-orders/{wo_id}/transitions", {"to": "Completed", "expectedStatus": "In Progress", "note": "All done"})
+    act(api, staff["meera"], f"/complaints/{cid}/transitions", {"to": "Marked Resolved", "expectedStatus": "In Progress", "explanation": "Inspected"})
+
+    pub = public(api, cid)
+    pub_ev = pub["publicEvidence"]
+    assert len(pub_ev) >= 2
+    for p in pub_ev:
+        assert "lat" not in p
+        assert "lng" not in p
+        assert "gps" not in p
+        assert "address" not in p
+        assert "storageKey" not in p
+
+
+def test_repair_evidence_gps_validation(api, staff):
+    rep = report(api)
+    cid = rep["id"]
+    assign(api, staff["ravi"], cid, assignee="asha")
+
+    # Invalid lat > 90
+    bad_lat = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data={"lat": "95.0", "lng": "77.0"},
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert bad_lat.status_code == 422
+    assert "out of range" in bad_lat.text
+
+    # Invalid lng < -180
+    bad_lng = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data={"lat": "13.0", "lng": "-185.0"},
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert bad_lng.status_code == 422
+    assert "out of range" in bad_lng.text
+
+    # Negative accuracy
+    bad_acc = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data={"lat": "13.0", "lng": "77.0", "accuracy": "-5"},
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert bad_acc.status_code == 422
+
+    # Invalid sourceType
+    bad_src = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        data={"lat": "13.0", "lng": "77.0", "sourceType": "telepathy"},
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert bad_src.status_code == 422
+
+
+def test_gallery_upload_without_gps_is_accepted_as_unverified(api, staff):
+    rep = report(api)
+    cid = rep["id"]
+    assign(api, staff["ravi"], cid, assignee="asha")
+
+    # Upload with no GPS data (gallery upload without EXIF)
+    res = api.post(
+        f"{API}/staff/complaints/{cid}/repair-evidence",
+        files={"file": ("repair.jpg", JPEG, "image/jpeg")},
+        headers=staff["asha"]
+    )
+    assert res.status_code == 201
+    eid = res.json()["evidenceId"]
+
+    case = api.get(f"{API}/staff/complaints/{cid}", headers=staff["asha"]).json()
+    ev = next(e for e in case["repairEvidence"] if e["evidenceId"] == eid)
+    assert ev["gps"] is None
+    assert ev["capturedAt"] is None

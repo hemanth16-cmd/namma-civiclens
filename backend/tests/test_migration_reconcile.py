@@ -124,7 +124,8 @@ def test_this_branch_starts_on_every_known_state_without_changing_it(engine_targ
         assert db.features() == {"duplicate_detection": "adopted" if extra.get(8) == "dup" else "applied",
                                  "resident_accounts": "applied",
                                  "ward_zone_operations": "applied",
-                                 "ai_analysis": "adopted" if extra.get(8) == "ai" else "applied"}
+                                 "ai_analysis": "adopted" if extra.get(8) == "ai" else "applied",
+                                 "repair_evidence_geotagging": "applied"}
         _check_preserved(db, refs)
         _check_unowned(db, refs)
     finally:
@@ -145,7 +146,8 @@ def test_reconciliation_recipe_converges_every_state(engine_target, state, monke
         assert AI_TABLES <= tables and DUP_TABLES <= tables, "both branches' tables exist afterwards"
         expected = {"ai_analysis": "adopted" if extra.get(8) == "ai" else "applied",
                     "duplicate_detection": "adopted" if extra.get(8) == "dup" else "applied",
-                    "resident_accounts": "applied", "ward_zone_operations": "applied"}
+                    "resident_accounts": "applied", "ward_zone_operations": "applied",
+                    "repair_evidence_geotagging": "applied"}
         assert db.features() == expected
         assert db.schema_version() == version
         with closing(db.connect()) as conn:
@@ -166,7 +168,7 @@ def test_merged_duplicate_detection_is_the_verbatim_core_platform_migration():
     feature = next(f for f in store_mod.FEATURES if f.name == "duplicate_detection")
     assert feature.sqlite.strip() == DUPLICATES_V8_SQLITE.strip() and feature.postgres.strip() == DUPLICATES_V8_POSTGRES.strip()
     assert feature.adopt_if == "complaint_merges"
-    assert [f.name for f in store_mod.FEATURES] == ["duplicate_detection", "resident_accounts", "ward_zone_operations", "ai_analysis"]
+    assert [f.name for f in store_mod.FEATURES] == ["duplicate_detection", "resident_accounts", "ward_zone_operations", "ai_analysis", "repair_evidence_geotagging"]
 
 
 def test_a_fresh_database_gets_every_named_feature(tmp_path, monkeypatch):
@@ -174,7 +176,7 @@ def test_a_fresh_database_gets_every_named_feature(tmp_path, monkeypatch):
     db = SQLiteDatabase(tmp_path / "fresh.sqlite3")
     ComplaintStore(database=db).initialize()
     assert db.features() == {"ai_analysis": "applied", "duplicate_detection": "applied", "resident_accounts": "applied",
-                            "ward_zone_operations": "applied"}
+                            "ward_zone_operations": "applied", "repair_evidence_geotagging": "applied"}
     assert db.schema_version() == 7
 
 
